@@ -1,85 +1,84 @@
 local t = require("spec.support.runner")
 local match = require("sim.match")
+local teams = require("data.teams")
 local Vec2 = require("core.vec2")
 
----@param speed integer
----@param power integer
----@return PlayerData
-local function player(speed, power)
-    return {
-        id = "test",
-        name = "Test",
-        planet = "Testworld",
-        position = "forward",
-        stats = { speed = speed, power = power, technique = 5, defense = 5, stamina = 5 },
-        trait = "none",
-    }
+local function new_match()
+    return match.new({ home = teams.nebula, away = teams.orion, field = { w = 960, h = 540 } })
 end
 
-local NO_MOVE = { move = Vec2.new(0, 0), shoot = false }
+local NO_INPUT = { move = Vec2.new(0, 0), shoot = false, pass = false, switch = false }
 
 t.describe("match.new", function()
-    t.it("starts with the ball, no score", function()
-        local s = match.new(player(5, 5), 960, 540)
-        t.is_true(s.has_ball)
-        t.eq(s.score, 0)
+    t.it("kicks off with 10 players and the home side in possession", function()
+        local s = new_match()
+        t.eq(#s.players, 10)
+        t.is_true(s.owner == s.controlled, "controlled player should start with the ball")
+        t.eq(s.score.home, 0)
+        t.eq(s.score.away, 0)
+        t.is_true(s.players[s.controlled].team == "home")
+        t.is_true(not s.players[s.controlled].is_keeper)
     end)
 end)
 
-t.describe("match.step movement (M1: speed stat -> motion)", function()
-    t.it("moving right increases player x", function()
-        local s = match.new(player(5, 5), 960, 540)
-        local x0 = s.player.x
-        match.step(s, 0.1, { move = Vec2.new(1, 0), shoot = false })
-        t.is_true(s.player.x > x0)
-    end)
-
-    t.it("a faster player covers more ground in the same time", function()
-        local slow = match.new(player(2, 5), 960, 540)
-        local fast = match.new(player(8, 5), 960, 540)
-        local sx, fx = slow.player.x, fast.player.x
-        local input = { move = Vec2.new(1, 0), shoot = false }
-        match.step(slow, 0.1, input)
-        match.step(fast, 0.1, input)
-        t.is_true((fast.player.x - fx) > (slow.player.x - sx), "higher speed -> larger delta")
+t.describe("match.step timer", function()
+    t.it("counts down and ends at full time", function()
+        local s = new_match()
+        match.step(s, 10, NO_INPUT)
+        t.near(s.time_left, 110, 1e-6)
+        t.is_true(not s.finished)
+        match.step(s, 200, NO_INPUT)
+        t.is_true(s.finished)
+        t.eq(s.time_left, 0)
     end)
 end)
 
-t.describe("match.step shooting (M1: power stat -> shot)", function()
+t.describe("match.step shooting & passing", function()
     t.it("shooting releases the ball with forward velocity", function()
-        local s = match.new(player(5, 5), 960, 540)
-        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = true })
-        t.is_true(not s.has_ball)
-        t.is_true(s.ball_vel.x > 0)
+        local s = new_match()
+        s.players[s.controlled].facing = Vec2.new(1, 0)
+        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = true, pass = false, switch = false })
+        t.is_true(s.owner == nil)
+        t.is_true(s.ball_vel:length() > 0)
     end)
 
-    t.it("a stronger player shoots faster", function()
-        local weak = match.new(player(5, 2), 960, 540)
-        local strong = match.new(player(5, 8), 960, 540)
-        match.step(weak, 0.016, { move = Vec2.new(0, 0), shoot = true })
-        match.step(strong, 0.016, { move = Vec2.new(0, 0), shoot = true })
-        t.is_true(strong.ball_vel:length() > weak.ball_vel:length())
+    t.it("passing sends the ball toward a teammate in the aim direction", function()
+        local s = new_match()
+        local owner = s.players[s.controlled]
+        local mate
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and i ~= s.controlled then
+                mate = p
+                break
+            end
+        end
+        owner.facing = mate.pos:sub(owner.pos):normalized()
+        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = false, pass = true, switch = false })
+        t.is_true(s.owner == nil, "ball should be released on a pass")
+        t.near(s.ball_vel:length(), 320, 0.5, "pass speed")
+    end)
+end)
+
+t.describe("match.step switching", function()
+    t.it("cycles the controlled player among home outfielders", function()
+        local s = new_match()
+        local before = s.controlled
+        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = false, pass = false, switch = true })
+        t.is_true(s.controlled ~= before)
+        t.is_true(s.players[s.controlled].team == "home")
+        t.is_true(not s.players[s.controlled].is_keeper)
     end)
 end)
 
 t.describe("match.step scoring", function()
-    t.it("a ball entering the goal mouth increments the score and resets", function()
-        local s = match.new(player(5, 9), 960, 540)
-        -- Aim the player at the goal centre and shoot.
-        s.player = Vec2.new(s.goal.x - 30, s.goal.y + s.goal.h / 2)
-        s.facing = Vec2.new(1, 0)
-        s.ball = s.player:add(s.facing:scale(s.ball_radius + s.player_radius))
-        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = true })
-        -- Advance until the ball reaches the line.
-        local scored = false
-        for _ = 1, 120 do
-            match.step(s, 0.016, NO_MOVE)
-            if s.score > 0 then
-                scored = true
-                break
-            end
-        end
-        t.is_true(scored, "ball should have entered the goal")
-        t.is_true(s.has_ball, "should reset to kickoff with possession")
+    t.it("a ball crossing the right line scores for home", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 1 -- keep anyone from collecting it this step
+        s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
+        s.ball_vel = Vec2.new(5, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.score.home, 1)
+        t.eq(s.score.away, 0)
     end)
 end)

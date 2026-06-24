@@ -1,0 +1,57 @@
+-- Formations for small-sided 5v5 (1 keeper + 4 outfield). Content, not logic.
+--
+-- Anchors are normalized in an "attacking right" frame:
+--   x: 0 = own goal line, 1 = opponent goal line (depth)
+--   y: 0 = top touchline, 1 = bottom touchline (width)
+-- `sim/placement.lua` converts these to absolute pitch coords and mirrors them
+-- for the away side. The `outfield` order is the line order (defence -> attack);
+-- a team's roster (minus keeper) must be listed in this same order.
+
+---@class Anchor
+---@field x number  -- 0..1 depth (own goal -> opponent goal)
+---@field y number  -- 0..1 width (top -> bottom)
+
+---@class FormationData
+---@field id string
+---@field name string
+---@field keeper Anchor
+---@field outfield Anchor[]  -- exactly 4
+
+local GK = { x = 0.06, y = 0.5 }
+
+---@type table<string, FormationData>
+return {
+    ["2-1-1"] = {
+        id = "2-1-1",
+        name = "Balanced",
+        keeper = GK,
+        outfield = {
+            { x = 0.28, y = 0.30 }, -- defender
+            { x = 0.28, y = 0.70 }, -- defender
+            { x = 0.52, y = 0.50 }, -- midfielder
+            { x = 0.76, y = 0.50 }, -- forward
+        },
+    },
+    ["1-2-1"] = {
+        id = "1-2-1",
+        name = "Control",
+        keeper = GK,
+        outfield = {
+            { x = 0.26, y = 0.50 }, -- defender
+            { x = 0.52, y = 0.30 }, -- midfielder
+            { x = 0.52, y = 0.70 }, -- midfielder
+            { x = 0.78, y = 0.50 }, -- forward
+        },
+    },
+    ["1-1-2"] = {
+        id = "1-1-2",
+        name = "Aggressive",
+        keeper = GK,
+        outfield = {
+            { x = 0.26, y = 0.50 }, -- defender
+            { x = 0.50, y = 0.50 }, -- midfielder
+            { x = 0.76, y = 0.30 }, -- forward
+            { x = 0.76, y = 0.70 }, -- forward
+        },
+    },
+}

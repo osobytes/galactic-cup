@@ -33,14 +33,23 @@ declarations live next to their data; this file is the human-readable overview.
 
 These are the M1 bridge from manager stats to pitch behavior. Tune constants here.
 
-### MatchState / MatchInput (`sim/match.lua`)
+### TeamData (`data/teams.lua`)
 
-The full pure simulation state and per-step input. See the `---@class` annotations in the file.
+`id, name, color {r,g,b}, formation` (key into formations), `roster` (5 player ids,
+exactly one keeper; the other 4 in formation line order defence→attack).
+
+### FormationData (`data/formations.lua`)
+
+`id, name, keeper Anchor, outfield Anchor[4]`. An `Anchor` is normalized `{x, y}` in an
+attacking-right frame; `sim/placement.lua` converts to absolute coords and mirrors for away.
+
+### MatchPlayer / MatchState / MatchInput (`sim/match.lua`)
+
+The full pure 5v5 simulation: per-player runtime entity, the whole match state (players, ball,
+owner, score, timer), and per-step input. See the `---@class` annotations in the file.
 
 ## Planned (not yet built)
 
-- `data/teams.lua` — `TeamData` (id, name, color palette, roster of player ids)
-- `data/formations.lua` — `FormationData` (id, name, normalized position anchors)
 - `data/tactics.lua` — `TacticData` (id, name, behavior modifiers)
 - `data/traits.lua` — `TraitData` (id, name, trigger, effect)
 - RPG fields layered onto a runtime `PlayerState` (xp, level, morale, fatigue) — kept separate

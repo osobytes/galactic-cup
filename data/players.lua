@@ -83,4 +83,46 @@ return {
         stats = { speed = 6, power = 6, technique = 6, defense = 5, stamina = 5 },
         trait = "comet_first_touch",
     },
+
+    -- Orion Miners: a physical asteroid-colony team (low technique, high power/defense).
+    {
+        id = "gax_oru",
+        name = "Gax Oru",
+        planet = "Orion Belt",
+        position = "keeper",
+        stats = { speed = 4, power = 6, technique = 3, defense = 8, stamina = 8 },
+        trait = "gravity_anchor",
+    },
+    {
+        id = "drell",
+        name = "Drell",
+        planet = "Orion Belt",
+        position = "defender",
+        stats = { speed = 4, power = 9, technique = 2, defense = 8, stamina = 7 },
+        trait = "meteor_tackle",
+    },
+    {
+        id = "morv",
+        name = "Morv",
+        planet = "Ceres Outpost",
+        position = "midfielder",
+        stats = { speed = 5, power = 7, technique = 4, defense = 6, stamina = 7 },
+        trait = "meteor_tackle",
+    },
+    {
+        id = "krag",
+        name = "Krag",
+        planet = "Orion Belt",
+        position = "forward",
+        stats = { speed = 6, power = 8, technique = 4, defense = 3, stamina = 6 },
+        trait = "comet_first_touch",
+    },
+    {
+        id = "tox_vren",
+        name = "Tox Vren",
+        planet = "Ceres Outpost",
+        position = "forward",
+        stats = { speed = 7, power = 7, technique = 5, defense = 3, stamina = 5 },
+        trait = "solar_flare_sprint",
+    },
 }
