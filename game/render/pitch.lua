@@ -6,13 +6,45 @@ local camera = require("game.render.camera")
 
 local pitch = {}
 
-local GRID_COLS = 12
-local GRID_ROWS = 7
+local HEX_RADIUS = 42 -- world units, centre to corner
 
 ---@param c number[]
 ---@param a number?
 local function set(c, a)
     love.graphics.setColor(c[1], c[2], c[3], a or 1)
+end
+
+-- Draw a pointy-top hex tiling over the pitch, projected per-corner so the cells
+-- follow the perspective. Corners are clamped to the field so edge cells meet the
+-- touchlines instead of spilling onto the space backdrop.
+---@param project fun(wx: number, wy: number): number, number, number
+---@param field { w: number, h: number }
+local function draw_hex_floor(project, field)
+    local r = HEX_RADIUS
+    local col_step = math.sqrt(3) * r
+    local row_step = 1.5 * r
+
+    set({ 0.13, 0.5, 0.62 }, 0.18)
+    local row, cy = 0, 0
+    while cy <= field.h + r do
+        local x_off = (row % 2 == 1) and (col_step / 2) or 0
+        local cx = x_off
+        while cx <= field.w + r do
+            local pts = {}
+            for i = 0, 5 do
+                local ang = math.rad(60 * i - 30)
+                local wx = math.min(field.w, math.max(0, cx + r * math.cos(ang)))
+                local wy = math.min(field.h, math.max(0, cy + r * math.sin(ang)))
+                local sx, sy = project(wx, wy)
+                pts[#pts + 1] = sx
+                pts[#pts + 1] = sy
+            end
+            love.graphics.polygon("line", pts)
+            cx = cx + col_step
+        end
+        row = row + 1
+        cy = cy + row_step
+    end
 end
 
 -- Render the whole pitch + entities for one frame.
@@ -37,20 +69,8 @@ function pitch.draw(s, vp, opts)
     set({ 0.05, 0.13, 0.19 })
     love.graphics.polygon("fill", ax, ay, bx, by, cx, cy, dx, dy)
 
-    -- Grid.
-    set({ 0.13, 0.45, 0.6 }, 0.22)
-    for i = 0, GRID_COLS do
-        local x = field.w * i / GRID_COLS
-        local x1, y1 = project(x, 0)
-        local x2, y2 = project(x, field.h)
-        love.graphics.line(x1, y1, x2, y2)
-    end
-    for j = 0, GRID_ROWS do
-        local y = field.h * j / GRID_ROWS
-        local x1, y1 = project(0, y)
-        local x2, y2 = project(field.w, y)
-        love.graphics.line(x1, y1, x2, y2)
-    end
+    -- Hex floor.
+    draw_hex_floor(project, field)
 
     -- Pitch outline.
     set({ 0.2, 0.6, 0.85 }, 0.7)
