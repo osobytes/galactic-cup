@@ -15,9 +15,11 @@ local function input(o)
     return {
         move = o.move or Vec2.new(0, 0),
         shoot = o.shoot or false,
+        shoot_held = o.shoot_held or false,
         pass = o.pass or false,
         switch = o.switch or false,
         dash = o.dash or false,
+        dodge = o.dodge or false,
     }
 end
 
@@ -79,6 +81,47 @@ t.describe("match.step shooting & passing", function()
         match.step(s, 0.016, input({ pass = true }))
         t.is_true(s.owner == nil, "ball should be released on a pass")
         t.near(s.ball_vel:length(), 320, 0.5, "pass speed")
+    end)
+end)
+
+t.describe("match.step charge shot", function()
+    ---@param charge number
+    ---@return number
+    local function shot_speed(charge)
+        local s = new_match()
+        s.players[s.controlled].facing = Vec2.new(1, 0)
+        s.charge = charge
+        match.step(s, 0.016, input({ shoot = true }))
+        return s.ball_vel:length()
+    end
+
+    t.it("a full charge shoots meaningfully harder than a tap", function()
+        t.is_true(shot_speed(1) > shot_speed(0) * 1.5)
+    end)
+
+    t.it("holding shoot builds charge", function()
+        local s = new_match()
+        match.step(s, 0.1, input({ shoot_held = true }))
+        t.is_true(s.charge > 0)
+    end)
+end)
+
+t.describe("match.step juke", function()
+    t.it("a dodging carrier is immune to tackles", function()
+        local s = new_match()
+        local me = s.players[s.controlled]
+        local foe
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                foe = p
+                break
+            end
+        end
+        foe.pos = Vec2.new(me.pos.x + 8, me.pos.y)
+        foe.dash_cd = 0
+        me.dodge_timer = 1.0
+        match.step(s, 0.016, input())
+        t.is_true(s.owner == s.controlled, "dodging carrier keeps the ball")
     end)
 end)
 

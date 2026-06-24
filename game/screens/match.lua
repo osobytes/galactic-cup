@@ -18,10 +18,11 @@ local FIELD_H = 540
 ---@field away_color number[]
 ---@field home_name string
 ---@field away_name string
----@field _shoot boolean
+---@field _shoot_held_prev boolean
 ---@field _pass boolean
 ---@field _switch boolean
 ---@field _dash boolean
+---@field _dodge boolean
 local Match = {}
 Match.__index = Match
 
@@ -41,7 +42,8 @@ function Match.new(opts)
     self.away_color = teams.orion.color
     self.home_name = teams.nebula.name
     self.away_name = teams.orion.name
-    self._shoot, self._pass, self._switch, self._dash = false, false, false, false
+    self._pass, self._switch, self._dash, self._dodge = false, false, false, false
+    self._shoot_held_prev = false
     view_state.reset()
     return self
 end
@@ -51,12 +53,13 @@ function Match:event(evt)
     if evt.kind ~= "key" then
         return
     end
-    if evt.key == "space" or evt.key == "j" then
-        self._shoot = true
-    elseif evt.key == "k" then
+    -- Shooting is polled (hold to charge, fire on release); the rest are edges.
+    if evt.key == "k" then
         self._pass = true
     elseif evt.key == "lshift" or evt.key == "x" then
         self._dash = true
+    elseif evt.key == "c" then
+        self._dodge = true
     elseif evt.key == "tab" or evt.key == "q" then
         self._switch = true
     elseif evt.key == "b" then
@@ -84,15 +87,19 @@ end
 
 ---@param dt number
 function Match:update(dt)
+    local held = love.keyboard.isDown("space", "j")
     ---@type MatchInput
     local input = {
         move = read_move_axis(),
-        shoot = self._shoot,
+        shoot = self._shoot_held_prev and not held, -- fire on release
+        shoot_held = held,
         pass = self._pass,
         switch = self._switch,
         dash = self._dash,
+        dodge = self._dodge,
     }
-    self._shoot, self._pass, self._switch, self._dash = false, false, false, false
+    self._shoot_held_prev = held
+    self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     sim_match.step(self.state, dt, input)
     view_state.update(self.state.players, dt)
 end

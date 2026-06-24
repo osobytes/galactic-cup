@@ -85,6 +85,10 @@ function effects.update(s, dt)
             burst(e.x, e.y, 5, 150, 0.26, 2, { 0.8, 0.95, 1 })
         elseif e.kind == "touch" then
             ring(e.x, e.y, 0.28, 13, { 1, 1, 1 })
+        elseif e.kind == "tackle" then
+            -- A hard hit: punchier and warmer than the rest.
+            ring(e.x, e.y, 0.34, 18, { 1, 0.6, 0.3 })
+            burst(e.x, e.y, 12, 260, 0.4, 3, { 1, 0.7, 0.4 })
         end
     end
 

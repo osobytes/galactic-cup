@@ -6,8 +6,13 @@
 
 local renderer = {}
 
+-- Global alpha multiplier for the current figure pass. Dash afterimages set this
+-- below 1 to draw faded ghosts; `set` honours it so every body part fades at once
+-- without threading an alpha through each call.
+local alpha_mul = 1
+
 local function set(c, a)
-    love.graphics.setColor(c[1], c[2], c[3], a or 1)
+    love.graphics.setColor(c[1], c[2], c[3], (a or 1) * alpha_mul)
 end
 
 local function clamp(x, a, b)
@@ -19,14 +24,16 @@ local function lighten(c, t)
     return { c[1] + (1 - c[1]) * t, c[2] + (1 - c[2]) * t, c[3] + (1 - c[3]) * t }
 end
 
--- Draw one player.
----@param sx number  -- screen x of the ground point (feet)
----@param gy number  -- screen y of the ground point (feet)
----@param r number   -- projected body radius (px)
+-- Draw just the standing body (legs, arms, torso, helmet) centred on screen-x
+-- `bx`, feet at `gy`. No shadow / selection ring / facing tick — those are drawn
+-- once by `renderer.draw` so afterimage ghosts don't duplicate them.
+---@param bx number
+---@param gy number
+---@param r number
 ---@param color number[]
----@param v PlayerView?  -- nil = idle fallback
----@param opts { facing: Vec2, is_keeper: boolean, controlled: boolean }
-function renderer.draw(sx, gy, r, color, v, opts)
+---@param v PlayerView?
+---@param opts table
+local function figure(bx, gy, r, color, v, opts)
     local sp = v and v.speed or 0
     local ph = v and v.phase or 0
     local run = clamp(sp / 90, 0, 1) -- 0 idle .. 1 full sprint
@@ -37,24 +44,13 @@ function renderer.draw(sx, gy, r, color, v, opts)
     -- Whole-body bounce: a gentle idle breath plus a run bob that peaks twice
     -- per stride.
     local bounce = run * math.abs(math.sin(ph)) * r * 0.16
-    local breath = (1 - run) * math.sin(ph * 0.5 + sx) * r * 0.04
+    local breath = (1 - run) * math.sin(ph * 0.5 + bx) * r * 0.04
 
-    local cx = sx + lean * r * 0.5
+    local cx = bx + lean * r * 0.5
     local foot_y = gy
     local hip_y = gy - r * 1.35 - bounce - breath
     local sh_y = gy - r * 2.15 - bounce - breath
     local head_y = gy - r * 2.75 - bounce - breath
-
-    -- Ground shadow (kept here so it tracks the figure; tightens as it lifts).
-    love.graphics.setColor(0, 0, 0, 0.35)
-    love.graphics.ellipse("fill", sx, gy, r * 1.15, r * 0.5)
-
-    -- Selection ring on the ground, under everything.
-    if opts.controlled then
-        set({ 1, 1, 1 }, 0.9)
-        love.graphics.setLineWidth(math.max(1, r * 0.12))
-        love.graphics.ellipse("line", sx, gy, r * 1.25, r * 0.6)
-    end
 
     local stride = run * r * 0.65
     local hip_dx = r * 0.34
@@ -106,6 +102,41 @@ function renderer.draw(sx, gy, r, color, v, opts)
         math.rad(-40) + fx * 0.6,
         math.rad(90) + fx * 0.6
     )
+end
+
+-- Draw one player.
+---@param sx number  -- screen x of the ground point (feet)
+---@param gy number  -- screen y of the ground point (feet)
+---@param r number   -- projected body radius (px)
+---@param color number[]
+---@param v PlayerView?  -- nil = idle fallback
+---@param opts { facing: Vec2, is_keeper: boolean, controlled: boolean, dashing: boolean? }
+function renderer.draw(sx, gy, r, color, v, opts)
+    -- Ground shadow (kept here so it tracks the figure).
+    love.graphics.setColor(0, 0, 0, 0.35)
+    love.graphics.ellipse("fill", sx, gy, r * 1.15, r * 0.5)
+
+    -- Selection ring on the ground, under everything.
+    if opts.controlled then
+        set({ 1, 1, 1 }, 0.9)
+        love.graphics.setLineWidth(math.max(1, r * 0.12))
+        love.graphics.ellipse("line", sx, gy, r * 1.25, r * 0.6)
+    end
+
+    -- Dash afterimage: faded copies trailing backward along the facing direction
+    -- (which equals the move direction during a dash). Drawn before the figure so
+    -- the solid body sits on top of its own smear.
+    if opts.dashing and opts.facing then
+        local fx, fy = opts.facing.x, opts.facing.y
+        for n = 1, 2 do
+            local k = n * 0.6
+            alpha_mul = 0.24 / n
+            figure(sx - fx * r * 1.1 * k, gy - fy * r * 0.55 * k, r, color, v, opts)
+        end
+        alpha_mul = 1
+    end
+
+    figure(sx, gy, r, color, v, opts)
 
     -- Ground-plane facing tick (kept from the old renderer as a clear aim cue).
     if opts.facing then

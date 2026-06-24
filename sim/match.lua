@@ -34,6 +34,14 @@ local STEAL_DIST = 26 -- range at which a challenge dislodges the ball
 local TACKLE_POP_SPEED = 150 -- speed the ball pops out on a tackle
 local AI_STEAL_CD = 0.8 -- min seconds between AI tackle attempts
 
+local CHARGE_RATE = 1.5 -- charge per second while holding shoot (caps at 1)
+local CHARGE_POWER = 0.9 -- full charge adds this fraction to shot speed
+local CURVE_MAX = 520 -- lateral acceleration of a full-charge curved shot
+local SPIN_DECAY = 1.4 -- how fast curve bleeds off
+local DODGE_DURATION = 0.16 -- length of a juke (seconds)
+local DODGE_CD = 0.6 -- juke cooldown (seconds)
+local DODGE_SPEED_MULT = 2.4 -- sideways speed during a juke
+
 ---@class MatchPlayer
 ---@field id string
 ---@field name string
@@ -47,15 +55,20 @@ local AI_STEAL_CD = 0.8 -- min seconds between AI tackle attempts
 ---@field radius number
 ---@field dash_cd number  -- seconds until dash/tackle is ready again
 ---@field dash_timer number  -- seconds of dash burst remaining
+---@field dodge_cd number  -- seconds until a juke is ready again
+---@field dodge_timer number  -- seconds of juke (sidestep + tackle immunity) remaining
+---@field dodge_dir Vec2  -- sidestep direction for the active juke
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
 
 ---@class MatchInput
 ---@field move Vec2  -- controlled player's desired direction
----@field shoot boolean
+---@field shoot boolean  -- fire the shot (released this frame)
+---@field shoot_held boolean  -- shoot key currently down (builds charge)
 ---@field pass boolean
 ---@field switch boolean  -- cycle the controlled player
 ---@field dash boolean  -- burst of speed; a tackle if it reaches a carrier
+---@field dodge boolean  -- sidestep juke with brief tackle immunity
 
 -- One-frame notifications of discrete actions, for the renderer's juice layer
 -- (flashes, trails). Produced by the sim, cleared at the top of every step, so
@@ -82,6 +95,8 @@ local AI_STEAL_CD = 0.8 -- min seconds between AI tackle attempts
 ---@field finished boolean
 ---@field pickup_cd number
 ---@field press { home: integer, away: integer }  -- chasers per team (tactic-driven)
+---@field charge number  -- controlled carrier's shot charge, 0..1
+---@field ball_spin number  -- lateral curve applied to the loose ball
 ---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
 
 local match = {}
@@ -149,6 +164,9 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             radius = PLAYER_RADIUS,
             dash_cd = 0,
             dash_timer = 0,
+            dodge_cd = 0,
+            dodge_timer = 0,
+            dodge_dir = Vec2.new(0, 0),
         }
     end
     return list
@@ -183,6 +201,8 @@ local function place_kickoff(s)
     s.ball_vel = Vec2.new(0, 0)
     s.owner = s.controlled
     s.pickup_cd = 0
+    s.charge = 0
+    s.ball_spin = 0
 end
 
 ---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, players_by_id: table<string, PlayerData>? }
@@ -221,6 +241,8 @@ function match.new(opts)
         finished = false,
         pickup_cd = 0,
         press = { home = home_tactic.press, away = away_tactic.press },
+        charge = 0,
+        ball_spin = 0,
         events = {},
     }
     place_kickoff(s)
@@ -287,10 +309,11 @@ end
 ---@param s MatchState
 ---@param owner MatchPlayer
 ---@param dir Vec2
-local function release_shot(s, owner, dir)
+---@param speed number?  -- defaults to the shooter's base shot speed
+local function release_shot(s, owner, dir, speed)
     s.events[#s.events + 1] = { kind = "shot", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
-    s.ball_vel = dir:normalized():scale(owner.shot_speed)
+    s.ball_vel = dir:normalized():scale(speed or owner.shot_speed)
     s.pickup_cd = RELEASE_CD
 end
 
@@ -358,6 +381,9 @@ local function attempt_steals(s)
         return
     end
     local owner = s.players[s.owner]
+    if owner.dodge_timer > 0 then
+        return -- juke i-frames: the carrier can't be tackled mid-dodge
+    end
     for i, p in ipairs(s.players) do
         if p.team ~= owner.team and not p.is_keeper and p.pos:dist(owner.pos) <= STEAL_DIST then
             local human = i == s.controlled
@@ -389,20 +415,40 @@ local function move_players(s, dt, input)
 
     for i, p in ipairs(s.players) do
         if i == s.controlled then
+            -- Trigger a juke: a quick sidestep perpendicular to facing, toward the
+            -- held direction, with brief tackle immunity (see attempt_steals).
+            if input.dodge and p.dodge_cd <= 0 then
+                local perp = Vec2.new(-p.facing.y, p.facing.x)
+                if input.move.x * perp.x + input.move.y * perp.y < 0 then
+                    perp = perp:scale(-1)
+                end
+                p.dodge_timer = DODGE_DURATION
+                p.dodge_cd = DODGE_CD
+                p.dodge_dir = perp
+            end
             if input.dash and p.dash_cd <= 0 then
                 p.dash_timer = DASH_DURATION
                 p.dash_cd = DASH_CD
             end
-            local dashing = p.dash_timer > 0
-            local dir = input.move
-            if dir.x == 0 and dir.y == 0 and dashing then
-                dir = p.facing -- dash drives forward even with no steering input
-            end
-            if dir.x ~= 0 or dir.y ~= 0 then
-                local nd = dir:normalized()
-                local mult = dashing and DASH_SPEED_MULT or 1
-                p.pos = clamp_to_field(s, p.pos:add(nd:scale(p.move_speed * mult * dt)))
-                p.facing = nd
+
+            if p.dodge_timer > 0 then
+                -- Juke overrides steering: slide sideways fast.
+                p.pos = clamp_to_field(
+                    s,
+                    p.pos:add(p.dodge_dir:scale(p.move_speed * DODGE_SPEED_MULT * dt))
+                )
+            else
+                local dashing = p.dash_timer > 0
+                local dir = input.move
+                if dir.x == 0 and dir.y == 0 and dashing then
+                    dir = p.facing -- dash drives forward even with no steering input
+                end
+                if dir.x ~= 0 or dir.y ~= 0 then
+                    local nd = dir:normalized()
+                    local mult = dashing and DASH_SPEED_MULT or 1
+                    p.pos = clamp_to_field(s, p.pos:add(nd:scale(p.move_speed * mult * dt)))
+                    p.facing = nd
+                end
             end
         elseif i == s.owner then
             -- AI owner dribbles toward the opponent goal (keepers hold and clear).
@@ -443,6 +489,11 @@ end
 
 ---@param s MatchState
 local function update_ball(s, dt, input)
+    -- Only the controlled carrier accumulates charge; drop it otherwise.
+    if not (s.owner and s.owner == s.controlled) then
+        s.charge = 0
+    end
+
     if s.owner then
         local owner = s.players[s.owner]
         s.ball = owner.pos:add(owner.facing:scale(STICK_AHEAD))
@@ -453,11 +504,20 @@ local function update_ball(s, dt, input)
             release_shot(s, owner, shot_target(s, owner, 0):sub(owner.pos))
         elseif s.owner == s.controlled then
             if input.shoot then
-                -- Aim at the goal; the vertical of `facing` picks the corner.
+                -- Aim at the goal; vertical of `facing` picks the corner. Charge
+                -- (held shoot) scales power; lateral input bends the shot.
                 local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
-                release_shot(s, owner, shot_target(s, owner, vbias):sub(owner.pos))
+                local speed = owner.shot_speed * (1 + s.charge * CHARGE_POWER)
+                release_shot(s, owner, shot_target(s, owner, vbias):sub(owner.pos), speed)
+                local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
+                s.ball_spin = side * s.charge * CURVE_MAX
+                s.charge = 0
+            elseif input.shoot_held then
+                s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
             elseif input.pass then
                 try_pass(s, s.owner)
+            else
+                s.charge = 0
             end
         else
             local g = attack_goal(s, owner.team)
@@ -475,9 +535,15 @@ local function update_ball(s, dt, input)
         return
     end
 
-    -- Loose ball: integrate, decay, bounce off touchlines/back walls.
+    -- Loose ball: integrate, decay, curve, bounce off touchlines/back walls.
     s.ball = s.ball:add(s.ball_vel:scale(dt))
     s.ball_vel = s.ball_vel:scale(math.max(0, 1 - FRICTION * dt))
+    if s.ball_spin ~= 0 and s.ball_vel:length() > 1 then
+        local v = s.ball_vel
+        local perp = Vec2.new(-v.y, v.x):normalized()
+        s.ball_vel = s.ball_vel:add(perp:scale(s.ball_spin * dt))
+        s.ball_spin = s.ball_spin * math.max(0, 1 - SPIN_DECAY * dt)
+    end
 
     if s.ball.y < BALL_RADIUS then
         s.ball.y = BALL_RADIUS
@@ -517,6 +583,7 @@ local function update_ball(s, dt, input)
             end
             s.owner = best
             s.ball_vel = Vec2.new(0, 0)
+            s.ball_spin = 0
         end
     end
 end
@@ -566,6 +633,12 @@ function match.step(s, dt, input)
         end
         if p.dash_timer > 0 then
             p.dash_timer = math.max(0, p.dash_timer - dt)
+        end
+        if p.dodge_cd > 0 then
+            p.dodge_cd = math.max(0, p.dodge_cd - dt)
+        end
+        if p.dodge_timer > 0 then
+            p.dodge_timer = math.max(0, p.dodge_timer - dt)
         end
     end
 

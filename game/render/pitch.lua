@@ -188,6 +188,7 @@ function pitch.draw(s, vp, opts)
                 facing = p.facing,
                 is_keeper = p.is_keeper,
                 controlled = (it.idx == s.controlled),
+                dashing = p.dash_timer > 0,
             })
         else
             local sx, sy, scale = project(s.ball.x, s.ball.y)
