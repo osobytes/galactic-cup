@@ -13,9 +13,9 @@ local camera = {}
 
 ---@type CameraConfig
 camera.DEFAULTS = {
-    far_scale = 0.62,
-    near_scale = 1.25,
-    horizon_frac = 0.20,
+    far_scale = 0.72, -- raised from 0.62: wider far edge, less of a sharp wedge
+    near_scale = 1.18,
+    horizon_frac = 0.18,
     bottom_frac = 0.94,
 }
 

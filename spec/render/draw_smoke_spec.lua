@@ -13,6 +13,8 @@ local function stub_graphics()
     local noop = function() end
     for _, name in ipairs({
         "setColor",
+        "setLineWidth",
+        "setBlendMode",
         "rectangle",
         "polygon",
         "line",
