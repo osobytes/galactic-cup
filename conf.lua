@@ -1,0 +1,36 @@
+-- LÖVE configuration. Runs before any module loads, so this is where we detect
+-- `--test` and disable the window/graphics modules for headless test runs.
+
+---@param a string
+---@return boolean
+local function has_flag(a)
+    for _, v in ipairs(arg or {}) do
+        if v == a then
+            return true
+        end
+    end
+    return false
+end
+
+---@param t table  -- love config table
+function love.conf(t)
+    t.identity = "galaticup"
+    t.version = "11.5"
+
+    if has_flag("--test") then
+        -- Headless: no GL context, no display required.
+        t.modules.window = false
+        t.modules.graphics = false
+        t.modules.audio = false
+        t.modules.sound = false
+        t.modules.joystick = false
+        t.modules.physics = false
+        t.modules.touch = false
+    else
+        t.window.title = "Galaticup"
+        t.window.width = 960
+        t.window.height = 540
+        t.window.resizable = false
+        t.window.vsync = 1
+    end
+end

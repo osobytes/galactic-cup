@@ -1,0 +1,21 @@
+# LÖVE build artifacts
+*.love
+build/
+dist/
+
+# Lua / luarocks
+.luarocks/
+lua_modules/
+*.rock
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+
+# Vendored type definitions (re-fetched by scripts/setup.sh)
+types/
