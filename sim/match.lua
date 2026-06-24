@@ -11,6 +11,7 @@ local placement = require("sim.placement")
 local ai = require("sim.ai")
 local passing = require("sim.passing")
 local formations = require("data.formations")
+local tactics = require("data.tactics")
 local player_pool = require("data.players")
 
 local PLAYER_RADIUS = 12
@@ -59,6 +60,7 @@ local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 ---@field max_goals integer
 ---@field finished boolean
 ---@field pickup_cd number
+---@field press { home: integer, away: integer }  -- chasers per team (tactic-driven)
 
 local match = {}
 
@@ -75,11 +77,14 @@ end
 ---@param side "home"|"away"
 ---@param field { w: number, h: number }
 ---@param by_id table<string, PlayerData>
+---@param formation_id string?  -- override team.formation
+---@param line_shift number  -- tactic depth bias (fraction of pitch, toward attack)
 ---@return MatchPlayer[]
-local function build_team(team, side, field, by_id)
-    local formation = formations[team.formation]
-    assert(formation, "unknown formation: " .. tostring(team.formation))
+local function build_team(team, side, field, by_id, formation_id, line_shift)
+    local formation = formations[formation_id or team.formation]
+    assert(formation, "unknown formation: " .. tostring(formation_id or team.formation))
     local anchors = placement.anchors(formation, side, field)
+    local shift = (side == "home" and 1 or -1) * line_shift * field.w
 
     -- Keeper first, then outfield in roster order (matches formation order).
     local keeper_id, outfield = nil, {}
@@ -102,7 +107,13 @@ local function build_team(team, side, field, by_id)
     local list = {}
     for i, id in ipairs(ordered) do
         local pd = by_id[id]
-        local anchor = anchors[i]
+        local base = anchors[i]
+        -- Outfield anchors shift with the tactic; the keeper (i == 1) stays home.
+        local ax = base.x
+        if i > 1 then
+            ax = math.max(PLAYER_RADIUS, math.min(field.w - PLAYER_RADIUS, base.x + shift))
+        end
+        local anchor = Vec2.new(ax, base.y)
         list[i] = {
             id = id,
             name = pd.name,
@@ -150,14 +161,17 @@ local function place_kickoff(s)
     s.pickup_cd = 0
 end
 
----@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, duration: number?, max_goals: integer?, players_by_id: table<string, PlayerData>? }
+---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, players_by_id: table<string, PlayerData>? }
 ---@return MatchState
 function match.new(opts)
     local field = opts.field
     local by_id = opts.players_by_id or pool_by_id()
+    local home_tactic = opts.tactic or tactics.balanced
+    local away_tactic = opts.away_tactic or tactics.balanced
 
-    local home = build_team(opts.home, "home", field, by_id)
-    local away = build_team(opts.away, "away", field, by_id)
+    local home =
+        build_team(opts.home, "home", field, by_id, opts.home_formation, home_tactic.line_shift)
+    local away = build_team(opts.away, "away", field, by_id, nil, away_tactic.line_shift)
     local players = {}
     for _, p in ipairs(home) do
         players[#players + 1] = p
@@ -182,6 +196,7 @@ function match.new(opts)
         max_goals = opts.max_goals or 3,
         finished = false,
         pickup_cd = 0,
+        press = { home = home_tactic.press, away = away_tactic.press },
     }
     place_kickoff(s)
     return s
@@ -204,20 +219,26 @@ local function in_mouth(ball, goal)
     return ball.y >= goal.y and ball.y <= goal.y + goal.h
 end
 
--- Index of the closest non-keeper of `team` to the ball.
+-- Set (index -> true) of the `count` non-keepers of `team` nearest the ball.
 ---@param s MatchState
 ---@param team "home"|"away"
----@return integer?
-local function team_chaser(s, team)
-    local positions, indices = {}, {}
+---@param count integer
+---@return table<integer, boolean>
+local function nearest_n(s, team, count)
+    local cand = {}
     for i, p in ipairs(s.players) do
         if p.team == team and not p.is_keeper then
-            positions[#positions + 1] = p.pos
-            indices[#indices + 1] = i
+            cand[#cand + 1] = { idx = i, d = p.pos:dist(s.ball) }
         end
     end
-    local rel = ai.closest(s.ball, positions)
-    return rel and indices[rel] or nil
+    table.sort(cand, function(a, b)
+        return a.d < b.d
+    end)
+    local set = {}
+    for k = 1, math.min(count, #cand) do
+        set[cand[k].idx] = true
+    end
+    return set
 end
 
 ---@param s MatchState
@@ -270,8 +291,8 @@ end
 
 ---@param s MatchState
 local function move_players(s, dt, input)
-    local home_chaser = team_chaser(s, "home")
-    local away_chaser = team_chaser(s, "away")
+    local home_set = nearest_n(s, "home", s.press.home)
+    local away_set = nearest_n(s, "away", s.press.away)
     local owner = s.owner and s.players[s.owner] or nil
 
     for i, p in ipairs(s.players) do
@@ -302,8 +323,8 @@ local function move_players(s, dt, input)
             end
         else
             local opponent_owned = owner and owner.team ~= p.team
-            local chase = (i == home_chaser or i == away_chaser)
-                and (s.owner == nil or opponent_owned)
+            local in_press = home_set[i] or away_set[i]
+            local chase = in_press and (s.owner == nil or opponent_owned)
             local target = chase and s.ball or p.anchor
             local np, dir = ai.steer(p.pos, target, p.move_speed * dt)
             p.pos = clamp_to_field(s, np)

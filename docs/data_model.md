@@ -48,9 +48,21 @@ attacking-right frame; `sim/placement.lua` converts to absolute coords and mirro
 The full pure 5v5 simulation: per-player runtime entity, the whole match state (players, ball,
 owner, score, timer), and per-step input. See the `---@class` annotations in the file.
 
+### TacticData (`data/tactics.lua`)
+
+`id, name, press` (how many off-ball players hunt the ball), `line_shift` (anchor depth
+bias along the attack axis, fraction of pitch), `stamina_drain` (multiplier; stub for M4).
+Applied in `sim/match.lua`: `line_shift` adjusts outfield anchors at build time, `press`
+sets `MatchState.press` which drives how many players chase per team.
+
+### Widget / Layout (`game/ui/hit.lua`)
+
+A `Layout` is an ordered `Widget[]` (`id, rect, kind, text, selected, data`). Pure screen defs
+(`game/screens/squad|formation|tactic.lua`) build a Layout from state; `game/ui/draw.lua`
+renders it; `hit.at`/`hit.find` do pure hit-testing. See AGENTS.md §9.
+
 ## Planned (not yet built)
 
-- `data/tactics.lua` — `TacticData` (id, name, behavior modifiers)
 - `data/traits.lua` — `TraitData` (id, name, trigger, effect)
 - RPG fields layered onto a runtime `PlayerState` (xp, level, morale, fatigue) — kept separate
   from immutable `PlayerData`.

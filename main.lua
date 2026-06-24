@@ -23,14 +23,15 @@ if has_flag("--test") then
 end
 
 local ScreenStack = require("game.screen_stack")
-local Match = require("game.screens.match")
+local Flow = require("game.flow")
 
 ---@type ScreenStack
 local stack
 
 function love.load()
     stack = ScreenStack.new()
-    stack:push(Match.new())
+    local viewport = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
+    Flow.start(stack, viewport)
 end
 
 ---@param dt number

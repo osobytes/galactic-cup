@@ -3,6 +3,7 @@
 
 local sim_match = require("sim.match")
 local teams = require("data.teams")
+local tactics = require("data.tactics")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -20,13 +21,17 @@ local FIELD_H = 540
 local Match = {}
 Match.__index = Match
 
+---@param opts { formation: string?, tactic: string? }?
 ---@return MatchScreen
-function Match.new()
+function Match.new(opts)
+    opts = opts or {}
     local self = setmetatable({}, Match)
     self.state = sim_match.new({
         home = teams.nebula,
         away = teams.orion,
         field = { w = FIELD_W, h = FIELD_H },
+        home_formation = opts.formation,
+        tactic = opts.tactic and tactics[opts.tactic] or nil,
     })
     self.home_color = teams.nebula.color
     self.away_color = teams.orion.color

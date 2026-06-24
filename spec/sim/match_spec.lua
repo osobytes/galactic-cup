@@ -1,6 +1,7 @@
 local t = require("spec.support.runner")
 local match = require("sim.match")
 local teams = require("data.teams")
+local tactics = require("data.tactics")
 local Vec2 = require("core.vec2")
 
 local function new_match()
@@ -67,6 +68,53 @@ t.describe("match.step switching", function()
         t.is_true(s.controlled ~= before)
         t.is_true(s.players[s.controlled].team == "home")
         t.is_true(not s.players[s.controlled].is_keeper)
+    end)
+end)
+
+t.describe("match tactics", function()
+    ---@param s MatchState
+    ---@return number
+    local function mean_home_outfield_x(s)
+        local sum, n = 0, 0
+        for _, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper then
+                sum = sum + p.anchor.x
+                n = n + 1
+            end
+        end
+        return sum / n
+    end
+
+    t.it("press high pushes the home shape higher up the pitch", function()
+        local balanced = new_match()
+        local high = match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            tactic = tactics.press_high,
+        })
+        t.is_true(mean_home_outfield_x(high) > mean_home_outfield_x(balanced))
+    end)
+
+    t.it("counter attack drops the home shape deeper", function()
+        local balanced = new_match()
+        local counter = match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            tactic = tactics.counter,
+        })
+        t.is_true(mean_home_outfield_x(counter) < mean_home_outfield_x(balanced))
+    end)
+
+    t.it("press high assigns two home pressers", function()
+        local high = match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            tactic = tactics.press_high,
+        })
+        t.eq(high.press.home, 2)
     end)
 end)
 
