@@ -4,6 +4,7 @@
 local sim_match = require("sim.match")
 local teams = require("data.teams")
 local tactics = require("data.tactics")
+local pitch = require("game.render.pitch")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -86,45 +87,14 @@ function Match:update(dt)
     sim_match.step(self.state, dt, input)
 end
 
----@param goal Rect
-local function draw_goal(goal)
-    love.graphics.setColor(0.9, 0.8, 0.2)
-    love.graphics.rectangle("line", goal.x, goal.y, goal.w, goal.h)
-end
-
 function Match:draw()
     local s = self.state
+    local vp = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
 
-    -- Pitch.
-    love.graphics.setColor(0.06, 0.09, 0.16)
-    love.graphics.rectangle("fill", 0, 0, s.field.w, s.field.h)
-    love.graphics.setColor(0.15, 0.45, 0.6, 0.5)
-    love.graphics.rectangle("line", 8, 8, s.field.w - 16, s.field.h - 16)
-    love.graphics.line(s.field.w / 2, 8, s.field.w / 2, s.field.h - 8)
-    love.graphics.circle("line", s.field.w / 2, s.field.h / 2, 60)
+    -- World: 2.5D perspective pitch + billboard players.
+    pitch.draw(s, vp, { home_color = self.home_color, away_color = self.away_color })
 
-    draw_goal(s.goal_home)
-    draw_goal(s.goal_away)
-
-    -- Players.
-    for i, p in ipairs(s.players) do
-        local color = (p.team == "home") and self.home_color or self.away_color
-        if i == s.controlled then
-            love.graphics.setColor(1, 1, 1)
-            love.graphics.circle("line", p.pos.x, p.pos.y, p.radius + 4)
-        end
-        love.graphics.setColor(color[1], color[2], color[3], p.is_keeper and 0.6 or 1.0)
-        love.graphics.circle("fill", p.pos.x, p.pos.y, p.radius)
-        local nose = p.pos:add(p.facing:scale(p.radius))
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.line(p.pos.x, p.pos.y, nose.x, nose.y)
-    end
-
-    -- Ball.
-    love.graphics.setColor(1, 0.95, 0.7)
-    love.graphics.circle("fill", s.ball.x, s.ball.y, 6)
-
-    -- HUD.
+    -- HUD (screen space, unprojected).
     love.graphics.setColor(1, 1, 1)
     local mins = math.floor(s.time_left / 60)
     local secs = math.floor(s.time_left % 60)
