@@ -5,6 +5,7 @@ local sim_match = require("sim.match")
 local teams = require("data.teams")
 local tactics = require("data.tactics")
 local pitch = require("game.render.pitch")
+local bloom = require("game.render.bloom")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -53,6 +54,8 @@ function Match:event(evt)
         self._pass = true
     elseif evt.key == "tab" or evt.key == "q" then
         self._switch = true
+    elseif evt.key == "b" then
+        bloom.config.enabled = not bloom.config.enabled
     end
 end
 
@@ -87,10 +90,9 @@ function Match:update(dt)
     sim_match.step(self.state, dt, input)
 end
 
-function Match:draw()
-    local s = self.state
-    local vp = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
-
+---@param s MatchState
+---@param vp { w: number, h: number }
+function Match:draw_frame(s, vp)
     -- World: 2.5D perspective pitch + billboard players.
     pitch.draw(s, vp, { home_color = self.home_color, away_color = self.away_color })
 
@@ -109,22 +111,29 @@ function Match:draw()
         ),
         0,
         16,
-        s.field.w,
+        vp.w,
         "center"
     )
     love.graphics.print(
         "WASD move  -  Space shoot  -  K pass  -  Tab switch  -  Esc quit",
         16,
-        s.field.h - 28
+        vp.h - 28
     )
 
     if s.finished then
         love.graphics.setColor(0, 0, 0, 0.6)
-        love.graphics.rectangle("fill", 0, 0, s.field.w, s.field.h)
+        love.graphics.rectangle("fill", 0, 0, vp.w, vp.h)
         love.graphics.setColor(1, 1, 1)
-        local result = "FULL TIME"
-        love.graphics.printf(result, 0, s.field.h / 2 - 12, s.field.w, "center")
+        love.graphics.printf("FULL TIME", 0, vp.h / 2 - 12, vp.w, "center")
     end
+end
+
+function Match:draw()
+    local s = self.state
+    local vp = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
+    bloom.draw(function()
+        self:draw_frame(s, vp)
+    end)
 end
 
 return Match

@@ -8,6 +8,7 @@
 | Shoot  | Space or J |
 | Pass   | K or Left Shift |
 | Switch player | Tab or Q |
+| Toggle bloom | B (debug) |
 | Quit   | Esc |
 
 Movement is continuous (read each frame as a direction vector). Shooting is a discrete,
