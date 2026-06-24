@@ -6,6 +6,7 @@ local teams = require("data.teams")
 local tactics = require("data.tactics")
 local pitch = require("game.render.pitch")
 local bloom = require("game.render.bloom")
+local view_state = require("game.render.view_state")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -20,6 +21,7 @@ local FIELD_H = 540
 ---@field _shoot boolean
 ---@field _pass boolean
 ---@field _switch boolean
+---@field _dash boolean
 local Match = {}
 Match.__index = Match
 
@@ -39,7 +41,8 @@ function Match.new(opts)
     self.away_color = teams.orion.color
     self.home_name = teams.nebula.name
     self.away_name = teams.orion.name
-    self._shoot, self._pass, self._switch = false, false, false
+    self._shoot, self._pass, self._switch, self._dash = false, false, false, false
+    view_state.reset()
     return self
 end
 
@@ -50,8 +53,10 @@ function Match:event(evt)
     end
     if evt.key == "space" or evt.key == "j" then
         self._shoot = true
-    elseif evt.key == "k" or evt.key == "lshift" then
+    elseif evt.key == "k" then
         self._pass = true
+    elseif evt.key == "lshift" or evt.key == "x" then
+        self._dash = true
     elseif evt.key == "tab" or evt.key == "q" then
         self._switch = true
     elseif evt.key == "b" then
@@ -85,9 +90,11 @@ function Match:update(dt)
         shoot = self._shoot,
         pass = self._pass,
         switch = self._switch,
+        dash = self._dash,
     }
-    self._shoot, self._pass, self._switch = false, false, false
+    self._shoot, self._pass, self._switch, self._dash = false, false, false, false
     sim_match.step(self.state, dt, input)
+    view_state.update(self.state.players, dt)
 end
 
 ---@param s MatchState

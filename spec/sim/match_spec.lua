@@ -8,7 +8,20 @@ local function new_match()
     return match.new({ home = teams.nebula, away = teams.orion, field = { w = 960, h = 540 } })
 end
 
-local NO_INPUT = { move = Vec2.new(0, 0), shoot = false, pass = false, switch = false }
+---@param o table?
+---@return MatchInput
+local function input(o)
+    o = o or {}
+    return {
+        move = o.move or Vec2.new(0, 0),
+        shoot = o.shoot or false,
+        pass = o.pass or false,
+        switch = o.switch or false,
+        dash = o.dash or false,
+    }
+end
+
+local NO_INPUT = input()
 
 t.describe("match.new", function()
     t.it("kicks off with 10 players and the home side in possession", function()
@@ -35,12 +48,21 @@ t.describe("match.step timer", function()
 end)
 
 t.describe("match.step shooting & passing", function()
-    t.it("shooting releases the ball with forward velocity", function()
+    t.it("shooting releases the ball toward the goal", function()
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(1, 0)
-        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = true, pass = false, switch = false })
+        match.step(s, 0.016, input({ shoot = true }))
         t.is_true(s.owner == nil)
-        t.is_true(s.ball_vel:length() > 0)
+        t.is_true(s.ball_vel.x > 0, "home shoots toward the right goal")
+    end)
+
+    t.it("aiming up sends the shot to the top corner", function()
+        local s = new_match()
+        s.players[s.controlled].facing = Vec2.new(0, -1)
+        match.step(s, 0.016, input({ shoot = true }))
+        t.is_true(s.owner == nil)
+        t.is_true(s.ball_vel.x > 0, "still goal-ward")
+        t.is_true(s.ball_vel.y < 0, "and toward the top corner")
     end)
 
     t.it("passing sends the ball toward a teammate in the aim direction", function()
@@ -54,9 +76,29 @@ t.describe("match.step shooting & passing", function()
             end
         end
         owner.facing = mate.pos:sub(owner.pos):normalized()
-        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = false, pass = true, switch = false })
+        match.step(s, 0.016, input({ pass = true }))
         t.is_true(s.owner == nil, "ball should be released on a pass")
         t.near(s.ball_vel:length(), 320, 0.5, "pass speed")
+    end)
+end)
+
+t.describe("match.step tackling", function()
+    t.it("dashing into an opponent carrier knocks the ball loose", function()
+        local s = new_match()
+        local away_idx
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                away_idx = i
+                break
+            end
+        end
+        s.owner = away_idx
+        local carrier = s.players[away_idx]
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(carrier.pos.x + 8, carrier.pos.y)
+        me.dash_cd = 0
+        match.step(s, 0.016, input({ dash = true }))
+        t.is_true(s.owner ~= away_idx, "carrier should lose possession to the tackle")
     end)
 end)
 
@@ -64,7 +106,7 @@ t.describe("match.step switching", function()
     t.it("cycles the controlled player among home outfielders", function()
         local s = new_match()
         local before = s.controlled
-        match.step(s, 0.016, { move = Vec2.new(0, 0), shoot = false, pass = false, switch = true })
+        match.step(s, 0.016, input({ switch = true }))
         t.is_true(s.controlled ~= before)
         t.is_true(s.players[s.controlled].team == "home")
         t.is_true(not s.players[s.controlled].is_keeper)

@@ -19,12 +19,20 @@ local BALL_RADIUS = 6
 local FRICTION = 1.2 -- fraction of ball speed shed per second
 local STICK_AHEAD = PLAYER_RADIUS + BALL_RADIUS -- dribble offset
 local POSSESS_DIST = 22 -- outfield control radius
-local KEEPER_DIST = 28 -- keepers reach a bit further
+local KEEPER_DIST = 18 -- keeper catch radius (small enough that corners stay open)
+local KEEPER_GUARD = 28 -- how far off-centre a keeper slides (< half the mouth)
 local POSSESS_MAX_SPEED = 350 -- outfield can only collect a slow-enough ball
 local PASS_SPEED = 320
-local AI_SHOOT_RANGE = 230 -- AI owner shoots when this close to goal
+local AI_SHOOT_RANGE = 240 -- AI owner shoots when this close to goal
 local GOAL_MOUTH = 110
 local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
+
+local DASH_SPEED_MULT = 1.9 -- speed burst while dashing
+local DASH_DURATION = 0.18 -- how long a dash lasts (seconds)
+local DASH_CD = 0.7 -- dash / tackle cooldown (seconds)
+local STEAL_DIST = 26 -- range at which a challenge dislodges the ball
+local TACKLE_POP_SPEED = 150 -- speed the ball pops out on a tackle
+local AI_STEAL_CD = 0.8 -- min seconds between AI tackle attempts
 
 ---@class MatchPlayer
 ---@field id string
@@ -37,6 +45,8 @@ local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 ---@field shot_speed number
 ---@field is_keeper boolean
 ---@field radius number
+---@field dash_cd number  -- seconds until dash/tackle is ready again
+---@field dash_timer number  -- seconds of dash burst remaining
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
 
@@ -45,6 +55,17 @@ local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 ---@field shoot boolean
 ---@field pass boolean
 ---@field switch boolean  -- cycle the controlled player
+---@field dash boolean  -- burst of speed; a tackle if it reaches a carrier
+
+-- One-frame notifications of discrete actions, for the renderer's juice layer
+-- (flashes, trails). Produced by the sim, cleared at the top of every step, so
+-- a frame's events are whatever happened during that frame. Positions are world
+-- space; `player` is the actor's id (nil for ball-only events).
+---@class MatchEvent
+---@field kind "shot"|"pass"|"touch"|"tackle"
+---@field x number
+---@field y number
+---@field player string?
 
 ---@class MatchState
 ---@field field { w: number, h: number }
@@ -61,6 +82,7 @@ local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 ---@field finished boolean
 ---@field pickup_cd number
 ---@field press { home: integer, away: integer }  -- chasers per team (tactic-driven)
+---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
 
 local match = {}
 
@@ -125,6 +147,8 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             shot_speed = stats.shot_speed(pd.stats),
             is_keeper = pd.position == "keeper",
             radius = PLAYER_RADIUS,
+            dash_cd = 0,
+            dash_timer = 0,
         }
     end
     return list
@@ -197,6 +221,7 @@ function match.new(opts)
         finished = false,
         pickup_cd = 0,
         press = { home = home_tactic.press, away = away_tactic.press },
+        events = {},
     }
     place_kickoff(s)
     return s
@@ -263,6 +288,7 @@ end
 ---@param owner MatchPlayer
 ---@param dir Vec2
 local function release_shot(s, owner, dir)
+    s.events[#s.events + 1] = { kind = "shot", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
     s.ball_vel = dir:normalized():scale(owner.shot_speed)
     s.pickup_cd = RELEASE_CD
@@ -284,9 +310,75 @@ local function try_pass(s, owner_idx)
         return
     end
     local dir = positions[rel]:sub(owner.pos):normalized()
+    s.events[#s.events + 1] = { kind = "pass", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
     s.ball_vel = dir:scale(PASS_SPEED)
     s.pickup_cd = RELEASE_CD
+end
+
+---@param s MatchState
+---@param team "home"|"away"
+---@return Rect
+local function attack_goal(s, team)
+    return team == "home" and s.goal_away or s.goal_home
+end
+
+---@param s MatchState
+---@param team "home"|"away"
+---@return MatchPlayer?
+local function team_keeper(s, team)
+    for _, p in ipairs(s.players) do
+        if p.team == team and p.is_keeper then
+            return p
+        end
+    end
+    return nil
+end
+
+-- World point in the opponent goal to aim at. `vbias` in [-1, 1] picks vertical
+-- placement (0 = centre, +/-1 = the posts).
+---@param s MatchState
+---@param shooter MatchPlayer
+---@param vbias number
+---@return Vec2
+local function shot_target(s, shooter, vbias)
+    local g = attack_goal(s, shooter.team)
+    local gx = (shooter.team == "home") and (g.x + g.w) or g.x
+    local cy = g.y + g.h / 2
+    local half = g.h / 2 - 8
+    return Vec2.new(gx, cy + math.max(-1, math.min(1, vbias)) * half)
+end
+
+-- Knock the ball loose when a challenger reaches the carrier. The human challenges
+-- by dashing; AI defenders challenge automatically on a cooldown. The ball pops
+-- toward the challenger so a clean tackle tends to win possession.
+---@param s MatchState
+local function attempt_steals(s)
+    if not s.owner then
+        return
+    end
+    local owner = s.players[s.owner]
+    for i, p in ipairs(s.players) do
+        if p.team ~= owner.team and not p.is_keeper and p.pos:dist(owner.pos) <= STEAL_DIST then
+            local human = i == s.controlled
+            local can = (human and p.dash_timer > 0) or (not human and p.dash_cd <= 0)
+            if can then
+                local dir = p.pos:sub(owner.pos)
+                if dir.x == 0 and dir.y == 0 then
+                    dir = p.facing
+                end
+                s.events[#s.events + 1] =
+                    { kind = "tackle", x = owner.pos.x, y = owner.pos.y, player = p.id }
+                s.owner = nil
+                s.ball_vel = dir:normalized():scale(TACKLE_POP_SPEED)
+                s.pickup_cd = 0.12
+                if not human then
+                    p.dash_cd = AI_STEAL_CD
+                end
+                return
+            end
+        end
+    end
 end
 
 ---@param s MatchState
@@ -297,25 +389,39 @@ local function move_players(s, dt, input)
 
     for i, p in ipairs(s.players) do
         if i == s.controlled then
-            if input.move.x ~= 0 or input.move.y ~= 0 then
-                local dir = input.move:normalized()
-                p.pos = clamp_to_field(s, p.pos:add(dir:scale(p.move_speed * dt)))
-                p.facing = dir
+            if input.dash and p.dash_cd <= 0 then
+                p.dash_timer = DASH_DURATION
+                p.dash_cd = DASH_CD
+            end
+            local dashing = p.dash_timer > 0
+            local dir = input.move
+            if dir.x == 0 and dir.y == 0 and dashing then
+                dir = p.facing -- dash drives forward even with no steering input
+            end
+            if dir.x ~= 0 or dir.y ~= 0 then
+                local nd = dir:normalized()
+                local mult = dashing and DASH_SPEED_MULT or 1
+                p.pos = clamp_to_field(s, p.pos:add(nd:scale(p.move_speed * mult * dt)))
+                p.facing = nd
             end
         elseif i == s.owner then
-            -- AI owner dribbles toward the opponent goal.
-            local goal = (p.team == "home") and s.goal_away or s.goal_home
-            local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
-            local np, dir = ai.steer(p.pos, gc, p.move_speed * dt)
-            p.pos = clamp_to_field(s, np)
-            if dir.x ~= 0 or dir.y ~= 0 then
-                p.facing = dir
+            -- AI owner dribbles toward the opponent goal (keepers hold and clear).
+            if not p.is_keeper then
+                local goal = (p.team == "home") and s.goal_away or s.goal_home
+                local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
+                local np, dir = ai.steer(p.pos, gc, p.move_speed * dt)
+                p.pos = clamp_to_field(s, np)
+                if dir.x ~= 0 or dir.y ~= 0 then
+                    p.facing = dir
+                end
             end
         elseif p.is_keeper then
-            -- Hold the goal line, track the ball's height within the mouth.
+            -- Hold the goal line, tracking the ball but only across a centre band
+            -- (KEEPER_GUARD) so well-placed corner shots stay scorable.
             local goal = (p.team == "home") and s.goal_home or s.goal_away
             local line_x = (p.team == "home") and (goal.x + goal.w + 12) or (goal.x - 12)
-            local ty = math.max(goal.y, math.min(goal.y + goal.h, s.ball.y))
+            local cy = goal.y + goal.h / 2
+            local ty = math.max(cy - KEEPER_GUARD, math.min(cy + KEEPER_GUARD, s.ball.y))
             local np, dir = ai.steer(p.pos, Vec2.new(line_x, ty), p.move_speed * dt)
             p.pos = np
             if dir.x ~= 0 or dir.y ~= 0 then
@@ -342,17 +448,28 @@ local function update_ball(s, dt, input)
         s.ball = owner.pos:add(owner.facing:scale(STICK_AHEAD))
         s.ball_vel = Vec2.new(0, 0)
 
-        if s.owner == s.controlled then
+        if owner.is_keeper then
+            -- Keepers never hold; clear the ball straight upfield.
+            release_shot(s, owner, shot_target(s, owner, 0):sub(owner.pos))
+        elseif s.owner == s.controlled then
             if input.shoot then
-                release_shot(s, owner, owner.facing)
+                -- Aim at the goal; the vertical of `facing` picks the corner.
+                local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
+                release_shot(s, owner, shot_target(s, owner, vbias):sub(owner.pos))
             elseif input.pass then
                 try_pass(s, s.owner)
             end
         else
-            local goal = (owner.team == "home") and s.goal_away or s.goal_home
-            local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
+            local g = attack_goal(s, owner.team)
+            local gc = Vec2.new((owner.team == "home") and (g.x + g.w) or g.x, g.y + g.h / 2)
             if owner.pos:dist(gc) < AI_SHOOT_RANGE then
-                release_shot(s, owner, gc:sub(owner.pos))
+                -- Shoot to the corner away from the defending keeper.
+                local keeper = team_keeper(s, owner.team == "home" and "away" or "home")
+                local vbias = 0.85
+                if keeper then
+                    vbias = (keeper.pos.y < gc.y) and 0.85 or -0.85
+                end
+                release_shot(s, owner, shot_target(s, owner, vbias):sub(owner.pos))
             end
         end
         return
@@ -391,6 +508,13 @@ local function update_ball(s, dt, input)
             end
         end
         if best then
+            -- Only a moving ball collected by a new owner reads as a "touch"
+            -- (trap/interception); a player standing on a dead ball shouldn't pulse.
+            if speed > 1 then
+                local p = s.players[best]
+                s.events[#s.events + 1] =
+                    { kind = "touch", x = s.ball.x, y = s.ball.y, player = p.id }
+            end
             s.owner = best
             s.ball_vel = Vec2.new(0, 0)
         end
@@ -421,6 +545,11 @@ function match.step(s, dt, input)
         return s
     end
 
+    -- Discrete events are per-frame: clear last frame's before producing this one's.
+    for i = #s.events, 1, -1 do
+        s.events[i] = nil
+    end
+
     s.time_left = s.time_left - dt
     if s.time_left <= 0 then
         s.time_left = 0
@@ -431,12 +560,21 @@ function match.step(s, dt, input)
     if s.pickup_cd > 0 then
         s.pickup_cd = math.max(0, s.pickup_cd - dt)
     end
+    for _, p in ipairs(s.players) do
+        if p.dash_cd > 0 then
+            p.dash_cd = math.max(0, p.dash_cd - dt)
+        end
+        if p.dash_timer > 0 then
+            p.dash_timer = math.max(0, p.dash_timer - dt)
+        end
+    end
 
     if input.switch then
         s.controlled = next_home_outfield(s, s.controlled)
     end
 
     move_players(s, dt, input)
+    attempt_steals(s)
     update_ball(s, dt, input)
 
     if check_goal(s) then

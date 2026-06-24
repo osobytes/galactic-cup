@@ -3,6 +3,9 @@
 -- (Bloom/neon post-processing is a later pass; this is the geometry layer.)
 
 local camera = require("game.render.camera")
+local player_renderer = require("game.render.player_renderer")
+local view_state = require("game.render.view_state")
+local effects = require("game.render.effects")
 
 local pitch = {}
 
@@ -162,6 +165,9 @@ function pitch.draw(s, vp, opts)
     draw_goal(s.goal_home, opts.home_color)
     draw_goal(s.goal_away, opts.away_color)
 
+    -- Ball trail sits on the ground, under the entities.
+    effects.draw_trail(project)
+
     -- Depth-sorted drawables (far first).
     local items = {}
     for i, p in ipairs(s.players) do
@@ -177,21 +183,12 @@ function pitch.draw(s, vp, opts)
             local p = it.p
             local sx, sy, scale = project(p.pos.x, p.pos.y)
             local r = p.radius * scale
-            local cy2 = sy - r * 0.9 -- lift the billboard so it "stands" on the ground
-
-            love.graphics.setColor(0, 0, 0, 0.35)
-            love.graphics.ellipse("fill", sx, sy, r * 1.1, r * 0.5)
-
-            if it.idx == s.controlled then
-                set({ 1, 1, 1 })
-                love.graphics.circle("line", sx, cy2, r + 3)
-            end
-
             local color = (p.team == "home") and opts.home_color or opts.away_color
-            love.graphics.setColor(color[1], color[2], color[3], p.is_keeper and 0.65 or 1.0)
-            love.graphics.circle("fill", sx, cy2, r)
-            set({ 1, 1, 1 }, 0.9)
-            love.graphics.line(sx, cy2, sx + p.facing.x * r, cy2 + p.facing.y * r)
+            player_renderer.draw(sx, sy, r, color, view_state.get(p.id), {
+                facing = p.facing,
+                is_keeper = p.is_keeper,
+                controlled = (it.idx == s.controlled),
+            })
         else
             local sx, sy, scale = project(s.ball.x, s.ball.y)
             love.graphics.setColor(0, 0, 0, 0.3)
@@ -200,6 +197,9 @@ function pitch.draw(s, vp, opts)
             love.graphics.circle("fill", sx, sy - 4 * scale, 5 * scale)
         end
     end
+
+    -- Flashes/sparks ride on top of everything.
+    effects.draw_over(project)
 end
 
 return pitch
