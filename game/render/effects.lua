@@ -97,6 +97,10 @@ function effects.update(s, dt)
             -- Deflection: a sharp cool spark fan.
             ring(e.x, e.y, 0.3, 16, { 0.7, 0.9, 1 })
             burst(e.x, e.y, 9, 220, 0.34, 3, { 0.7, 0.9, 1 })
+        elseif e.kind == "block" then
+            -- Body block: a blunt thud off a defender, warmer and smaller than a parry.
+            ring(e.x, e.y, 0.26, 14, { 1, 0.85, 0.6 })
+            burst(e.x, e.y, 6, 180, 0.3, 2, { 1, 0.85, 0.6 })
         end
     end
 

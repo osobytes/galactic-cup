@@ -1304,6 +1304,173 @@ t.describe("match.step loose-ball pursuit", function()
     end)
 end)
 
+t.describe("match shot blocking", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    ---@return MatchState
+    local function loose_ball(x, vx, z)
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 1 -- keep collection out of the picture unless a test wants it
+        s.ball = Vec2.new(x, 270)
+        s.ball_vel = Vec2.new(vx, 0)
+        s.ball_z = z or 0
+        s.ball_vz = 0
+        return s
+    end
+
+    -- Clear everyone off the midfield corridor, then park one away outfielder
+    -- as a wall at (500, 270) so it is the only body the ball can meet.
+    local function with_wall(s)
+        local slot, wall = 0, nil
+        for _, p in ipairs(s.players) do
+            p.pos = Vec2.new(60 + slot * 50, 40)
+            slot = slot + 1
+            if not wall and p.team == "away" and not p.is_keeper then
+                wall = p
+                p.pos = Vec2.new(500, 270)
+            end
+        end
+        return wall
+    end
+
+    t.it("a driven ball ricochets off a body in its path", function()
+        local s = loose_ball(490, 450, 0)
+        with_wall(s)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "block"), "the body blocked it")
+        t.is_true(s.ball_vel.x < 0, "the ball came back off the body")
+        t.is_true(s.ball_vel:length() < 450, "a block soaks pace")
+    end)
+
+    t.it("a lofted ball sails over the body", function()
+        local s = loose_ball(490, 450, 40)
+        s.ball_vz = 50 -- still rising through the frame
+        with_wall(s)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(not has_event(s, "block"), "no block on a ball over head height")
+        t.is_true(s.ball_vel.x > 0, "it kept flying")
+    end)
+
+    t.it("a ball moving away from a body is never blocked (own release)", function()
+        local s = loose_ball(505, 450, 0) -- overlapping the wall but outbound
+        with_wall(s)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(not has_event(s, "block"), "an outbound ball never re-blocks")
+        t.is_true(s.ball_vel.x > 0)
+    end)
+
+    t.it("a slow ball is collected at the body, not bounced", function()
+        local s = loose_ball(492, 200, 0)
+        with_wall(s)
+        s.pickup_cd = 0
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(not has_event(s, "block"), "slow balls are trapped, not deflected")
+        t.is_true(s.owner ~= nil, "the body wins the ball instead")
+    end)
+end)
+
+t.describe("match keeper save tuning", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    -- Fire a corner-aimed shot at the away keeper from 800,270 and play it out.
+    local function corner_shot(speed)
+        local s = new_match()
+        local k
+        for _, p in ipairs(s.players) do
+            if p.team == "away" and p.is_keeper then
+                k = p
+            end
+        end
+        k.pos = Vec2.new(938, 270)
+        -- Clear every outfielder off the shot lane so only the keeper matters.
+        local slot = 0
+        for _, p in ipairs(s.players) do
+            if not p.is_keeper then
+                p.pos = Vec2.new(100 + slot * 40, 60)
+                slot = slot + 1
+            end
+        end
+        s.owner = nil
+        s.pickup_cd = 0.3 -- as if just released
+        s.ball = Vec2.new(800, 270)
+        s.ball_vel = Vec2.new(950, 317):sub(s.ball):normalized():scale(speed)
+        local caught, parried = false, false
+        for _ = 1, 40 do
+            match.step(s, 1 / 60, NO_INPUT)
+            caught = caught or has_event(s, "catch")
+            parried = parried or has_event(s, "parry")
+            if s.score.home > 0 then
+                break
+            end
+        end
+        return s.score.home, caught, parried
+    end
+
+    t.it("an uncharged corner shot is kept out", function()
+        local goals, caught, parried = corner_shot(500)
+        t.eq(goals, 0, "no clean goal from a plain corner shot")
+        t.is_true(caught or parried, "the keeper got something on it")
+    end)
+
+    t.it("a fully charged corner shot beats the keeper", function()
+        local goals = corner_shot(1000)
+        t.eq(goals, 1, "a charged corner shot scores")
+    end)
+end)
+
+t.describe("match AI shooting", function()
+    -- An away carrier in range of the home goal; `defender_at` optionally parks
+    -- a home outfielder near it. Returns the released shot speed.
+    local function ai_shot_speed(defender_dist)
+        local s = new_match()
+        local carrier
+        local slot = 0
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper then
+                p.pos = Vec2.new(700 + slot * 40, 60) -- clear the home half
+                slot = slot + 1
+            elseif p.team == "away" and not p.is_keeper and not carrier then
+                carrier = i
+                p.pos = Vec2.new(200, 270)
+                p.facing = Vec2.new(-1, 0)
+            end
+        end
+        if defender_dist then
+            for i, p in ipairs(s.players) do
+                if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                    p.pos = Vec2.new(200 + defender_dist, 270)
+                    break
+                end
+            end
+        end
+        s.owner = carrier
+        s.ball = Vec2.new(182, 270)
+        match.step(s, 0.016, NO_INPUT)
+        return s.ball_vel:length()
+    end
+
+    t.it("a striker in space shoots much harder than one closed down", function()
+        local open = ai_shot_speed(nil)
+        local closed = ai_shot_speed(30)
+        t.is_true(open > closed * 1.5, "space converts into shot power")
+    end)
+end)
+
 t.describe("match scenario: keeper retains possession under pressure", function()
     -- A scripted "real game" situation: the home keeper has gathered the ball with
     -- a striker pressing and two defenders available as outlets. Played out over 3

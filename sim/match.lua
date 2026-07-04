@@ -35,8 +35,14 @@ local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 
 local STEAL_DIST = 26 -- AI challenge range to dislodge the ball
 local TACKLE_POP_SPEED = 150 -- speed the ball pops out on a tackle
-local AI_STEAL_CD = 0.8 -- min seconds between AI tackle attempts
+local AI_STEAL_CD = 1.2 -- min seconds between AI tackle attempts (carriers get a beat on the ball)
 local KEEPER_SMOTHER = 26 -- keeper takes the ball off a carrier's feet at this range (in its box)
+
+-- Body blocking: a fast loose ball ricochets off an outfield body it hits instead
+-- of ghosting through — defenders between the shooter and the goal matter. Slow
+-- balls (below POSSESS_MAX_SPEED) are handled by collection; high balls fly over.
+local BLOCK_HEIGHT = 20 -- ball at/below this height hits a body (lobs clear ~24 at the blocker)
+local BLOCK_DAMP = 0.5 -- fraction of speed kept by the ricochet
 
 -- AI on-ball decision making: an AI carrier passes out of pressure instead of
 -- dribbling blindly into a challenge.
@@ -44,6 +50,13 @@ local AI_PASS_PRESSURE = 70 -- an opponent this close = pressured, look for a pa
 local AI_PASS_MIN_OPEN = 40 -- an outlet must have this much space to be worth it
 local AI_PASS_MIN_DIST = 40 -- don't pass to someone standing on your toes
 local AI_PASS_MAX_DIST = 420 -- or to someone the other side of the pitch
+
+-- AI shooting: shot power scales with space (the deterministic stand-in for the
+-- human's charge). An unpressured striker sets himself and beats the keeper; a
+-- closed-down one can only snap off a saveable shot — so defending means
+-- closing shooters down, and conceding space concedes goals.
+local AI_CHARGE_MIN_SPACE = 25 -- no power bonus with a defender this close
+local AI_CHARGE_SPACE_RANGE = 120 -- space beyond that for the full charge bonus
 local AI_PASS_RISK_PENALTY = 80 -- scoring malus when a chaser could cut the ground ball
 
 -- Player tackle: the same button does a standing poke when slow, or a committed
@@ -83,13 +96,20 @@ local CHIP_LINE_Z = 65 -- a chip shot is this high crossing the line (over keepe
 -- these are the shared thresholds. Saves are deterministic (no RNG).
 -- Save quality = how close the ball is (within reach) + handling − pace. A high
 -- quality save is gathered cleanly; a mid one is parried loose; a low one is beaten.
-local SAVE_SPEED_REF = 900 -- shot speed that fully cancels save quality
+-- Tuned so an uncharged shot placed at a corner is parried (not conceded) by a
+-- decent keeper, while a fully charged corner shot still beats it clean, and a
+-- charged shot straight at the keeper is parried rather than swallowed.
+local SAVE_SPEED_REF = 1300 -- shot speed that fully cancels save quality
 local CATCH_QUALITY = 0.45 -- at/above this the keeper gathers the ball cleanly
 local PARRY_QUALITY = 0.1 -- below catch but >= this: deflected loose; below: beaten
 local HANDLING_WEIGHT = 0.5 -- how much keeper handling lifts save quality
 local PARRY_CD = 0.18 -- pickup lockout after a parry (stops instant re-grab/re-dive)
 local PARRY_SPEED_MULT = 0.6 -- fraction of incoming speed kept on a deflection
 local MIN_PARRY_CLEAR = 260 -- a parry is always punched at least this fast (clear of traffic)
+-- A parry is tipped UP as well as out: the deflection sails over the shooter's
+-- head instead of being served back to their feet (where it would ricochet off
+-- their body straight back at the goal — a guaranteed rebound tap-in).
+local PARRY_POP_VZ = 240
 local KEEPER_HOLD = 0.9 -- seconds a keeper surveys/holds before distributing
 local KEEPER_DIVE_DURATION = 0.32 -- dive lunge / animation window
 local KEEPER_SAFE_DIST = 60 -- a distribution outlet must be this clear of opponents
@@ -161,7 +181,7 @@ local DODGE_SPEED_MULT = 2.4 -- sideways speed during a juke
 -- a frame's events are whatever happened during that frame. Positions are world
 -- space; `player` is the actor's id (nil for ball-only events).
 ---@class MatchEvent
----@field kind "shot"|"pass"|"touch"|"tackle"|"catch"|"parry"|"claim"
+---@field kind "shot"|"pass"|"touch"|"tackle"|"catch"|"parry"|"claim"|"block"
 ---@field x number
 ---@field y number
 ---@field player string?
@@ -1368,8 +1388,10 @@ local function attempt_save(s)
                         if dir.x == 0 and dir.y == 0 then
                             dir = keeper.facing
                         end
-                        -- Punch it genuinely clear, not a dribble to the keeper's feet.
+                        -- Punch it genuinely clear — out AND up, so the deflection
+                        -- sails over the shooter rather than into their body.
                         s.ball_vel = dir:scale(math.max(MIN_PARRY_CLEAR, speed * PARRY_SPEED_MULT))
+                        s.ball_vz = PARRY_POP_VZ
                         s.ball_spin = 0
                         s.pickup_cd = PARRY_CD
                         return "parry"
@@ -1438,13 +1460,33 @@ local function update_ball(s, dt, input)
             local g = attack_goal(s, owner.team)
             local gc = Vec2.new((owner.team == "home") and (g.x + g.w) or g.x, g.y + g.h / 2)
             if owner.pos:dist(gc) < AI_SHOOT_RANGE then
-                -- Shoot to the corner away from the defending keeper.
+                -- Shoot to the corner away from the defending keeper, with power
+                -- scaled by the space the striker has been given (see constants).
                 local keeper = team_keeper(s, owner.team == "home" and "away" or "home")
                 local vbias = 0.85
                 if keeper then
                     vbias = (keeper.pos.y < gc.y) and 0.85 or -0.85
                 end
-                release_shot(s, owner, shot_target(s, owner, vbias):sub(owner.pos))
+                local space = math.huge
+                for _, q in ipairs(s.players) do
+                    if q.team ~= owner.team and not q.is_keeper then
+                        space = math.min(space, q.pos:dist(owner.pos))
+                    end
+                end
+                -- Closed down with no power available: look for the square ball
+                -- to a better-placed teammate first; only shoot if nobody's on.
+                local passed = false
+                if space < AI_CHARGE_MIN_SPACE then
+                    passed = ai_try_pass(s, s.owner)
+                end
+                if not passed then
+                    local frac = math.max(
+                        0,
+                        math.min(1, (space - AI_CHARGE_MIN_SPACE) / AI_CHARGE_SPACE_RANGE)
+                    )
+                    local speed = owner.shot_speed * (1 + frac * CHARGE_POWER)
+                    release_shot(s, owner, shot_target(s, owner, vbias):sub(owner.pos), speed)
+                end
             else
                 -- Out of range: pass out of pressure rather than dribble into a
                 -- challenge. If nobody is open, keep carrying.
@@ -1503,6 +1545,37 @@ local function update_ball(s, dt, input)
     elseif s.ball.x > s.field.w - BALL_RADIUS and not in_mouth(s.ball, s.goal_away) then
         s.ball.x = s.field.w - BALL_RADIUS
         s.ball_vel.x = -s.ball_vel.x
+    end
+
+    -- Body blocking: a fast, low ball that runs into an outfield body ricochets
+    -- off it. Only a ball moving TOWARD the body blocks, so a shooter never
+    -- blocks their own release. Keepers are excluded — they interact with the
+    -- ball through saves and claims, never as a passive wall.
+    do
+        local speed = s.ball_vel:length()
+        if speed >= POSSESS_MAX_SPEED and s.ball_z <= BLOCK_HEIGHT then
+            for _, p in ipairs(s.players) do
+                if not p.is_keeper then
+                    local off = s.ball:sub(p.pos)
+                    local d = off:length()
+                    local contact = p.radius + BALL_RADIUS
+                    if d < contact then
+                        local n = (d > 0) and off:normalized() or Vec2.new(1, 0)
+                        local vn = s.ball_vel.x * n.x + s.ball_vel.y * n.y
+                        if vn < 0 then
+                            s.events[#s.events + 1] =
+                                { kind = "block", x = s.ball.x, y = s.ball.y, player = p.id }
+                            -- Reflect off the body normal, damped, and push the
+                            -- ball clear so it can't re-block next frame.
+                            s.ball_vel = s.ball_vel:sub(n:scale(2 * vn)):scale(BLOCK_DAMP)
+                            s.ball = p.pos:add(n:scale(contact))
+                            s.ball_spin = 0
+                            break
+                        end
+                    end
+                end
+            end
+        end
     end
 
     -- Keeper dive: contest an on-target shot before anyone can generically collect.
