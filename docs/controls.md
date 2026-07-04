@@ -2,28 +2,32 @@
 
 ## Match (current)
 
+Two contextual action keys + sprint. The same key does the natural thing for the moment.
+
 | Action | Keys |
 |--------|------|
 | Move   | Arrow keys or WASD |
-| Shoot  | Space or J |
-| Shoot (charge) | Space or J (hold to charge, release to fire) |
-| Pass   | K |
-| Tackle | Left Shift or X |
+| **Act** — shoot (with ball) / tackle (without) | Space |
+| **Play** — pass (with ball) / switch player (without) | K |
+| Sprint | Shift (hold) |
+| Lob / chip modifier | L (hold) |
 | Juke / Dodge | C |
-| Switch player | Tab or Q |
 | Rematch (after full time) | R or Enter |
 | Toggle bloom | B (debug) |
 | Quit   | Esc |
 
-- **Shooting** aims at the goal; hold up/down while shooting to place the ball into a corner.
-  Hold the shoot key to **charge** a harder shot; holding a left/right direction at release
-  **curves** it.
-- **Tackle** is context-aware: standing still you make a quick **standing poke**; while moving
-  you commit a **slide tackle** whose speed scales with your current pace. Slides reach further
-  and knock the carrier off balance, but lock you in with a longer recovery.
+- **Shooting** (Space with the ball) aims at the goal; hold up/down to place it into a corner.
+  Hold Space to **charge** a harder shot; holding left/right at release **curves** it.
+- **Tackling** (Space without the ball) has one rule: normally it's a quick **standing poke**;
+  while **sprinting** it's a committed **slide tackle** whose speed scales with your pace.
+  Slides reach further and knock the carrier off balance, but lock you in with a longer
+  recovery — *sprint + Space* is the big play, and it can miss.
+- **Sprint** (hold Shift) burns a **stamina meter** (shown above the help text when not full);
+  it refills whenever you're not sprinting, and the **stamina** stat sets how big the tank is.
+  An empty tank means no boost until it meaningfully recovers.
+- **Switching** (K without the ball) hands control to the home outfielder **nearest the ball**;
+  winning the ball auto-switches control to the winner.
 - **Juke** is a quick sidestep with brief tackle immunity — beat a defender or escape a challenge.
-- **Switch** hands control to the home outfielder **nearest the ball** (not a fixed rotation),
-  so when defending it always picks the player you actually want.
 - Players have **bodies**: they block and bump each other, and a slide that connects shoves and
   briefly stuns the player it hits.
 - Fast shots and driven passes **ricochet off bodies** — a defender in the lane blocks the shot,

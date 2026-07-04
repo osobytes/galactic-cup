@@ -67,15 +67,22 @@ function Match:event(evt)
         end
         return
     end
-    -- Shooting is polled (hold to charge, fire on release); the rest are edges.
-    if evt.key == "k" then
-        self._pass = true
-    elseif evt.key == "lshift" or evt.key == "x" then
-        self._dash = true
+    -- Contextual actions: the same key means the natural thing for the moment.
+    -- Space = shoot with the ball (polled: hold to charge) / tackle without it.
+    -- K = pass with the ball / switch player without it.
+    local carrying = self.state.owner == self.state.controlled
+    if evt.key == "space" then
+        if not carrying then
+            self._dash = true
+        end
+    elseif evt.key == "k" then
+        if carrying then
+            self._pass = true
+        else
+            self._switch = true
+        end
     elseif evt.key == "c" then
         self._dodge = true
-    elseif evt.key == "tab" or evt.key == "q" then
-        self._switch = true
     elseif evt.key == "b" then
         bloom.config.enabled = not bloom.config.enabled
     end
@@ -101,7 +108,11 @@ end
 
 ---@param dt number
 function Match:update(dt)
-    local held = love.keyboard.isDown("space", "j")
+    -- Space only reads as "shoot" while carrying; defending, it's the tackle
+    -- edge handled in event(). Winning the ball with Space already down starts
+    -- a charge — release fires, a natural first-time finish.
+    local carrying = self.state.owner == self.state.controlled
+    local held = carrying and love.keyboard.isDown("space")
     ---@type MatchInput
     local input = {
         move = read_move_axis(),
@@ -112,6 +123,7 @@ function Match:update(dt)
         dash = self._dash,
         dodge = self._dodge,
         lob = love.keyboard.isDown("l"), -- held modifier: chip/lob
+        sprint = love.keyboard.isDown("lshift", "rshift"),
     }
     self._shoot_held_prev = held
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
@@ -144,15 +156,24 @@ function Match:draw_frame(s, vp)
         "center"
     )
     love.graphics.print(
-        "Move: WASD/Arrows    Shoot: Space/J (hold = charge, hold left/right = curve)    Pass: K",
+        "Move: WASD/Arrows    Sprint: Shift (hold)    Space: Shoot / Tackle    K: Pass / Switch",
         16,
         vp.h - 44
     )
     love.graphics.print(
-        "Tackle/Slide: Shift or X    Juke: C    Lob/Chip: L (hold)    Switch: Tab/Q    Quit: Esc",
+        "Hold Space to charge (left/right curves)    L (hold): Lob/Chip    C: Juke    Esc: Quit",
         16,
         vp.h - 26
     )
+
+    -- Sprint meter: only drawn while it's not full, so the HUD stays quiet.
+    local me = s.players[s.controlled]
+    if me.sprint_meter < 1 then
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.rectangle("fill", 16, vp.h - 58, 120, 6)
+        love.graphics.setColor(0.4, 0.9, 1, 0.9)
+        love.graphics.rectangle("fill", 16, vp.h - 58, 120 * me.sprint_meter, 6)
+    end
 
     if s.finished then
         love.graphics.setColor(0, 0, 0, 0.6)

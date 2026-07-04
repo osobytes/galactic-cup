@@ -35,3 +35,31 @@ t.describe("match screen rematch (tier 2)", function()
         t.is_true(not m._pass, "pass input does not buffer on the full-time screen")
     end)
 end)
+
+t.describe("match screen contextual controls (tier 2)", function()
+    t.it("K passes while carrying the ball", function()
+        local m = Match.new() -- at kickoff the controlled player has the ball
+        m:event({ kind = "key", key = "k" })
+        t.is_true(m._pass, "K is a pass on the ball")
+        t.is_true(not m._switch)
+    end)
+
+    t.it("K switches player when not carrying", function()
+        local m = Match.new()
+        m.state.owner = nil
+        m:event({ kind = "key", key = "k" })
+        t.is_true(m._switch, "K is a switch off the ball")
+        t.is_true(not m._pass)
+    end)
+
+    t.it("Space tackles only when not carrying", function()
+        local m = Match.new()
+        m.state.owner = nil
+        m:event({ kind = "key", key = "space" })
+        t.is_true(m._dash, "Space is a tackle off the ball")
+
+        local m2 = Match.new()
+        m2:event({ kind = "key", key = "space" })
+        t.is_true(not m2._dash, "Space never tackles while carrying (it shoots via hold)")
+    end)
+end)

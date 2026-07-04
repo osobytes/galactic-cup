@@ -62,7 +62,6 @@ local AI_PASS_RISK_PENALTY = 80 -- scoring malus when a chaser could cut the gro
 -- Player tackle: the same button does a standing poke when slow, or a committed
 -- slide when moving (slide speed scales off current velocity). Slides reach
 -- further but lock you in and have a long recovery.
-local SLIDE_TRIGGER = 70 -- current speed (px/s) above which the button slides
 local SLIDE_DURATION = 0.4 -- how long the slide lunge lasts
 local SLIDE_MULT = 1.5 -- initial slide speed = current speed × this
 local SLIDE_BASE_MIN = 200 -- ...but never slower than this (slide has punch)
@@ -133,6 +132,12 @@ local DODGE_DURATION = 0.16 -- length of a juke (seconds)
 local DODGE_CD = 0.6 -- juke cooldown (seconds)
 local DODGE_SPEED_MULT = 2.4 -- sideways speed during a juke
 
+-- Sprint (controlled player): a hold-to-run burst from a stamina tank. The tank
+-- size is stamina-derived (see sim.stats); it refills while not sprinting.
+local SPRINT_MULT = 1.35 -- speed multiplier while sprinting
+local SPRINT_REFILL = 0.4 -- meter refilled per second when not sprinting
+local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicker at empty)
+
 ---@class MatchPlayer
 ---@field id string
 ---@field name string
@@ -163,6 +168,9 @@ local DODGE_SPEED_MULT = 2.4 -- sideways speed during a juke
 ---@field grab_timer number  -- keeper gather/reach pose remaining (visual)
 ---@field throw_timer number  -- keeper release/throw pose remaining (visual)
 ---@field receive_timer number  -- seconds this player is running onto an incoming pass
+---@field sprint_meter number  -- 0..1 stamina tank for sprinting
+---@field sprint_dur number  -- seconds a full tank lasts (stamina-derived)
+---@field sprinting boolean  -- currently sprint-boosted (hysteresis state)
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
 
@@ -171,10 +179,11 @@ local DODGE_SPEED_MULT = 2.4 -- sideways speed during a juke
 ---@field shoot boolean  -- fire the shot (released this frame)
 ---@field shoot_held boolean  -- shoot key currently down (builds charge)
 ---@field pass boolean
----@field switch boolean  -- cycle the controlled player
----@field dash boolean  -- burst of speed; a tackle if it reaches a carrier
+---@field switch boolean  -- hand control to the outfielder nearest the ball
+---@field dash boolean  -- tackle attempt (slide when moving fast, poke when slow)
 ---@field dodge boolean  -- sidestep juke with brief tackle immunity
 ---@field lob boolean  -- loft modifier: chip a shot / lob a pass over a defender
+---@field sprint boolean  -- hold to sprint (drains the sprint meter)
 
 -- One-frame notifications of discrete actions, for the renderer's juice layer
 -- (flashes, trails). Produced by the sim, cleared at the top of every step, so
@@ -291,6 +300,9 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             grab_timer = 0,
             throw_timer = 0,
             receive_timer = 0,
+            sprint_meter = 1,
+            sprint_dur = stats.sprint_duration(pd.stats),
+            sprinting = false,
         }
     end
     return list
@@ -334,6 +346,8 @@ local function place_kickoff(s, kicking)
         p.grab_timer = 0
         p.throw_timer = 0
         p.receive_timer = 0
+        p.sprint_meter = 1
+        p.sprinting = false
     end
     -- Give the kicking team the ball at the centre spot.
     local kicker
@@ -1111,8 +1125,9 @@ local function move_players(s, dt, input)
 
     for i, p in ipairs(s.players) do
         if i == s.controlled then
-            -- Tackle button: a committed slide when moving, else a standing poke.
-            -- Slide speed scales off current velocity (p.vel) so it feels relative.
+            -- Tackle button: a committed slide while SPRINTING, else a standing
+            -- poke — one legible rule (sprint + tackle = the big slide). Slide
+            -- speed scales off current velocity (p.vel) so it feels relative.
             if
                 input.dash
                 and p.slide_timer <= 0
@@ -1121,7 +1136,7 @@ local function move_players(s, dt, input)
                 and p.stun_timer <= 0
             then
                 local sp = p.vel:length()
-                if sp > SLIDE_TRIGGER then
+                if p.sprinting then
                     local d = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
                         or p.facing
                     p.slide_timer = SLIDE_DURATION
@@ -1157,9 +1172,24 @@ local function move_players(s, dt, input)
                 )
             else
                 local dir = input.move
-                if dir.x ~= 0 or dir.y ~= 0 then
+                local moving = dir.x ~= 0 or dir.y ~= 0
+                -- Sprint: needs a quarter tank to (re)engage, but once running it
+                -- burns to empty — so a drained meter doesn't flicker the boost
+                -- on and off at the refill rate.
+                local want = input.sprint and moving and p.stun_timer <= 0
+                local can = p.sprint_meter > (p.sprinting and 0 or SPRINT_ENGAGE)
+                p.sprinting = (want and can) or false
+                if p.sprinting then
+                    p.sprint_meter = math.max(0, p.sprint_meter - dt / p.sprint_dur)
+                else
+                    p.sprint_meter = math.min(1, p.sprint_meter + SPRINT_REFILL * dt)
+                end
+                if moving then
                     local nd = dir:normalized()
                     local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
+                    if p.sprinting then
+                        mv = mv * SPRINT_MULT
+                    end
                     p.pos = clamp_to_field(s, p.pos:add(nd:scale(mv * dt)))
                     p.facing = nd
                 end

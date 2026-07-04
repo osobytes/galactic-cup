@@ -21,6 +21,16 @@ function stats.shot_speed(s)
     return BASE_SHOT + s.power * SHOT_PER_POWER
 end
 
+-- Sprint: the hold-to-run burst. Stamina sets how long a full tank lasts.
+local BASE_SPRINT = 2.2 -- seconds of sprint at stamina 0
+local SPRINT_PER_STAMINA = 0.25 -- extra seconds per stamina point
+
+---@param s StatBlock
+---@return number seconds
+function stats.sprint_duration(s)
+    return BASE_SPRINT + s.stamina * SPRINT_PER_STAMINA
+end
+
 -- Keeper-specific derivations. The generic StatBlock maps onto GK roles the way
 -- other soccer games separate them: `defense` is reflexes/positioning (reach),
 -- `speed` is diving range, `technique` is handling (clean catch vs spill/parry).

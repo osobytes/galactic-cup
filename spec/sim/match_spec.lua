@@ -21,6 +21,7 @@ local function input(o)
         dash = o.dash or false,
         dodge = o.dodge or false,
         lob = o.lob or false,
+        sprint = o.sprint or false,
     }
 end
 
@@ -149,15 +150,25 @@ t.describe("match.step tackling", function()
         t.is_true(s.owner ~= away_idx, "carrier loses possession to the standing tackle")
     end)
 
-    t.it("a slide (moving fast) wins the ball from further away and stuns the carrier", function()
+    t.it("a slide (sprinting) wins the ball from further away and stuns the carrier", function()
         local s, away_idx, carrier = carrier_setup()
         local me = s.players[s.controlled]
-        -- approach from a slide's extended range, moving fast toward the carrier
+        -- approach from a slide's extended range, sprinting at the carrier
         me.pos = Vec2.new(carrier.pos.x + 32, carrier.pos.y)
-        me.vel = Vec2.new(-200, 0) -- fast -> slide
-        match.step(s, 0.016, input({ dash = true, move = Vec2.new(-1, 0) }))
+        me.vel = Vec2.new(-200, 0)
+        me.sprinting = true -- sprint + tackle = slide
+        match.step(s, 0.016, input({ dash = true, move = Vec2.new(-1, 0), sprint = true }))
         t.is_true(s.owner ~= away_idx, "slide wins the ball at extended reach")
         t.is_true(carrier.stun_timer > 0, "the slid-through carrier is knocked off balance")
+    end)
+
+    t.it("a jogging (non-sprint) tackle is a poke, not a slide", function()
+        local s = new_match()
+        local me = s.players[s.controlled]
+        me.vel = Vec2.new(-150, 0) -- moving, but not sprinting
+        match.step(s, 0.001, input({ dash = true, move = Vec2.new(-1, 0) }))
+        t.is_true(me.slide_timer <= 0, "no committed slide without sprint")
+        t.is_true(me.tackle_timer > 0, "a standing poke instead")
     end)
 
     t.it("slide speed scales with current velocity", function()
@@ -166,7 +177,8 @@ t.describe("match.step tackling", function()
             local me = s.players[s.controlled]
             me.vel = Vec2.new(speed, 0)
             me.facing = Vec2.new(1, 0)
-            match.step(s, 0.001, input({ dash = true, move = Vec2.new(1, 0) }))
+            me.sprinting = true
+            match.step(s, 0.001, input({ dash = true, move = Vec2.new(1, 0), sprint = true }))
             return me.slide_vel
         end
         t.is_true(slide_vel(300) > slide_vel(150), "a faster run produces a faster slide")
@@ -1468,6 +1480,52 @@ t.describe("match AI shooting", function()
         local open = ai_shot_speed(nil)
         local closed = ai_shot_speed(30)
         t.is_true(open > closed * 1.5, "space converts into shot power")
+    end)
+end)
+
+t.describe("match sprint", function()
+    -- Run the controlled player along the bottom wing with the loose ball parked
+    -- far away (top-left), so nothing interferes with the straight-line run.
+    ---@param frames integer
+    ---@param inputs table
+    ---@param setup fun(s: MatchState, me: MatchPlayer)?
+    local function run(frames, inputs, setup)
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 60
+        s.ball = Vec2.new(100, 60)
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(150, 480)
+        if setup then
+            setup(s, me)
+        end
+        local x0 = me.pos.x
+        for _ = 1, frames do
+            match.step(s, 1 / 60, input(inputs))
+        end
+        return me.pos.x - x0, me
+    end
+
+    t.it("sprinting covers more ground and drains the meter", function()
+        local walked = run(30, { move = Vec2.new(1, 0) })
+        local sprinted, me = run(30, { move = Vec2.new(1, 0), sprint = true })
+        t.is_true(sprinted > walked * 1.2, "sprint is meaningfully faster")
+        t.is_true(me.sprint_meter < 1, "sprinting drains the meter")
+    end)
+
+    t.it("the meter refills while not sprinting", function()
+        local _, me = run(60, { move = Vec2.new(1, 0) }, function(_, m)
+            m.sprint_meter = 0.5
+        end)
+        t.is_true(me.sprint_meter > 0.5, "resting refills the tank")
+    end)
+
+    t.it("an empty tank gives no boost until it meaningfully recovers", function()
+        local walked = run(30, { move = Vec2.new(1, 0) })
+        local drained = run(30, { move = Vec2.new(1, 0), sprint = true }, function(_, m)
+            m.sprint_meter = 0
+        end)
+        t.near(drained, walked, 1e-6, "no sprint speed from an empty tank")
     end)
 end)
 
