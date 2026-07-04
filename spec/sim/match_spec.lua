@@ -483,6 +483,14 @@ t.describe("match.step off-ball AI", function()
         s.owner = AWAY_CARRIER
         s.players[AWAY_CARRIER].pos = Vec2.new(480, 270)
         s.ball = Vec2.new(480, 270)
+        -- Spread the away side to its open-play anchors: kickoff clamps them
+        -- to their own half, which would bunch every marker's man (and so the
+        -- marker targets) right next to the carrier at the halfway line.
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and i ~= AWAY_CARRIER then
+                p.pos = Vec2.new(p.anchor.x, p.anchor.y)
+            end
+        end
         return s
     end
 
@@ -1058,6 +1066,34 @@ t.describe("match.step keeper vs close-range shots", function()
         local before = k.pos:dist(s.ball)
         match.step(s, 0.016, NO_INPUT)
         t.is_true(k.pos:dist(s.ball) < before, "the keeper closes down the carrier")
+    end)
+end)
+
+t.describe("match.step kickoff positioning", function()
+    local function assert_own_halves(s)
+        local half = s.field.w / 2
+        for _, p in ipairs(s.players) do
+            if p.team == "home" then
+                t.is_true(p.pos.x <= half, p.id .. " starts in the home half")
+            else
+                t.is_true(p.pos.x >= half, p.id .. " starts in the away half")
+            end
+        end
+    end
+
+    t.it("every player starts in their own half at the opening kickoff", function()
+        assert_own_halves(new_match())
+    end)
+
+    t.it("both teams restart in their own halves after a goal", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 1
+        s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
+        s.ball_vel = Vec2.new(200, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.score.home, 1)
+        assert_own_halves(s)
     end)
 end)
 

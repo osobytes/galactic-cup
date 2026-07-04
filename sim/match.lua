@@ -332,8 +332,18 @@ end
 ---@param kicking "home"|"away"?
 local function place_kickoff(s, kicking)
     kicking = kicking or "home"
+    local half = s.field.w / 2
     for _, p in ipairs(s.players) do
-        p.pos = Vec2.new(p.anchor.x, p.anchor.y)
+        -- Kickoff law: everyone lines up in their own half (forwards whose
+        -- formation anchor is upfield pull back to the halfway line and push
+        -- up again once play restarts).
+        local ax = p.anchor.x
+        if p.team == "home" then
+            ax = math.min(ax, half - PLAYER_RADIUS)
+        else
+            ax = math.max(ax, half + PLAYER_RADIUS)
+        end
+        p.pos = Vec2.new(ax, p.anchor.y)
         p.vel = Vec2.new(0, 0)
         p.facing = Vec2.new(p.team == "home" and 1 or -1, 0)
         p.dive_timer = 0
