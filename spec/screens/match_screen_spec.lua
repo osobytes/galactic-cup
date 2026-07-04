@@ -37,11 +37,10 @@ t.describe("match screen rematch (tier 2)", function()
 end)
 
 t.describe("match screen contextual controls (tier 2)", function()
-    t.it("K passes while carrying the ball", function()
+    t.it("K never switches while carrying the ball (it charges a pass)", function()
         local m = Match.new() -- at kickoff the controlled player has the ball
         m:event({ kind = "key", key = "k" })
-        t.is_true(m._pass, "K is a pass on the ball")
-        t.is_true(not m._switch)
+        t.is_true(not m._switch, "on the ball, K is the (polled) pass charge, not a switch")
     end)
 
     t.it("K switches player when not carrying", function()

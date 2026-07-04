@@ -21,6 +21,7 @@ local FIELD_H = 540
 ---@field away_name string
 ---@field _opts { formation: string?, tactic: string? }
 ---@field _shoot_held_prev boolean
+---@field _pass_held_prev boolean
 ---@field _pass boolean
 ---@field _switch boolean
 ---@field _dash boolean
@@ -53,6 +54,7 @@ function Match:restart()
     })
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     self._shoot_held_prev = false
+    self._pass_held_prev = false
     view_state.reset()
     effects.reset()
 end
@@ -78,9 +80,9 @@ function Match:event(evt)
             self._dash = true
         end
     elseif evt.key == "k" then
-        if carrying then
-            self._pass = true
-        else
+        -- Passing is polled while carrying (hold to charge the range, release
+        -- to play it); off the ball K switches player on the press.
+        if not carrying then
             self._switch = true
         end
     elseif evt.key == "c" then
@@ -115,12 +117,14 @@ function Match:update(dt)
     -- a charge — release fires, a natural first-time finish.
     local carrying = self.state.owner == self.state.controlled
     local held = carrying and love.keyboard.isDown("space")
+    local k_held = carrying and love.keyboard.isDown("k")
     ---@type MatchInput
     local input = {
         move = read_move_axis(),
         shoot = self._shoot_held_prev and not held, -- fire on release
         shoot_held = held,
-        pass = self._pass,
+        pass = self._pass_held_prev and not k_held, -- pass fires on release too
+        pass_held = k_held,
         switch = self._switch,
         dash = self._dash,
         dodge = self._dodge,
@@ -128,6 +132,7 @@ function Match:update(dt)
         sprint = love.keyboard.isDown("lshift", "rshift"),
     }
     self._shoot_held_prev = held
+    self._pass_held_prev = k_held
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     sim_match.step(self.state, dt, input)
     view_state.update(self.state.players, dt)
@@ -164,7 +169,7 @@ function Match:draw_frame(s, vp)
         vp.h - 44
     )
     love.graphics.print(
-        "Hold Space to charge (left/right curves)    L (hold): Lob/Chip    C: Juke    Esc: Quit",
+        "Hold Space/K to charge power & range    L: Lob/Cross    C: Juke    Space in air: Header    Esc: Quit",
         16,
         vp.h - 26
     )

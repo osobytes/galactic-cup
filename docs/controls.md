@@ -34,6 +34,18 @@ Two contextual action keys + sprint. The same key does the natural thing for the
   (centre-circle distance). But shielding is **active**: the presser hunts the ball itself and
   will work around your body, and a defender leaning on you shoves you off your spot — standing
   still is never safe, keep turning or move.
+- **You control your keeper**: when your keeper gathers the ball, control switches to it.
+  **K** (hold to charge) throws — the longer you hold, the further along your aim it picks a
+  teammate; **Space** (hold to charge) is a **punt** off the foot, clearing high toward
+  mid/front field as far as you charge it. You can walk it around inside your box; after ~5
+  seconds the keeper distributes on its own (six-second rule).
+- **Crosses**: a lofted pass (hold L + K) from wide in the attacking third becomes a **cross**
+  aimed at your teammate in the box — AI wingers swing them in too.
+- **Aerial play**: an airborne ball at head height can be met first-time — press **Space**
+  under it. Above the waist it's a **header** (safe, placed); lower it's a **volley** — much
+  harder, but with a real chance of skying it. The arena is a **cage**: a skied ball bounces
+  off the ceiling and rains back into play. AI attackers head crosses at goal; AI defenders
+  head danger clear.
 - **The keeper is protected**: while a keeper holds the ball, everyone backs well off its ring
   (laws of the game — a keeper in possession can't be challenged), and markers drop off the
   outlets to guard the passing lanes instead of standing on the receiver's boots. Read the

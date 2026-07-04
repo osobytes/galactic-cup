@@ -98,6 +98,14 @@ function effects.update(s, dt)
             -- Deflection: a sharp cool spark fan.
             ring(e.x, e.y, 0.3, 16, { 0.7, 0.9, 1 })
             burst(e.x, e.y, 9, 220, 0.34, 3, { 0.7, 0.9, 1 })
+        elseif e.kind == "header" then
+            -- Aerial flick: a crisp high ring.
+            ring(e.x, e.y, 0.28, 15, { 0.9, 1, 1 })
+            burst(e.x, e.y, 5, 170, 0.28, 2, { 0.9, 1, 1 })
+        elseif e.kind == "volley" then
+            -- A volley is violence: big hot flash.
+            ring(e.x, e.y, 0.34, 20, { 1, 0.8, 0.45 })
+            burst(e.x, e.y, 12, 280, 0.4, 3, { 1, 0.8, 0.45 })
         elseif e.kind == "block" then
             -- Body block: a blunt thud off a defender, warmer and smaller than a parry.
             ring(e.x, e.y, 0.26, 14, { 1, 0.85, 0.6 })

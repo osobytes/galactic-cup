@@ -17,6 +17,7 @@ local function input(o)
         shoot = o.shoot or false,
         shoot_held = o.shoot_held or false,
         pass = o.pass or false,
+        pass_held = o.pass_held or false,
         switch = o.switch or false,
         dash = o.dash or false,
         dodge = o.dodge or false,
@@ -1045,7 +1046,7 @@ t.describe("match auto-switch control", function()
         t.eq(s.controlled, target, "control auto-switched to the ball winner")
     end)
 
-    t.it("does not hand control to the keeper", function()
+    t.it("hands control to the HOME keeper while it holds the ball", function()
         local s = new_match()
         local ki
         for i, p in ipairs(s.players) do
@@ -1061,7 +1062,8 @@ t.describe("match auto-switch control", function()
         s.ball_z = 0
         match.step(s, 0.016, NO_INPUT)
         t.eq(s.owner, ki, "keeper claimed it")
-        t.is_true(s.controlled ~= ki, "but control does not pass to the keeper")
+        t.eq(s.controlled, ki, "the human takes the keeper to pick the distribution")
+        t.is_true(s.players[ki].hold_timer > 2, "with a generous six-second-rule budget")
     end)
 end)
 
@@ -1822,6 +1824,236 @@ t.describe("match keeper respect ring (physical)", function()
             me.pos:dist(s.players[ki].pos) >= 69,
             "the human is pushed out to the respect ring"
         )
+    end)
+end)
+
+t.describe("match human keeper control", function()
+    local function home_keeper_holding(s)
+        s.owner = 1
+        s.controlled = 1
+        s.players[1].pos = Vec2.new(40, 270)
+        s.players[1].facing = Vec2.new(1, 0)
+        s.players[1].hold_timer = 5
+        s.ball = Vec2.new(46, 270)
+    end
+
+    t.it("a longer-held punt is hit harder and lofted", function()
+        local function punt(charge)
+            local s = new_match()
+            home_keeper_holding(s)
+            s.charge = charge
+            match.step(s, 0.016, input({ shoot = true }))
+            return s
+        end
+        local weak, strong = punt(0), punt(1)
+        t.is_true(weak.owner == nil and strong.owner == nil, "the punt releases the ball")
+        t.is_true(strong.ball_vz > 0, "punts are lofted clearances")
+        t.is_true(
+            strong.ball_vel:length() > weak.ball_vel:length(),
+            "holding longer sends it further"
+        )
+    end)
+
+    t.it("the charged throw range picks the far teammate along the aim", function()
+        local function throw_receiver(charge)
+            local s = new_match()
+            home_keeper_holding(s)
+            s.players[2].pos = Vec2.new(200, 270) -- short option on the aim line
+            s.players[3].pos = Vec2.new(480, 270) -- long option on the aim line
+            s.players[4].pos = Vec2.new(120, 60)
+            s.players[5].pos = Vec2.new(120, 480)
+            s.pass_charge = charge
+            match.step(s, 0.016, input({ pass = true }))
+            for i, pl in ipairs(s.players) do
+                if pl.receive_timer > 0 then
+                    return i, s
+                end
+            end
+        end
+        local near_i = throw_receiver(0)
+        local far_i, s2 = throw_receiver(1)
+        t.eq(near_i, 2, "a tap throw goes short")
+        t.eq(far_i, 3, "a charged throw picks out the long option")
+        t.is_true(s2.controlled ~= 1, "control returns to an outfielder after the release")
+    end)
+end)
+
+t.describe("match aerial play", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    -- A loose airborne ball at `z` dropping onto player index `idx`.
+    local function dropping_ball_on(s, idx, z)
+        s.owner = nil
+        s.pickup_cd = 0
+        local p = s.players[idx]
+        s.ball = Vec2.new(p.pos.x + 6, p.pos.y)
+        s.ball_vel = Vec2.new(0, 0)
+        s.ball_z = z
+        s.ball_vz = -50
+    end
+
+    t.it("an AI attacker heads a dropping ball at goal", function()
+        local s = new_match()
+        local att
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                att = i
+                break
+            end
+        end
+        s.players[att].pos = Vec2.new(160, 270) -- in front of the home goal
+        for i, p in ipairs(s.players) do
+            if p.team == "home" then
+                s.players[i].pos = Vec2.new(700, 60 + i * 40) -- clear of the drop
+            end
+        end
+        dropping_ball_on(s, att, 45)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "header"), "the striker meets it")
+        t.is_true(s.ball_vel.x < 0, "headed toward the home goal")
+    end)
+
+    t.it("a defender in its own third heads danger clear", function()
+        local s = new_match()
+        local def
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                def = i
+                break
+            end
+        end
+        s.players[def].pos = Vec2.new(100, 270) -- deep in the home third
+        s.players[s.controlled].pos = Vec2.new(700, 100)
+        for i, p in ipairs(s.players) do
+            if p.team == "away" then
+                s.players[i].pos = Vec2.new(820, 60 + i * 40)
+            end
+        end
+        dropping_ball_on(s, def, 50)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "header"), "the defender attacks the ball")
+        t.is_true(s.ball_vel.x > 0, "cleared upfield")
+        t.is_true(s.ball_vz > 0, "and high")
+    end)
+
+    t.it("volleys are riskier: some seeds sky it and the cage returns it", function()
+        local skied, clean
+        for seed = 1, 60 do
+            local s = match.new({
+                home = teams.nebula,
+                away = teams.orion,
+                field = { w = 960, h = 540 },
+                seed = seed,
+            })
+            local att
+            for i, p in ipairs(s.players) do
+                if p.team == "away" and not p.is_keeper then
+                    att = i
+                    break
+                end
+            end
+            s.players[att].pos = Vec2.new(160, 270)
+            for i, p in ipairs(s.players) do
+                if p.team == "home" then
+                    s.players[i].pos = Vec2.new(700, 60 + i * 40)
+                end
+            end
+            dropping_ball_on(s, att, 25) -- volley height
+            match.step(s, 0.016, NO_INPUT)
+            if has_event(s, "volley") then
+                if s.ball_vz > 400 then
+                    skied = skied or s
+                else
+                    clean = clean or s
+                end
+            end
+        end
+        t.is_true(skied ~= nil, "some volleys get skied")
+        t.is_true(clean ~= nil, "and some are hit clean")
+        -- The skied one: the cage ceiling caps it and brings it back down.
+        local max_z = 0
+        for _ = 1, 180 do
+            match.step(skied, 1 / 60, NO_INPUT)
+            max_z = math.max(max_z, skied.ball_z)
+        end
+        t.is_true(max_z <= 170, "the cage ceiling caps the flight")
+        t.is_true(skied.ball_z < 60, "and the ball comes back down into play")
+    end)
+end)
+
+t.describe("match crossing", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("an AI carrier on the flank crosses to the box", function()
+        local s = new_match()
+        local carrier, target
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                if not carrier then
+                    carrier = i
+                elseif not target then
+                    target = i
+                end
+            end
+        end
+        s.players[carrier].pos = Vec2.new(300, 100) -- wide, attacking third (away attacks -x)
+        s.players[target].pos = Vec2.new(150, 250) -- in the box
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper then
+                s.players[i].pos = Vec2.new(820, 60 + i * 30) -- nobody pressuring
+            end
+        end
+        s.owner = carrier
+        s.ball = s.players[carrier].pos:add(Vec2.new(-18, 0))
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "pass"), "the winger delivers it")
+        t.is_true(s.ball_vz > 0, "a cross is lofted")
+        t.is_true(s.players[target].receive_timer > 0, "aimed at the man in the box")
+    end)
+
+    t.it("a human lofted pass from wide targets the box runner", function()
+        local s = new_match()
+        local passer = s.controlled
+        s.players[passer].pos = Vec2.new(750, 100) -- wide right, attacking third
+        s.players[passer].facing = Vec2.new(1, 0)
+        local cone_mate, box_mate
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= passer then
+                if not cone_mate then
+                    cone_mate = i
+                    p.pos = Vec2.new(860, 100) -- straight along the aim
+                elseif not box_mate then
+                    box_mate = i
+                    p.pos = Vec2.new(830, 270) -- in the box
+                else
+                    p.pos = Vec2.new(200, 60 + i * 40)
+                end
+            end
+        end
+        for i, p in ipairs(s.players) do
+            if p.team == "away" then
+                s.players[i].pos = Vec2.new(120, 40 + i * 30)
+            end
+        end
+        s.owner = passer
+        s.ball = s.players[passer].pos:add(Vec2.new(18, 0))
+        match.step(s, 0.016, input({ pass = true, lob = true }))
+        t.is_true(s.players[box_mate].receive_timer > 0, "the cross picks the box, not the cone")
+        t.is_true(s.ball_vz > 0, "and sails high")
     end)
 end)
 
