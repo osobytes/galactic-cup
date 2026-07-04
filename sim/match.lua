@@ -1873,6 +1873,9 @@ local function update_ball(s, dt, input)
                 s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
             elseif input.pass then
                 try_pass(s, s.owner, input.lob)
+            elseif input.pass_held then
+                -- Holding K charges the pass RANGE (consumed by try_pass).
+                s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
             else
                 s.charge = 0
             end

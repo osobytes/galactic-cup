@@ -22,6 +22,7 @@ local FIELD_H = 540
 ---@field _opts { formation: string?, tactic: string? }
 ---@field _shoot_held_prev boolean
 ---@field _pass_held_prev boolean
+---@field _lob_latch boolean
 ---@field _pass boolean
 ---@field _switch boolean
 ---@field _dash boolean
@@ -55,6 +56,7 @@ function Match:restart()
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     self._shoot_held_prev = false
     self._pass_held_prev = false
+    self._lob_latch = false
     view_state.reset()
     effects.reset()
 end
@@ -118,6 +120,17 @@ function Match:update(dt)
     local carrying = self.state.owner == self.state.controlled
     local held = carrying and love.keyboard.isDown("space")
     local k_held = carrying and love.keyboard.isDown("k")
+    -- L is a modifier, and fingers naturally lift it a frame before the action
+    -- key on release. LATCH it across the hold so "L + K/Space" always lofts,
+    -- even when L comes up first.
+    local l_down = love.keyboard.isDown("l")
+    local firing = (self._shoot_held_prev and not held) or (self._pass_held_prev and not k_held)
+    local lob = l_down or (firing and self._lob_latch) or false
+    if held or k_held then
+        self._lob_latch = self._lob_latch or l_down
+    else
+        self._lob_latch = false
+    end
     ---@type MatchInput
     local input = {
         move = read_move_axis(),
@@ -128,7 +141,7 @@ function Match:update(dt)
         switch = self._switch,
         dash = self._dash,
         dodge = self._dodge,
-        lob = love.keyboard.isDown("l"), -- held modifier: chip/lob
+        lob = lob,
         sprint = love.keyboard.isDown("lshift", "rshift"),
     }
     self._shoot_held_prev = held

@@ -62,3 +62,50 @@ t.describe("match screen contextual controls (tier 2)", function()
         t.is_true(not m2._dash, "Space never tackles while carrying (it shoots via hold)")
     end)
 end)
+
+t.describe("match screen lob latch (tier 2)", function()
+    -- Drive the polled inputs with a stubbed keyboard.
+    local function with_keys(fn)
+        local saved = love.keyboard
+        local down = {}
+        love.keyboard = {
+            isDown = function(...)
+                for _, k in ipairs({ ... }) do
+                    if down[k] then
+                        return true
+                    end
+                end
+                return false
+            end,
+        }
+        local ok, err = pcall(fn, down)
+        love.keyboard = saved
+        assert(ok, err)
+    end
+
+    t.it("L held during a charged pass lofts it even if L lifts a frame early", function()
+        with_keys(function(down)
+            local m = Match.new() -- carrying at kickoff
+            down.k, down.l = true, true
+            m:update(1 / 60) -- charging the pass with L held
+            m:update(1 / 60)
+            down.l = false
+            m:update(1 / 60) -- L released a beat before K...
+            down.k = false
+            m:update(1 / 60) -- ...K release fires the pass
+            t.is_true(m.state.owner ~= m.state.controlled, "the pass released")
+            t.is_true(m.state.ball_vz > 0, "and it was lofted: the latch held L for us")
+        end)
+    end)
+
+    t.it("holding K charges the pass range for an outfielder", function()
+        with_keys(function(down)
+            local m = Match.new()
+            down.k = true
+            for _ = 1, 30 do -- half a second of holding K
+                m:update(1 / 60)
+            end
+            t.is_true(m.state.pass_charge > 0.5, "the pass range charged up")
+        end)
+    end)
+end)
