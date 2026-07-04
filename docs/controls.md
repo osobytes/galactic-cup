@@ -11,6 +11,7 @@
 | Tackle | Left Shift or X |
 | Juke / Dodge | C |
 | Switch player | Tab or Q |
+| Rematch (after full time) | R or Enter |
 | Toggle bloom | B (debug) |
 | Quit   | Esc |
 

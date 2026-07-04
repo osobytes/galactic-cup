@@ -18,6 +18,7 @@ local FIELD_H = 540
 ---@field away_color number[]
 ---@field home_name string
 ---@field away_name string
+---@field _opts { formation: string?, tactic: string? }
 ---@field _shoot_held_prev boolean
 ---@field _pass boolean
 ---@field _switch boolean
@@ -29,28 +30,41 @@ Match.__index = Match
 ---@param opts { formation: string?, tactic: string? }?
 ---@return MatchScreen
 function Match.new(opts)
-    opts = opts or {}
     local self = setmetatable({}, Match)
-    self.state = sim_match.new({
-        home = teams.nebula,
-        away = teams.orion,
-        field = { w = FIELD_W, h = FIELD_H },
-        home_formation = opts.formation,
-        tactic = opts.tactic and tactics[opts.tactic] or nil,
-    })
+    self._opts = opts or {}
     self.home_color = teams.nebula.color
     self.away_color = teams.orion.color
     self.home_name = teams.nebula.name
     self.away_name = teams.orion.name
+    self:restart()
+    return self
+end
+
+-- Start a fresh match with the same pre-match choices (formation/tactic).
+-- Used at construction and for the full-time rematch.
+function Match:restart()
+    self.state = sim_match.new({
+        home = teams.nebula,
+        away = teams.orion,
+        field = { w = FIELD_W, h = FIELD_H },
+        home_formation = self._opts.formation,
+        tactic = self._opts.tactic and tactics[self._opts.tactic] or nil,
+    })
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     self._shoot_held_prev = false
     view_state.reset()
-    return self
 end
 
 ---@param evt InputEvent
 function Match:event(evt)
     if evt.kind ~= "key" then
+        return
+    end
+    -- After full time only the rematch keys act; match inputs stop buffering.
+    if self.state.finished then
+        if evt.key == "r" or evt.key == "return" then
+            self:restart()
+        end
         return
     end
     -- Shooting is polled (hold to charge, fire on release); the rest are edges.
@@ -144,7 +158,14 @@ function Match:draw_frame(s, vp)
         love.graphics.setColor(0, 0, 0, 0.6)
         love.graphics.rectangle("fill", 0, 0, vp.w, vp.h)
         love.graphics.setColor(1, 1, 1)
-        love.graphics.printf("FULL TIME", 0, vp.h / 2 - 12, vp.w, "center")
+        love.graphics.printf("FULL TIME", 0, vp.h / 2 - 24, vp.w, "center")
+        love.graphics.printf(
+            "R / Enter — rematch      Esc — quit",
+            0,
+            vp.h / 2 + 4,
+            vp.w,
+            "center"
+        )
     end
 end
 
