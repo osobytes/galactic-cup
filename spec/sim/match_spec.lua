@@ -1600,6 +1600,92 @@ t.describe("match AI shooting", function()
     end)
 end)
 
+t.describe("match save grab-vs-parry odds", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    -- Fire the same shot at the away keeper under one seed; report the outcome.
+    ---@return "catch"|"parry"|"goal"|nil
+    local function shot_outcome(seed, speed, dy)
+        local s = match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            seed = seed,
+        })
+        local k
+        for _, p in ipairs(s.players) do
+            if p.team == "away" and p.is_keeper then
+                k = p
+            end
+        end
+        k.pos = Vec2.new(938, 270)
+        local slot = 0
+        for _, p in ipairs(s.players) do
+            if not p.is_keeper then
+                p.pos = Vec2.new(60 + slot * 40, 40) -- everyone clear of the lane
+                slot = slot + 1
+            end
+        end
+        s.owner = nil
+        s.pickup_cd = 0.3
+        s.ball = Vec2.new(750, 270)
+        s.ball_vel = Vec2.new(950, 270 + dy):sub(s.ball):normalized():scale(speed)
+        for _ = 1, 90 do
+            match.step(s, 1 / 60, NO_INPUT)
+            if has_event(s, "catch") then
+                return "catch"
+            end
+            if has_event(s, "parry") then
+                return "parry"
+            end
+            if s.score.home > 0 then
+                return "goal"
+            end
+        end
+        return nil
+    end
+
+    local function tally(speed, dy, n)
+        local c = { catch = 0, parry = 0, goal = 0 }
+        for seed = 1, n do
+            local o = shot_outcome(seed, speed, dy)
+            if o then
+                c[o] = c[o] + 1
+            end
+        end
+        return c
+    end
+
+    t.it("a soft, central shot sticks in the gloves nearly every time", function()
+        local c = tally(420, 0, 40)
+        local total = c.catch + c.parry
+        t.eq(c.goal, 0, "a soft central shot never scores")
+        t.is_true(total >= 39, "the keeper always deals with it")
+        t.is_true(c.catch >= total * 0.85, "held, not parried: " .. c.catch .. "/" .. total)
+    end)
+
+    t.it("a hard shot toward the corner is mostly pushed away", function()
+        local c = tally(700, 40, 40)
+        local total = c.catch + c.parry
+        t.eq(c.goal, 0, "still kept out")
+        t.is_true(total >= 39)
+        t.is_true(c.parry >= total * 0.7, "mostly parried: " .. c.parry .. "/" .. total)
+    end)
+
+    t.it("the same seed always reproduces the same outcome", function()
+        local a = shot_outcome(7, 700, 30)
+        local b = shot_outcome(7, 700, 30)
+        t.eq(a, b, "seeded matches are deterministic")
+    end)
+end)
+
 t.describe("match sprint", function()
     -- Run the controlled player along the bottom wing with the loose ball parked
     -- far away (top-left), so nothing interferes with the straight-line run.

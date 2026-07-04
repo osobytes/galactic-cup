@@ -6,6 +6,7 @@
 -- `step` advances it deterministically.
 
 local Vec2 = require("core.vec2")
+local rng = require("core.rng")
 local stats = require("sim.stats")
 local placement = require("sim.placement")
 local ai = require("sim.ai")
@@ -94,15 +95,19 @@ local MAX_LOB_VH = 400
 local CHIP_LINE_Z = 65 -- a chip shot is this high crossing the line (over keeper, under bar)
 
 -- Goalkeeper saves + distribution. Reach/handling are per-keeper (see sim.stats);
--- these are the shared thresholds. Saves are deterministic (no RNG).
--- Save quality = how close the ball is (within reach) + handling − pace. A high
--- quality save is gathered cleanly; a mid one is parried loose; a low one is beaten.
--- Tuned so an uncharged shot placed at a corner is parried (not conceded) by a
--- decent keeper, while a fully charged corner shot still beats it clean, and a
--- charged shot straight at the keeper is parried rather than swallowed.
+-- these are the shared thresholds.
+-- Save quality = how close the ball is (within reach) + handling − pace. Whether
+-- the keeper can get there at all (vs beaten) is geometric and deterministic;
+-- whether a reached ball is GRABBED or PARRIED is probabilistic — a logistic
+-- curve over quality, rolled from the match's seeded RNG (reproducible: same
+-- seed, same match). Soft shots straight at the keeper stick in the gloves
+-- almost every time; a blistering or full-stretch ball is usually pushed away.
+-- Tuned so an uncharged shot placed at a corner is kept out (mostly a parry) by
+-- a decent keeper, while a fully charged corner shot still beats it clean.
 local SAVE_SPEED_REF = 1300 -- shot speed that fully cancels save quality
-local CATCH_QUALITY = 0.45 -- at/above this the keeper gathers the ball cleanly
-local PARRY_QUALITY = 0.1 -- below catch but >= this: deflected loose; below: beaten
+local CATCH_EVEN_QUALITY = 0.45 -- quality at which grab-vs-parry is a coin flip
+local CATCH_SOFTNESS = 0.12 -- how fast the odds saturate either side of even
+local PARRY_QUALITY = 0.1 -- at/above this the keeper at least gets a hand to it; below: beaten
 local HANDLING_WEIGHT = 0.5 -- how much keeper handling lifts save quality
 local PARRY_CD = 0.18 -- pickup lockout after a parry (stops instant re-grab/re-dive)
 local PARRY_SPEED_MULT = 0.6 -- fraction of incoming speed kept on a deflection
@@ -225,6 +230,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field marks { home: table<integer, integer>, away: table<integer, integer> }  -- prev marking assignment (hysteresis)
 ---@field charge number  -- controlled carrier's shot charge, 0..1
 ---@field ball_spin number  -- lateral curve applied to the loose ball
+---@field rng integer  -- seeded PRNG state (core.rng): same seed = same match
 ---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
 
 local match = {}
@@ -433,13 +439,20 @@ local function marking_of(tactic)
     return tactic.marking or DEFAULT_MARKING
 end
 
----@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, players_by_id: table<string, PlayerData>? }
+---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>? }
 ---@return MatchState
 function match.new(opts)
     local field = opts.field
     local by_id = opts.players_by_id or pool_by_id()
     local home_tactic = opts.tactic or tactics.balanced
     local away_tactic = opts.away_tactic or tactics.balanced
+
+    -- Seeded randomness (grab-vs-parry rolls). Warm the state up a few steps:
+    -- minstd's first draws correlate with small seeds (seed 3 -> tiny sample).
+    local rstate = rng.seed(opts.seed or 42)
+    for _ = 1, 3 do
+        rstate = rng.roll(rstate)
+    end
 
     local home =
         build_team(opts.home, "home", field, by_id, opts.home_formation, home_tactic.line_shift)
@@ -475,6 +488,7 @@ function match.new(opts)
         marks = { home = {}, away = {} },
         charge = 0,
         ball_spin = 0,
+        rng = rstate,
         events = {},
     }
     place_kickoff(s)
@@ -1451,7 +1465,15 @@ local function attempt_save(s)
                         - speed / SAVE_SPEED_REF
 
                     if quality >= PARRY_QUALITY then
-                        keeper.save_pending = (quality >= CATCH_QUALITY) and "catch" or "parry"
+                        -- Grab or parry: probabilistic, from the match's seeded
+                        -- RNG. The catch odds are a logistic curve over quality
+                        -- — soft and central sticks in the gloves, hot or at
+                        -- full stretch usually gets pushed away.
+                        local p_catch = 1
+                            / (1 + math.exp(-(quality - CATCH_EVEN_QUALITY) / CATCH_SOFTNESS))
+                        local sample
+                        s.rng, sample = rng.roll(s.rng)
+                        keeper.save_pending = (sample < p_catch) and "catch" or "parry"
                         keeper.save_timer = t + SAVE_TIMEOUT_PAD
                         keeper.save_vx = s.ball_vel.x
                     end

@@ -37,9 +37,12 @@ Two contextual action keys + sprint. The same key does the natural thing for the
 - Fast shots and driven passes **ricochet off bodies** — a defender in the lane blocks the shot,
   so shoot around them, chip over them (L), or pass for a better angle. Slow balls are trapped,
   not deflected, and lobs sail over heads.
-- **Finishing**: charge and aim for a corner to beat the keeper; a plain corner shot gets
-  parried up and away, and anything straight at the keeper is caught. AI strikers work the same
-  way — the space you give them becomes shot power, so close shooters down.
+- **Finishing**: charge and aim for a corner to beat the keeper. Whether a reached save is
+  **held or parried** is a dice roll weighted by shot pace and the keeper's handling — soft,
+  central shots stick in the gloves almost every time; hot or full-stretch balls usually get
+  pushed away (rebounds!), and a charged rocket straight at the keeper is a genuine coin flip.
+  AI strikers work the same way — the space you give them becomes shot power, so close
+  shooters down.
 
 Movement is continuous (read each frame as a direction vector). Shooting is a discrete,
 edge-triggered event (queued on key press, consumed on the next simulation step), so taps don't
