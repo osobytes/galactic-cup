@@ -34,11 +34,14 @@ Two contextual action keys + sprint. The same key does the natural thing for the
   (centre-circle distance). But shielding is **active**: the presser hunts the ball itself and
   will work around your body, and a defender leaning on you shoves you off your spot — standing
   still is never safe, keep turning or move.
-- **The keeper is protected**: while a keeper holds the ball you physically cannot enter its
-  ring (laws of the game — a keeper in possession can't be challenged). Wait for the throw and
-  press the receiver instead.
-- **Winning the ball**: your poke has generous reach and a forgiving window; approach from the
-  ball side (a carrier's back shields it). AI players need a **settling touch** (~a third of a
+- **The keeper is protected**: while a keeper holds the ball, everyone backs well off its ring
+  (laws of the game — a keeper in possession can't be challenged), and markers drop off the
+  outlets to guard the passing lanes instead of standing on the receiver's boots. Read the
+  throw and step into the lane, or press the receiver's first touch.
+- **Winning the ball**: your poke has generous reach and a forgiving window. Approach from the
+  ball side for the extended reach — but at body-contact range your poke works from ANY angle
+  (a toe through the legs), so chasing a carrier down is always winnable. When the opponent
+  wins the ball, control auto-switches to your best-placed defender. AI players need a **settling touch** (~a third of a
   second) after receiving before they can pick a pressured pass — press them on the touch and
   the ball is winnable. Passes released into an adjacent defender get dinked over them; a ball
   dropping onto its receiver can't be walled off, only flat drilled balls can.

@@ -210,6 +210,16 @@ t.describe("match.step tackling", function()
         t.is_true(s.owner ~= away_idx, "a front-on challenge dislodges the ball")
     end)
 
+    t.it("the human can poke the ball loose from behind at contact range", function()
+        local s, away_idx, carrier = carrier_setup()
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(carrier.pos.x + 24, carrier.pos.y) -- on the carrier's back
+        me.vel = Vec2.new(0, 0)
+        -- Chase while poking: the carrier dribbles away during the frame.
+        match.step(s, 0.016, input({ dash = true, move = Vec2.new(-1, 0) }))
+        t.is_true(s.owner ~= away_idx, "a contact-range poke wins even from behind")
+    end)
+
     t.it("a jogging (non-sprint) tackle is a poke, not a slide", function()
         local s = new_match()
         local me = s.players[s.controlled]
@@ -1738,6 +1748,59 @@ t.describe("match pressure on a static carrier", function()
         end
         match.step(s, 1 / 60, NO_INPUT)
         t.is_true(me.pos:dist(start) > 3, "the carrier is displaced by the lean")
+    end)
+end)
+
+t.describe("match keeper build-up space", function()
+    t.it("opponents back right off and mark lanes, not the outlet's boots", function()
+        local s = new_match()
+        s.owner = 1 -- home keeper holds throughout
+        s.players[1].pos = Vec2.new(40, 270)
+        s.players[1].hold_timer = 2
+        s.ball = Vec2.new(40, 270)
+        local outlet = s.players[2]
+        outlet.pos = Vec2.new(220, 200)
+        local marker = s.players[8]
+        marker.pos = Vec2.new(236, 200) -- starts tight on the outlet
+        s.players[7].pos = Vec2.new(70, 270) -- camped on the keeper
+        for _ = 1, 60 do
+            s.controlled = 1
+            match.step(s, 1 / 60, NO_INPUT)
+            s.controlled = 1
+        end
+        for _, p in ipairs(s.players) do
+            if p.team == "away" then
+                t.is_true(
+                    p.pos:dist(s.players[1].pos) >= 119,
+                    p.id .. " backs off the keeper's ring"
+                )
+            end
+        end
+        t.is_true(marker.pos:dist(outlet.pos) >= 38, "the marker stands off, marking the lane")
+    end)
+end)
+
+t.describe("match auto-switch on turnover", function()
+    t.it("control jumps to the best-placed defender when the opponent wins it", function()
+        local s = new_match()
+        local away_idx, defender
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                away_idx = away_idx or i
+            elseif p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                defender = defender or i
+            end
+        end
+        s.players[away_idx].pos = Vec2.new(600, 270)
+        s.players[defender].pos = Vec2.new(560, 270) -- closest home defender
+        s.players[s.controlled].pos = Vec2.new(100, 100) -- current control far away
+        s.owner = nil
+        s.pickup_cd = 0
+        s.ball = Vec2.new(600, 270)
+        s.ball_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, away_idx, "the away player collects")
+        t.eq(s.controlled, defender, "control moves to the nearest home defender")
     end)
 end)
 

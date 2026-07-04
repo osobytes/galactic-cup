@@ -96,7 +96,7 @@ local AIR_FRICTION = 0.3 -- horizontal decay/s while airborne (vs ground FRICTIO
 local GROUND_GRAB_HEIGHT = 14 -- ball collectable/tacklable only at/below this height
 local KEEPER_AIR_GRAB = 60 -- a keeper can claim up to this height inside its box
 local CROSSBAR = 70 -- ball at/above this height at the line = over the bar, no goal
-local KEEPER_RESPECT_DIST = 70 -- opponents must keep this clear of a keeper in possession
+local KEEPER_RESPECT_DIST = 120 -- opponents must back off this far from a keeper in possession
 local LAND_SETTLE_VZ = 60 -- below this |vz| on landing, the ball settles (stops bouncing)
 local LOB_CLEAR_H = 24 -- a lob must clear roughly head height over a blocker
 -- Cap a lob's horizontal speed so it isn't a flat rocket — and so a lobbed pass
@@ -552,6 +552,23 @@ local function nearest_n(s, team, count)
     return set
 end
 
+-- The home outfielder best placed to defend right now: nearest to the ball
+-- (the current player included — no forced change if they're already it).
+---@param s MatchState
+---@return integer
+local function best_defender(s)
+    local best, best_d
+    for i, p in ipairs(s.players) do
+        if p.team == "home" and not p.is_keeper then
+            local d = p.pos:dist(s.ball)
+            if not best_d or d < best_d then
+                best_d, best = d, i
+            end
+        end
+    end
+    return best or s.controlled
+end
+
 -- Manual switch: hand control to the home outfielder nearest the ball (other
 -- than the current one) — the player you actually want when defending.
 ---@param s MatchState
@@ -892,6 +909,13 @@ local function attempt_steals(s)
         if p.team ~= owner.team and not p.is_keeper and p.stun_timer <= 0 then
             local human = i == s.controlled
             local d = p.pos:dist(s.ball) -- reach for the ball: shielding matters
+            -- The human's poke also works at body-contact range from ANY angle
+            -- (a toe through the legs): chasing a carrier is the default
+            -- defensive situation and must be winnable. AI challenges stay
+            -- strictly ball-side, so the human's own shielding keeps working.
+            if human and p.pos:dist(owner.pos) <= STEAL_DIST then
+                d = math.min(d, STEAL_DIST)
+            end
             local sliding = false
             local active, reach = false, STEAL_DIST
             if human then
@@ -935,6 +959,9 @@ end
 -- Off-ball movement tuning (see docs/plan). All deterministic.
 local PURSUE_LEAD = 0.004 -- prediction horizon per px of distance (s/px)
 local MARK_GOALSIDE = 16 -- px a marker stands goal-side of its man
+local MARK_LANE_OFF = 44 -- ...but during a keeper's build-up they mark the LANE instead:
+-- standing well off the outlet (toward goal) they can step into a pass, without
+-- smothering the receiver's first touch the moment the throw arrives.
 local COVER_FRAC = 0.3 -- cover sits this fraction from carrier toward own goal
 local BLOCK_SHIFT = 0.45 -- how far the block slides toward the ball (× compactness)
 local ATTACK_PUSH = 90 -- px an off-ball attacker pushes upfield (× support)
@@ -966,9 +993,9 @@ end
 ---@param opp_vel Vec2
 ---@param goal Vec2
 ---@return Vec2
-local function marker_target(defpos, opp_pos, opp_vel, goal)
+local function marker_target(defpos, opp_pos, opp_vel, goal, off)
     local aim = ai.pursue(defpos, opp_pos, opp_vel, PURSUE_LEAD)
-    return aim:add(goal:sub(aim):normalized():scale(MARK_GOALSIDE))
+    return aim:add(goal:sub(aim):normalized():scale(off or MARK_GOALSIDE))
 end
 
 -- Compute off-ball steering targets for every AI player NOT handled by the
@@ -1102,8 +1129,11 @@ local function offball_targets(s, pos)
                     local def_idx = rest[di]
                     local opp_idx = opp_out[mark_locals[mi]]
                     newmarks[def_idx] = opp_idx
+                    -- Tight on a live carrier's teammates; lane distance while
+                    -- the keeper surveys, so throws can actually be received.
+                    local off = carrier.is_keeper and MARK_LANE_OFF or MARK_GOALSIDE
                     targets[def_idx] =
-                        marker_target(pos[def_idx], pos[opp_idx], s.players[opp_idx].vel, goal)
+                        marker_target(pos[def_idx], pos[opp_idx], s.players[opp_idx].vel, goal, off)
                 end
             end
             s.marks[team] = newmarks
@@ -2005,9 +2035,18 @@ function match.step(s, dt, input)
     end
 
     local prev_ball_x = s.ball.x -- for edge-triggered goal-line crossing
+    local prev_owner_team = s.owner and s.players[s.owner].team or nil
     move_players(s, dt, input)
     attempt_steals(s)
     update_ball(s, dt, input)
+
+    -- Auto-switch on turnover: the moment the opponent wins the ball, hand
+    -- control to the home outfielder best placed to defend (nearest the ball)
+    -- — mirroring the existing auto-switch when a home player wins it.
+    local owner_team = s.owner and s.players[s.owner].team or nil
+    if owner_team == "away" and prev_owner_team ~= "away" then
+        s.controlled = best_defender(s)
+    end
 
     local scorer = check_goal(s, prev_ball_x)
     if scorer then
