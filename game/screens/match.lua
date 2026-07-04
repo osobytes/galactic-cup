@@ -6,6 +6,7 @@ local teams = require("data.teams")
 local tactics = require("data.tactics")
 local pitch = require("game.render.pitch")
 local bloom = require("game.render.bloom")
+local effects = require("game.render.effects")
 local view_state = require("game.render.view_state")
 local Vec2 = require("core.vec2")
 
@@ -53,6 +54,7 @@ function Match:restart()
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     self._shoot_held_prev = false
     view_state.reset()
+    effects.reset()
 end
 
 ---@param evt InputEvent
@@ -129,6 +131,7 @@ function Match:update(dt)
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     sim_match.step(self.state, dt, input)
     view_state.update(self.state.players, dt)
+    effects.update(self.state, dt) -- juice layer: event bursts + ball trail
 end
 
 ---@param s MatchState

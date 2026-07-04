@@ -7,9 +7,10 @@ local effects = {}
 
 -- Match the ball's billboard lift in pitch.lua so flashes/trails sit on the ball.
 local BALL_LIFT = 4
-local TRAIL_LIFE = 0.32 -- seconds a trail dot lingers
+local TRAIL_LIFE = 0.32 -- base seconds a trail dot lingers (hot dots last longer)
 local TRAIL_SPACING = 7 -- world units between samples (fps-independent spacing)
 local TRAIL_MIN_SPEED = 80 -- only trail a ball moving faster than this
+local TRAIL_HOT_SPEED = 900 -- ball speed that reads as full "heat" (charged shot)
 
 ---@class Particle
 ---@field x number
@@ -24,7 +25,7 @@ local TRAIL_MIN_SPEED = 80 -- only trail a ball moving faster than this
 
 ---@type Particle[]
 local particles = {}
----@type { x: number, y: number, life: number }[]
+---@type { x: number, y: number, z: number, heat: number, life: number, max: number }[]
 local trail = {}
 local last_sample ---@type { x: number, y: number }?
 
@@ -105,13 +106,18 @@ function effects.update(s, dt)
     end
 
     -- Sample the ball trail only when it's a fast loose ball, spaced by distance
-    -- so the trail looks the same regardless of framerate and never blobs at rest.
+    -- so the trail looks the same regardless of framerate and never blobs at
+    -- rest. Each dot remembers the ball's speed ("heat") and height, so a
+    -- charged shot streaks hotter, longer and along its true flight path.
     local speed = s.ball_vel:length()
     if s.owner == nil and speed > TRAIL_MIN_SPEED then
         local dx = last_sample and (s.ball.x - last_sample.x) or math.huge
         local dy = last_sample and (s.ball.y - last_sample.y) or math.huge
         if dx * dx + dy * dy >= TRAIL_SPACING * TRAIL_SPACING then
-            trail[#trail + 1] = { x = s.ball.x, y = s.ball.y, life = TRAIL_LIFE }
+            local heat = math.min(1, speed / TRAIL_HOT_SPEED)
+            local life = TRAIL_LIFE * (0.7 + 0.9 * heat)
+            trail[#trail + 1] =
+                { x = s.ball.x, y = s.ball.y, z = s.ball_z, heat = heat, life = life, max = life }
             last_sample = { x = s.ball.x, y = s.ball.y }
         end
     else
@@ -140,13 +146,17 @@ function effects.update(s, dt)
 end
 
 -- Ball trail. Draw under the ball (call before the depth-sorted entities).
+-- Heat (sample-time ball speed) drives size, warmth and brightness: a tap-pass
+-- leaves a faint wisp, a charged shot a hot comet tail the bloom pass lights up.
 ---@param project fun(wx: number, wy: number): number, number, number
 function effects.draw_trail(project)
     for _, t in ipairs(trail) do
         local sx, sy, scale = project(t.x, t.y)
-        local a = t.life / TRAIL_LIFE
-        love.graphics.setColor(1, 0.95, 0.7, a * 0.45)
-        love.graphics.circle("fill", sx, sy - BALL_LIFT * scale, (2.5 + 3 * a) * scale)
+        local a = t.life / t.max
+        local heat = t.heat or 0
+        love.graphics.setColor(1, 0.95 - 0.35 * heat, 0.7 - 0.45 * heat, a * (0.35 + 0.4 * heat))
+        local r = (2.5 + 3 * a) * (1 + 0.8 * heat) * scale
+        love.graphics.circle("fill", sx, sy - (BALL_LIFT + (t.z or 0)) * scale, r)
     end
 end
 

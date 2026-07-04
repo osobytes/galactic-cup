@@ -113,6 +113,10 @@ local MIN_PARRY_CLEAR = 260 -- a parry is always punched at least this fast (cle
 local PARRY_POP_VZ = 240
 local KEEPER_HOLD = 0.9 -- seconds a keeper surveys/holds before distributing
 local KEEPER_DIVE_DURATION = 0.32 -- dive lunge / animation window
+-- A committed save resolves when the ball ACTUALLY arrives at the keeper (real
+-- trajectory, no teleport): contact radius, plus a crossing/timeout backstop.
+local KEEPER_HANDS = 30 -- ball-contact radius that completes a committed save
+local SAVE_TIMEOUT_PAD = 0.25 -- backstop beyond the predicted crossing time
 local KEEPER_SAFE_DIST = 60 -- a distribution outlet must be this clear of opponents
 -- A floated throw needs the receiver a real step off its marker: body collision
 -- keeps players ~24px apart and the AI steal range is 26, so a receiver marked
@@ -173,6 +177,9 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field sprint_meter number  -- 0..1 stamina tank for sprinting
 ---@field sprint_dur number  -- seconds a full tank lasts (stamina-derived)
 ---@field sprinting boolean  -- currently sprint-boosted (hysteresis state)
+---@field save_pending "catch"|"parry"|nil  -- committed save verdict awaiting ball contact
+---@field save_timer number  -- backstop countdown to force-resolve a pending save
+---@field save_vx number  -- shot x-velocity at commit (sign flip = deflected, dive whiffs)
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
 
@@ -305,6 +312,9 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             sprint_meter = 1,
             sprint_dur = stats.sprint_duration(pd.stats),
             sprinting = false,
+            save_pending = nil,
+            save_timer = 0,
+            save_vx = 0,
         }
     end
     return list
@@ -360,6 +370,9 @@ local function place_kickoff(s, kicking)
         p.receive_timer = 0
         p.sprint_meter = 1
         p.sprinting = false
+        p.save_pending = nil
+        p.save_timer = 0
+        p.save_vx = 0
     end
     -- Give the kicking team the ball at the centre spot.
     local kicker
@@ -1387,18 +1400,20 @@ local function keeper_distribute(s, keeper_idx)
     end
 end
 
--- The keeper of the threatened goal dives at an on-target shot: catches it
--- cleanly if it's comfortable, parries it loose if it's hard/wide, or is beaten.
--- Pure/deterministic; outcome is a function of reach, handling, pace and angle.
+-- The keeper of the threatened goal COMMITS against an on-target shot: it picks
+-- its verdict now (catch / parry / beaten — pure and deterministic, a function
+-- of reach, handling, pace and angle) and starts the dive, but the ball is NOT
+-- touched: it keeps flying its real trajectory and the save completes on
+-- contact in resolve_pending_save. So a shot always visibly travels from the
+-- shooter's boot to the keeper's glove — no teleports.
 ---@param s MatchState
----@return "catch"|"parry"|nil
 local function attempt_save(s)
     local speed = s.ball_vel:length()
     if speed < 1 or s.ball_vel.x == 0 then
-        return nil -- a dead or purely-vertical ball is not an on-target shot
+        return -- a dead or purely-vertical ball is not an on-target shot
     end
-    for ki, keeper in ipairs(s.players) do
-        if keeper.is_keeper and keeper.dive_timer <= 0 then
+    for _, keeper in ipairs(s.players) do
+        if keeper.is_keeper and keeper.dive_timer <= 0 and not keeper.save_pending then
             local goal = (keeper.team == "home") and s.goal_home or s.goal_away
             local toward = (keeper.team == "home") and (s.ball_vel.x < 0) or (s.ball_vel.x > 0)
             -- Time for the ball to reach the keeper's line. Must be ahead of the ball
@@ -1420,9 +1435,13 @@ local function attempt_save(s)
                 -- How far the keeper has to dive along its line to reach the shot.
                 local dive_dist = math.abs(keeper.pos.y - y_cross)
                 if on_target and dive_dist <= keeper.reach then
+                    -- Dive along the line toward the crossing point, physically
+                    -- converging on where the shot will arrive. A straight shot
+                    -- needs no dive: the keeper sets itself.
                     keeper.dive_timer = KEEPER_DIVE_DURATION
-                    keeper.dive_dir = s.ball:sub(keeper.pos):normalized()
-                    local hold_pos = keeper_hold_pos(s, keeper)
+                    local to_cross = Vec2.new(keeper.pos.x, y_cross):sub(keeper.pos)
+                    keeper.dive_dir = (to_cross:length() > 1) and to_cross:normalized()
+                        or Vec2.new(0, 0)
 
                     -- Closeness of the dive + handling, minus pace. A shot straight at
                     -- the keeper (dive_dist ~ 0) is gathered even when hard; only wide
@@ -1431,41 +1450,76 @@ local function attempt_save(s)
                         + keeper.handling * HANDLING_WEIGHT
                         - speed / SAVE_SPEED_REF
 
-                    -- The save happens at the keeper's hands: snap the ball to the
-                    -- keeper so a save in the sliver in front of the line can't still
-                    -- register as a goal in check_goal (which counts ball + radius).
-                    if quality >= CATCH_QUALITY then
-                        s.events[#s.events + 1] =
-                            { kind = "catch", x = s.ball.x, y = s.ball.y, player = keeper.id }
-                        s.ball = hold_pos
-                        s.owner = ki
-                        s.ball_vel = Vec2.new(0, 0)
-                        s.ball_spin = 0
-                        keeper.grab_timer = KEEPER_GRAB_POSE
-                        keeper.hold_timer = KEEPER_HOLD
-                        return "catch"
-                    end
-
                     if quality >= PARRY_QUALITY then
-                        s.events[#s.events + 1] =
-                            { kind = "parry", x = s.ball.x, y = s.ball.y, player = keeper.id }
-                        s.ball = hold_pos
-                        local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
-                        local dir = s.ball:sub(gc):normalized()
-                        if dir.x == 0 and dir.y == 0 then
-                            dir = keeper.facing
-                        end
-                        -- Punch it genuinely clear — out AND up, so the deflection
-                        -- sails over the shooter rather than into their body.
-                        s.ball_vel = dir:scale(math.max(MIN_PARRY_CLEAR, speed * PARRY_SPEED_MULT))
-                        s.ball_vz = PARRY_POP_VZ
-                        s.ball_spin = 0
-                        s.pickup_cd = PARRY_CD
-                        return "parry"
+                        keeper.save_pending = (quality >= CATCH_QUALITY) and "catch" or "parry"
+                        keeper.save_timer = t + SAVE_TIMEOUT_PAD
+                        keeper.save_vx = s.ball_vel.x
                     end
-                    -- Beaten: the dive is committed but the ball gets through.
-                    return nil
+                    -- Beaten: the dive is committed but the ball flies through.
+                    return
                 end
+            end
+        end
+    end
+end
+
+-- Complete a committed save when the ball actually arrives: at hands' reach, on
+-- crossing the keeper's plane (a fast far-corner ball met right at the line),
+-- or on the timeout backstop. The dive is abandoned (a whiff) if the shot got
+-- deflected away in flight — a body block or bounce reversing its direction.
+---@param s MatchState
+---@param dt number
+---@return "catch"|"parry"|nil
+local function resolve_pending_save(s, dt)
+    for ki, keeper in ipairs(s.players) do
+        local pend = keeper.save_pending
+        if pend then
+            keeper.save_timer = keeper.save_timer - dt
+            local reversed = s.ball_vel.x * keeper.save_vx <= 0
+            local crossed = (keeper.save_vx > 0 and s.ball.x >= keeper.pos.x)
+                or (keeper.save_vx < 0 and s.ball.x <= keeper.pos.x)
+            local contact = keeper.pos:dist(s.ball) <= KEEPER_HANDS
+            if reversed then
+                keeper.save_pending = nil -- the shot was deflected: the dive whiffs
+            elseif contact or crossed or keeper.save_timer <= 0 then
+                keeper.save_pending = nil
+                if pend == "catch" then
+                    s.events[#s.events + 1] =
+                        { kind = "catch", x = s.ball.x, y = s.ball.y, player = keeper.id }
+                    s.ball = keeper_hold_pos(s, keeper)
+                    s.owner = ki
+                    s.ball_vel = Vec2.new(0, 0)
+                    s.ball_z = 0
+                    s.ball_vz = 0
+                    s.ball_spin = 0
+                    keeper.grab_timer = KEEPER_GRAB_POSE
+                    keeper.hold_timer = KEEPER_HOLD
+                    return "catch"
+                end
+                -- Parry from the actual contact point: punch it clear — out AND
+                -- up, so the deflection sails over the shooter, never served
+                -- into their body. Keep the ball safely outside the goal line.
+                s.events[#s.events + 1] =
+                    { kind = "parry", x = s.ball.x, y = s.ball.y, player = keeper.id }
+                local goal = (keeper.team == "home") and s.goal_home or s.goal_away
+                local bx = s.ball.x
+                if keeper.team == "home" then
+                    bx = math.max(bx, goal.x + goal.w + BALL_RADIUS + 1)
+                else
+                    bx = math.min(bx, goal.x - BALL_RADIUS - 1)
+                end
+                s.ball = Vec2.new(bx, s.ball.y)
+                local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
+                local dir = s.ball:sub(gc):normalized()
+                if dir.x == 0 and dir.y == 0 then
+                    dir = keeper.facing
+                end
+                local speed = s.ball_vel:length()
+                s.ball_vel = dir:scale(math.max(MIN_PARRY_CLEAR, speed * PARRY_SPEED_MULT))
+                s.ball_vz = PARRY_POP_VZ
+                s.ball_spin = 0
+                s.pickup_cd = PARRY_CD
+                return "parry"
             end
         end
     end
@@ -1480,6 +1534,10 @@ local function update_ball(s, dt, input)
     end
 
     if s.owner then
+        -- An owned ball invalidates any committed save still waiting on contact.
+        for _, q in ipairs(s.players) do
+            q.save_pending = nil
+        end
         local owner = s.players[s.owner]
         -- A keeper holds the ball in its hands (at its body, clamped clear of its
         -- own line); outfielders dribble it ahead at their feet.
@@ -1645,14 +1703,16 @@ local function update_ball(s, dt, input)
         end
     end
 
-    -- Keeper dive: contest an on-target shot before anyone can generically collect.
-    -- NOT gated on pickup_cd: that cooldown is the SHOOTER's re-collection lockout,
-    -- and a close-range shot reaches the line well inside it — the keeper must
-    -- still be allowed to react. A clean catch ends the frame here; a parry sets
+    -- Keeper save: commit against an on-target shot, then complete the save when
+    -- the ball actually arrives (real trajectory, no teleport). NOT gated on
+    -- pickup_cd: that cooldown is the SHOOTER's re-collection lockout, and a
+    -- close-range shot reaches the line well inside it — the keeper must still
+    -- be allowed to react. A resolved catch ends the frame here; a parry sets
     -- pickup_cd so the deflection isn't re-grabbed instantly (the parried ball
     -- travels away from goal, so it can't trigger an immediate re-save); being
     -- beaten falls through to a possible goal.
-    if attempt_save(s) == "catch" then
+    attempt_save(s)
+    if resolve_pending_save(s, dt) == "catch" then
         return
     end
 
@@ -1666,6 +1726,7 @@ local function update_ball(s, dt, input)
         for i, p in ipairs(s.players) do
             if
                 p.is_keeper
+                and not p.save_pending -- a committed save resolves on contact instead
                 and in_claim_zone(s, p)
                 and s.ball_z <= KEEPER_AIR_GRAB
                 and p.pos:dist(s.ball) <= KEEPER_CLAIM_DIST

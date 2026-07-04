@@ -365,11 +365,44 @@ t.describe("match.step keeper", function()
         k.pos = Vec2.new(935, 300)
         s.ball = Vec2.new(890, 250)
         s.ball_vel = Vec2.new(380, 0) -- crosses to the keeper's side, fast: reachable, not catchable
-        match.step(s, 0.016, NO_INPUT)
+        -- The save commits at once but completes when the ball ARRIVES at the
+        -- diving keeper — play the flight out.
+        local parried = false
+        for _ = 1, 30 do
+            match.step(s, 0.016, NO_INPUT)
+            parried = parried or has_event(s, "parry")
+            if parried then
+                break
+            end
+        end
+        t.is_true(parried, "expected a parry event")
         t.is_true(s.owner == nil, "a parry does not gain possession")
         t.is_true(s.ball_vel.x < 0, "ball is deflected back away from the goal")
         t.eq(s.score.home, 0)
-        t.is_true(has_event(s, "parry"), "expected a parry event")
+    end)
+
+    t.it("a saved shot flies its whole trajectory into the glove (no teleport)", function()
+        local s = new_match()
+        local _, k = keeper_of(s, "away")
+        k.pos = Vec2.new(938, 270)
+        s.owner = nil
+        s.pickup_cd = 0.3 -- as if just released by the shooter
+        s.ball = Vec2.new(738, 270) -- 200px out, straight at the keeper
+        s.ball_vel = Vec2.new(500, 0)
+        local caught_at, max_jump = nil, 0
+        local prev = s.ball
+        for f = 1, 60 do
+            match.step(s, 1 / 60, NO_INPUT)
+            max_jump = math.max(max_jump, prev:dist(s.ball))
+            prev = s.ball
+            if has_event(s, "catch") then
+                caught_at = f
+                break
+            end
+        end
+        t.is_true(caught_at ~= nil, "the straight shot is caught")
+        t.is_true(caught_at >= 12, "the ball spent real frames in flight (no zone snap)")
+        t.is_true(max_jump < 60, "no single frame teleported the ball")
     end)
 
     t.it("is beaten when the shot crosses out of dive reach", function()
