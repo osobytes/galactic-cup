@@ -312,15 +312,31 @@ t.describe("match tactics", function()
 end)
 
 t.describe("match.step scoring", function()
-    t.it("a ball crossing the right line scores for home", function()
+    t.it("a ball wholly crossing the right goal line scores for home", function()
         local s = new_match()
         s.owner = nil
-        s.pickup_cd = 1 -- keep anyone from collecting it this step
+        s.pickup_cd = 1 -- keep anyone from collecting it
         s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
-        s.ball_vel = Vec2.new(5, 0)
-        match.step(s, 0.016, NO_INPUT)
+        s.ball_vel = Vec2.new(400, 0)
+        for _ = 1, 10 do
+            match.step(s, 0.016, NO_INPUT)
+            if s.score.home > 0 then
+                break
+            end
+        end
         t.eq(s.score.home, 1)
         t.eq(s.score.away, 0)
+    end)
+
+    t.it("a ball ON the line is not yet a goal (must wholly cross)", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 1
+        -- Ball centre right on the goal line, barely moving: still in play.
+        s.ball = Vec2.new(s.field.w, s.field.h / 2)
+        s.ball_vel = Vec2.new(1, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.score.home, 0, "on the line is not across the line")
     end)
 end)
 
@@ -871,10 +887,15 @@ t.describe("match height gates", function()
             s.owner = nil
             s.pickup_cd = 1
             s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
-            s.ball_vel = Vec2.new(5, 0)
+            s.ball_vel = Vec2.new(400, 0)
             s.ball_z = z
-            s.ball_vz = 0
-            match.step(s, 0.016, NO_INPUT)
+            s.ball_vz = 60 -- hold height through the short flight to the line
+            for _ = 1, 10 do
+                match.step(s, 0.016, NO_INPUT)
+                if s.score.home > 0 then
+                    break
+                end
+            end
             return s.score.home
         end
         t.eq(shoot_at_line(80), 0, "over the bar: no goal")
@@ -1123,8 +1144,13 @@ t.describe("match.step kickoff positioning", function()
         s.owner = nil
         s.pickup_cd = 1
         s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
-        s.ball_vel = Vec2.new(200, 0)
-        match.step(s, 0.016, NO_INPUT)
+        s.ball_vel = Vec2.new(400, 0)
+        for _ = 1, 10 do
+            match.step(s, 0.016, NO_INPUT)
+            if s.score.home > 0 then
+                break
+            end
+        end
         t.eq(s.score.home, 1)
         assert_own_halves(s)
     end)
@@ -1136,8 +1162,13 @@ t.describe("match.step kickoff rules", function()
         s.owner = nil
         s.pickup_cd = 1
         s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
-        s.ball_vel = Vec2.new(200, 0)
-        match.step(s, 0.016, NO_INPUT)
+        s.ball_vel = Vec2.new(400, 0)
+        for _ = 1, 10 do
+            match.step(s, 0.016, NO_INPUT)
+            if s.score.home > 0 then
+                break
+            end
+        end
         t.eq(s.score.home, 1)
         t.is_true(s.owner ~= nil, "kickoff possession is assigned")
         t.eq(s.players[s.owner].team, "away", "the team that conceded restarts play")

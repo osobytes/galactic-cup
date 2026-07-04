@@ -32,6 +32,9 @@ local PASS_ARRIVE_PACE = 70 -- ball speed left when a pass reaches its receiver
 local PASS_SPEED_MAX = 620 -- cap so long passes are driven, never rockets
 local AI_SHOOT_RANGE = 240 -- AI owner shoots when this close to goal
 local GOAL_MOUTH = 110
+local GOAL_DEPTH = 30 -- net box depth behind the goal line (outside the field)
+local NET_DAMP = 0.3 -- velocity kept when bouncing off the net
+local NET_ROLLOUT = 200 -- net "slope": a netted ball rolls back out toward the line (px/s^2)
 local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 
 local STEAL_DIST = 26 -- challenge range to the BALL to dislodge it
@@ -482,8 +485,10 @@ function match.new(opts)
     ---@type MatchState
     local s = {
         field = field,
-        goal_home = { x = 0, y = mouth_y, w = 10, h = GOAL_MOUTH },
-        goal_away = { x = field.w - 10, y = mouth_y, w = 10, h = GOAL_MOUTH },
+        -- Real goals stand OUTSIDE the field: the goal line is the field
+        -- boundary (x = 0 / x = field.w) and the net box extends behind it.
+        goal_home = { x = -GOAL_DEPTH, y = mouth_y, w = GOAL_DEPTH, h = GOAL_MOUTH },
+        goal_away = { x = field.w, y = mouth_y, w = GOAL_DEPTH, h = GOAL_MOUTH },
         players = players,
         ball = Vec2.new(0, 0),
         ball_vel = Vec2.new(0, 0),
@@ -802,7 +807,8 @@ end
 ---@return Vec2
 local function shot_target(s, shooter, vbias)
     local g = attack_goal(s, shooter.team)
-    local gx = (shooter.team == "home") and (g.x + g.w) or g.x
+    -- The scoring plane: the goal line itself (field boundary).
+    local gx = (shooter.team == "home") and g.x or (g.x + g.w)
     local cy = g.y + g.h / 2
     local half = g.h / 2 - 8
     return Vec2.new(gx, cy + math.max(-1, math.min(1, vbias)) * half)
@@ -1641,7 +1647,7 @@ local function update_ball(s, dt, input)
             end
         else
             local g = attack_goal(s, owner.team)
-            local gc = Vec2.new((owner.team == "home") and (g.x + g.w) or g.x, g.y + g.h / 2)
+            local gc = Vec2.new((owner.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
             if owner.pos:dist(gc) < AI_SHOOT_RANGE then
                 -- Shoot to the corner away from the defending keeper, with power
                 -- scaled by the space the striker has been given (see constants).
@@ -1722,12 +1728,48 @@ local function update_ball(s, dt, input)
         s.ball.y = s.field.h - BALL_RADIUS
         s.ball_vel.y = -s.ball_vel.y
     end
-    if s.ball.x < BALL_RADIUS and not in_mouth(s.ball, s.goal_home) then
-        s.ball.x = BALL_RADIUS
-        s.ball_vel.x = -s.ball_vel.x
-    elseif s.ball.x > s.field.w - BALL_RADIUS and not in_mouth(s.ball, s.goal_away) then
-        s.ball.x = s.field.w - BALL_RADIUS
-        s.ball_vel.x = -s.ball_vel.x
+    -- X walls: through a goal mouth the ball plays on into the net box behind
+    -- the line; anywhere else it bounces back in. Inside a net box the side
+    -- netting clamps y, the back net kills most pace, and a gentle "slope"
+    -- rolls a dead ball back out toward the line so it can't strand there.
+    if s.ball.x < BALL_RADIUS then
+        if in_mouth(s.ball, s.goal_home) then
+            local g = s.goal_home
+            if s.ball.x < g.x + BALL_RADIUS then
+                s.ball.x = g.x + BALL_RADIUS
+                s.ball_vel = Vec2.new(-s.ball_vel.x * NET_DAMP, s.ball_vel.y * NET_DAMP)
+            end
+            if s.ball.y < g.y + BALL_RADIUS then
+                s.ball.y = g.y + BALL_RADIUS
+                s.ball_vel.y = -s.ball_vel.y * NET_DAMP
+            elseif s.ball.y > g.y + g.h - BALL_RADIUS then
+                s.ball.y = g.y + g.h - BALL_RADIUS
+                s.ball_vel.y = -s.ball_vel.y * NET_DAMP
+            end
+            s.ball_vel.x = s.ball_vel.x + NET_ROLLOUT * dt
+        else
+            s.ball.x = BALL_RADIUS
+            s.ball_vel.x = -s.ball_vel.x
+        end
+    elseif s.ball.x > s.field.w - BALL_RADIUS then
+        if in_mouth(s.ball, s.goal_away) then
+            local g = s.goal_away
+            if s.ball.x > g.x + g.w - BALL_RADIUS then
+                s.ball.x = g.x + g.w - BALL_RADIUS
+                s.ball_vel = Vec2.new(-s.ball_vel.x * NET_DAMP, s.ball_vel.y * NET_DAMP)
+            end
+            if s.ball.y < g.y + BALL_RADIUS then
+                s.ball.y = g.y + BALL_RADIUS
+                s.ball_vel.y = -s.ball_vel.y * NET_DAMP
+            elseif s.ball.y > g.y + g.h - BALL_RADIUS then
+                s.ball.y = g.y + g.h - BALL_RADIUS
+                s.ball_vel.y = -s.ball_vel.y * NET_DAMP
+            end
+            s.ball_vel.x = s.ball_vel.x - NET_ROLLOUT * dt
+        else
+            s.ball.x = s.field.w - BALL_RADIUS
+            s.ball_vel.x = -s.ball_vel.x
+        end
     end
 
     -- Body blocking: a fast, low ball that runs into an outfield body ricochets
@@ -1839,20 +1881,27 @@ local function update_ball(s, dt, input)
     end
 end
 
+-- A goal per the laws of the game: the WHOLE ball crosses the goal line,
+-- between the posts, under the bar — judged on the frame it crosses (edge
+-- triggered on prev_x). A ball that sailed over the bar and drops inside the
+-- net box afterwards never counts; a ball nestling in the net can't re-count.
 ---@param s MatchState
+---@param prev_x number  -- ball x at the top of this step
 ---@return "home"|"away"? scorer
-local function check_goal(s)
-    if s.ball_z >= CROSSBAR then
-        return nil -- over the bar
+local function check_goal(s, prev_x)
+    local line_a = s.goal_away.x -- right goal line: home scores crossing it
+    if s.ball.x - BALL_RADIUS > line_a and prev_x - BALL_RADIUS <= line_a then
+        if in_mouth(s.ball, s.goal_away) and s.ball_z < CROSSBAR then
+            s.score.home = s.score.home + 1
+            return "home"
+        end
     end
-    if s.ball.x + BALL_RADIUS >= s.goal_away.x and in_mouth(s.ball, s.goal_away) then
-        s.score.home = s.score.home + 1
-        return "home"
-    elseif
-        s.ball.x - BALL_RADIUS <= s.goal_home.x + s.goal_home.w and in_mouth(s.ball, s.goal_home)
-    then
-        s.score.away = s.score.away + 1
-        return "away"
+    local line_h = s.goal_home.x + s.goal_home.w -- left goal line: away scores
+    if s.ball.x + BALL_RADIUS < line_h and prev_x + BALL_RADIUS >= line_h then
+        if in_mouth(s.ball, s.goal_home) and s.ball_z < CROSSBAR then
+            s.score.away = s.score.away + 1
+            return "away"
+        end
     end
     return nil
 end
@@ -1927,11 +1976,12 @@ function match.step(s, dt, input)
         s.controlled = next_home_outfield(s, s.controlled)
     end
 
+    local prev_ball_x = s.ball.x -- for edge-triggered goal-line crossing
     move_players(s, dt, input)
     attempt_steals(s)
     update_ball(s, dt, input)
 
-    local scorer = check_goal(s)
+    local scorer = check_goal(s, prev_ball_x)
     if scorer then
         if s.score.home >= s.max_goals or s.score.away >= s.max_goals then
             s.finished = true
@@ -1943,6 +1993,9 @@ function match.step(s, dt, input)
 
     return s
 end
+
+-- Renderer data: the goal frame height (posts/crossbar) in world units.
+match.CROSSBAR_H = CROSSBAR
 
 -- Test seam: expose the pure off-ball target computation for assertions.
 match._offball_targets = offball_targets

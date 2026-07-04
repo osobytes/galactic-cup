@@ -6,10 +6,39 @@ local camera = require("game.render.camera")
 local player_renderer = require("game.render.player_renderer")
 local view_state = require("game.render.view_state")
 local effects = require("game.render.effects")
+local sim_match = require("sim.match") -- CROSSBAR_H: the goal frame height
 
 local pitch = {}
 
 local HEX_RADIUS = 26 -- world units, centre to corner
+local NET_BACK_FRAC = 0.55 -- back frame height as a fraction of the crossbar
+
+-- Screen-space mesh shader for the goal nets. Lazily created and fully
+-- optional: headless tests stub love.graphics without newShader, and a failed
+-- compile just falls back to a plain translucent fill.
+local net_shader = nil
+local net_shader_tried = false
+local function get_net_shader()
+    if not net_shader_tried then
+        net_shader_tried = true
+        if love.graphics.newShader then
+            local ok, sh = pcall(
+                love.graphics.newShader,
+                [[
+                extern float spacing;
+                vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
+                    vec2 g = mod(sc, vec2(spacing));
+                    float mesh = min(g.x, g.y);
+                    float line = 1.0 - smoothstep(0.0, 1.6, mesh);
+                    return vec4(color.rgb, color.a * (0.18 + 0.82 * line));
+                }
+            ]]
+            )
+            net_shader = ok and sh or nil
+        end
+    end
+    return net_shader
+end
 
 ---@param c number[]
 ---@param a number?
@@ -151,19 +180,94 @@ function pitch.draw(s, vp, opts)
     love.graphics.polygon("line", ax, ay, bx, by, cx, cy, dx, dy)
     love.graphics.setLineWidth(1)
 
-    -- Goals.
+    -- Real goals standing behind the goal line, outside the field: side/back/
+    -- roof netting (screen-space mesh shader) inside a frame of two posts and
+    -- a crossbar. `line_x` is the goal-line plane, `back_x` the net's back.
     ---@param g Rect
     ---@param color number[]
-    local function draw_goal(g, color)
-        local g0x, g0y = project(g.x, g.y)
-        local g1x, g1y = project(g.x + g.w, g.y)
-        local g2x, g2y = project(g.x + g.w, g.y + g.h)
-        local g3x, g3y = project(g.x, g.y + g.h)
-        set(color, 0.9)
-        love.graphics.polygon("line", g0x, g0y, g1x, g1y, g2x, g2y, g3x, g3y)
+    ---@param line_x number
+    ---@param back_x number
+    local function draw_goal(g, color, line_x, back_x)
+        local bar = sim_match.CROSSBAR_H
+        local lfx, lfy, lfs = project(line_x, g.y) -- far post base (on the line)
+        local lnx, lny, lns = project(line_x, g.y + g.h) -- near post base
+        local bfx, bfy, bfs = project(back_x, g.y) -- back frame, far
+        local bnx, bny, bns = project(back_x, g.y + g.h) -- back frame, near
+        local back_h = bar * NET_BACK_FRAC
+
+        local shader = get_net_shader()
+        if shader then
+            shader:send("spacing", 7)
+            love.graphics.setShader(shader)
+        end
+        set(color, 0.30)
+        -- Side nets: raked from full height at the posts down to the low back.
+        love.graphics.polygon(
+            "fill",
+            lfx,
+            lfy,
+            bfx,
+            bfy,
+            bfx,
+            bfy - back_h * bfs,
+            lfx,
+            lfy - bar * lfs
+        )
+        love.graphics.polygon(
+            "fill",
+            lnx,
+            lny,
+            bnx,
+            bny,
+            bnx,
+            bny - back_h * bns,
+            lnx,
+            lny - bar * lns
+        )
+        -- Back net.
+        love.graphics.polygon(
+            "fill",
+            bfx,
+            bfy,
+            bnx,
+            bny,
+            bnx,
+            bny - back_h * bns,
+            bfx,
+            bfy - back_h * bfs
+        )
+        -- Roof net: crossbar down to the back frame.
+        set(color, 0.22)
+        love.graphics.polygon(
+            "fill",
+            lfx,
+            lfy - bar * lfs,
+            lnx,
+            lny - bar * lns,
+            bnx,
+            bny - back_h * bns,
+            bfx,
+            bfy - back_h * bfs
+        )
+        if shader then
+            love.graphics.setShader()
+        end
+
+        -- The frame: two posts + crossbar, bright so the bloom pass lights it.
+        love.graphics.setLineWidth(3)
+        set({ 0.92, 0.97, 1.0 }, 0.95)
+        love.graphics.line(lfx, lfy, lfx, lfy - bar * lfs)
+        love.graphics.line(lnx, lny, lnx, lny - bar * lns)
+        love.graphics.line(lfx, lfy - bar * lfs, lnx, lny - bar * lns)
+        -- Back frame, thinner and dimmer.
+        love.graphics.setLineWidth(1)
+        set({ 0.7, 0.85, 1.0 }, 0.5)
+        love.graphics.line(bfx, bfy, bfx, bfy - back_h * bfs)
+        love.graphics.line(bnx, bny, bnx, bny - back_h * bns)
+        love.graphics.line(bfx, bfy - back_h * bfs, bnx, bny - back_h * bns)
     end
-    draw_goal(s.goal_home, opts.home_color)
-    draw_goal(s.goal_away, opts.away_color)
+    draw_goal(s.goal_home, opts.home_color, s.goal_home.x + s.goal_home.w, s.goal_home.x)
+    draw_goal(s.goal_away, opts.away_color, s.goal_away.x, s.goal_away.x + s.goal_away.w)
 
     -- Ball trail sits on the ground, under the entities.
     effects.draw_trail(project)
