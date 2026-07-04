@@ -1036,8 +1036,12 @@ local function offball_targets(s, pos)
 
             local presser, cover = order[1], order[2]
             if presser then
-                local aim = ai.pursue(pos[presser], cpos, carrier.vel, PURSUE_LEAD)
-                targets[presser] = aim:add(goal:sub(aim):normalized():scale(cfg.standoff))
+                -- Press the BALL, not the man: against a carrier who stands
+                -- still or turns to shield, the presser works around the body
+                -- to the ball side (collision makes it circle) and keeps
+                -- poking. Half the standoff keeps the press goal-side honest.
+                local aim = ai.pursue(pos[presser], s.ball, carrier.vel, PURSUE_LEAD)
+                targets[presser] = aim:add(goal:sub(aim):normalized():scale(cfg.standoff * 0.5))
             end
             if cover then
                 targets[cover] = ai.interpose(cpos, goal, COVER_FRAC)
@@ -1198,6 +1202,13 @@ local function resolve_collisions(s)
                 local dir = (d > 0) and delta:normalized() or Vec2.new(1, 0)
                 local pen = mind - d
                 local fa, fb = 0.5, 0.5 -- share the push evenly by default
+                -- A defender leaning on the BALL CARRIER shoves them off their
+                -- spot: standing still under pressure is never fully safe.
+                if s.owner == a and pb.team ~= pa.team and pb.slide_timer <= 0 then
+                    fa, fb = 0.7, 0.3
+                elseif s.owner == b and pa.team ~= pb.team and pa.slide_timer <= 0 then
+                    fa, fb = 0.3, 0.7
+                end
                 if pa.slide_timer > 0 and pb.slide_timer <= 0 then
                     fa, fb = 0.15, 0.85
                     if pb.stun_timer <= 0 then
@@ -1365,6 +1376,23 @@ local function move_players(s, dt, input)
             p.pos = clamp_to_field(s, np)
             if dir.x ~= 0 or dir.y ~= 0 then
                 p.facing = dir
+            end
+        end
+    end
+
+    -- A keeper in possession is PHYSICALLY protected (laws of the game: you
+    -- cannot challenge a keeper holding the ball). AI targets already retreat;
+    -- this ring catches the human-controlled player and any straggler.
+    if s.owner and s.players[s.owner].is_keeper then
+        local k = s.players[s.owner]
+        for _, p in ipairs(s.players) do
+            if p.team ~= k.team then
+                local off = p.pos:sub(k.pos)
+                local d = off:length()
+                if d < KEEPER_RESPECT_DIST then
+                    local dir = (d > 0) and off:normalized() or Vec2.new(1, 0)
+                    p.pos = clamp_to_field(s, k.pos:add(dir:scale(KEEPER_RESPECT_DIST)))
+                end
             end
         end
     end

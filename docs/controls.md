@@ -30,8 +30,13 @@ Two contextual action keys + sprint. The same key does the natural thing for the
 - **Keeping the ball**: challenges reach for the *ball*, not your body — it sticks a step ahead
   of your facing, so turning between a defender and the ball **shields** it. Defenders commit
   to their pokes, go on cooldown when they miss, and **stumble** after lunging past a shielded
-  ball — bait the poke, then break away. Defenders also contain at a standoff rather than
-  glue themselves to you. At kickoff the other team must stand off (centre-circle distance).
+  ball — bait the poke, then break away. At kickoff the other team must stand off
+  (centre-circle distance). But shielding is **active**: the presser hunts the ball itself and
+  will work around your body, and a defender leaning on you shoves you off your spot — standing
+  still is never safe, keep turning or move.
+- **The keeper is protected**: while a keeper holds the ball you physically cannot enter its
+  ring (laws of the game — a keeper in possession can't be challenged). Wait for the throw and
+  press the receiver instead.
 - **Winning the ball**: your poke has generous reach and a forgiving window; approach from the
   ball side (a carrier's back shields it). AI players need a **settling touch** (~a third of a
   second) after receiving before they can pick a pressured pass — press them on the touch and

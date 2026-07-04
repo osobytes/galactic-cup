@@ -1704,6 +1704,64 @@ t.describe("match possession feel", function()
     end)
 end)
 
+t.describe("match pressure on a static carrier", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("a carrier who never moves gets challenged, not ignored", function()
+        local s = new_match() -- human holds the ball at kickoff
+        local challenged, lost = false, false
+        for _ = 1, 300 do -- 5 seconds of standing still
+            match.step(s, 1 / 60, NO_INPUT)
+            challenged = challenged or has_event(s, "tackle")
+            lost = lost or (s.owner ~= nil and s.players[s.owner].team == "away") or s.owner == nil
+        end
+        t.is_true(challenged or lost, "the defense pressures a statue instead of freezing")
+    end)
+
+    t.it("a defender leaning on the carrier shoves them off their spot", function()
+        local s = new_match()
+        local me = s.players[s.controlled]
+        local start = me.pos
+        -- Overlap an away defender onto the carrier and let collisions resolve.
+        for _, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                p.pos = Vec2.new(me.pos.x + 10, me.pos.y)
+                break
+            end
+        end
+        match.step(s, 1 / 60, NO_INPUT)
+        t.is_true(me.pos:dist(start) > 3, "the carrier is displaced by the lean")
+    end)
+end)
+
+t.describe("match keeper respect ring (physical)", function()
+    t.it("the controlled player cannot camp a keeper holding the ball", function()
+        local s = new_match()
+        local ki
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and p.is_keeper then
+                ki = i
+            end
+        end
+        s.owner = ki
+        s.players[ki].hold_timer = 2 -- holding throughout
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(s.players[ki].pos.x - 10, s.players[ki].pos.y)
+        match.step(s, 1 / 60, NO_INPUT)
+        t.is_true(
+            me.pos:dist(s.players[ki].pos) >= 69,
+            "the human is pushed out to the respect ring"
+        )
+    end)
+end)
+
 t.describe("match save grab-vs-parry odds", function()
     local function has_event(s, kind)
         for _, e in ipairs(s.events) do
