@@ -1883,6 +1883,23 @@ t.describe("match human keeper control", function()
     end)
 end)
 
+t.describe("match keeper carry limit", function()
+    t.it("a keeper holding the ball cannot leave the penalty area", function()
+        local s = new_match()
+        s.owner = 1
+        s.controlled = 1
+        s.players[1].pos = Vec2.new(60, 270)
+        s.players[1].hold_timer = 60 -- keep holding throughout
+        s.ball = Vec2.new(66, 270)
+        for _ = 1, 240 do -- 4 seconds of running up-right with the ball in hand
+            match.step(s, 1 / 60, input({ move = Vec2.new(1, -1) }))
+        end
+        local box = match.PENALTY_BOX
+        t.is_true(s.players[1].pos.x <= box.depth, "held at the edge of the drawn box")
+        t.is_true(s.players[1].pos.y >= s.field.h / 2 - box.h / 2, "and inside its vertical bounds")
+    end)
+end)
+
 t.describe("match keeper throw aim & safety", function()
     local function setup(s)
         s.owner = 1

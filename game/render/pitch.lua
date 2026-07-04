@@ -93,7 +93,7 @@ local function draw_markings(project, field)
     local sx, sy = project(field.w / 2, field.h / 2)
     love.graphics.circle("fill", sx, sy, 3)
 
-    local depth, box_h = 95, 200
+    local depth, box_h = sim_match.PENALTY_BOX.depth, sim_match.PENALTY_BOX.h
     local top, bot = field.h / 2 - box_h / 2, field.h / 2 + box_h / 2
     ---@param xa number
     ---@param xb number
@@ -315,6 +315,27 @@ function pitch.draw(s, vp, opts)
             love.graphics.setColor(1, 0.95, 0.7)
             love.graphics.circle("fill", sx, sy - (z + 4) * scale, 5 * scale)
         end
+    end
+
+    -- Charge meter under the controlled player (soccer-game power bar):
+    -- warm while charging a shot/punt, cool while charging a pass range.
+    local cp = s.players[s.controlled]
+    local amt, ccol
+    if s.charge > 0.02 then
+        amt, ccol = s.charge, { 1, 0.72, 0.3 }
+    elseif s.pass_charge > 0.02 then
+        amt, ccol = s.pass_charge, { 0.45, 0.85, 1 }
+    end
+    if amt then
+        local sx, sy, scale = project(cp.pos.x, cp.pos.y)
+        local w, h = 34 * scale, math.max(3, 4 * scale)
+        local y0 = sy + 12 * scale
+        love.graphics.setColor(0, 0, 0, 0.55)
+        love.graphics.rectangle("fill", sx - w / 2, y0, w, h)
+        love.graphics.setColor(ccol[1], ccol[2], ccol[3], 0.95)
+        love.graphics.rectangle("fill", sx - w / 2, y0, w * amt, h)
+        love.graphics.setColor(1, 1, 1, 0.35)
+        love.graphics.rectangle("line", sx - w / 2, y0, w, h)
     end
 
     -- Flashes/sparks ride on top of everything.

@@ -60,6 +60,7 @@ t.describe("renderer smoke", function()
                 away = teams.orion,
                 field = { w = 960, h = 540 },
             })
+            s.charge = 0.6 -- exercise the charge-meter path
             pitch.draw(s, { w = 1280, h = 720 }, {
                 home_color = teams.nebula.color,
                 away_color = teams.orion.color,

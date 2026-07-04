@@ -23,6 +23,10 @@ local POSSESS_DIST = 22 -- outfield control radius
 local KEEPER_DIST = 18 -- keeper catch radius (small enough that corners stay open)
 local KEEPER_GUARD = 28 -- how far off-centre a keeper slides (< half the mouth)
 local KEEPER_BOX_DEPTH = 160 -- how far off its line the keeper will come to claim
+-- The PENALTY AREA (the drawn box): a keeper holding the ball may not carry it
+-- out of here. Exported for the renderer so the rule and the paint agree.
+local PENALTY_DEPTH = 95
+local PENALTY_H = 200
 local KEEPER_BOX_PAD = 30 -- vertical margin beyond the posts for the claim zone
 local KEEPER_CLAIM_DIST = 40 -- grab radius when actively claiming a ball in the box (priority)
 local KEEPER_LEAD = 0.01 -- anticipation lead when claiming a moving ball
@@ -1490,14 +1494,16 @@ local function move_players(s, dt, input)
                     p.facing = nd
                 end
             end
-            -- A human-controlled keeper stays inside its box.
+            -- A keeper holding the ball may not carry it out of the penalty
+            -- area (the drawn box) — the laws, and the renderer, agree.
             if p.is_keeper then
-                local g = (p.team == "home") and s.goal_home or s.goal_away
-                local minx = (p.team == "home") and PLAYER_RADIUS or (s.field.w - KEEPER_BOX_DEPTH)
-                local maxx = (p.team == "home") and KEEPER_BOX_DEPTH or (s.field.w - PLAYER_RADIUS)
+                local minx = (p.team == "home") and PLAYER_RADIUS or (s.field.w - PENALTY_DEPTH)
+                local maxx = (p.team == "home") and PENALTY_DEPTH or (s.field.w - PLAYER_RADIUS)
+                local top = s.field.h / 2 - PENALTY_H / 2 + PLAYER_RADIUS
+                local bot = s.field.h / 2 + PENALTY_H / 2 - PLAYER_RADIUS
                 p.pos = Vec2.new(
                     math.max(minx, math.min(maxx, p.pos.x)),
-                    math.max(g.y - KEEPER_BOX_PAD, math.min(g.y + g.h + KEEPER_BOX_PAD, p.pos.y))
+                    math.max(top, math.min(bot, p.pos.y))
                 )
             end
         elseif i == s.owner then
@@ -2386,8 +2392,10 @@ function match.step(s, dt, input)
     return s
 end
 
--- Renderer data: the goal frame height (posts/crossbar) in world units.
+-- Renderer data: the goal frame height (posts/crossbar) and the penalty area
+-- (world units) — drawn from the same numbers the rules use.
 match.CROSSBAR_H = CROSSBAR
+match.PENALTY_BOX = { depth = PENALTY_DEPTH, h = PENALTY_H }
 
 -- Test seam: expose the pure off-ball target computation for assertions.
 match._offball_targets = offball_targets
