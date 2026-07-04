@@ -29,8 +29,14 @@ Two contextual action keys + sprint. The same key does the natural thing for the
   winning the ball auto-switches control to the winner.
 - **Keeping the ball**: challenges reach for the *ball*, not your body — it sticks a step ahead
   of your facing, so turning between a defender and the ball **shields** it. Defenders commit
-  to their pokes and go on cooldown when they miss: keep moving, turn away, juke, or burst with
-  sprint to make them whiff. At kickoff the other team must stand off (centre-circle distance).
+  to their pokes, go on cooldown when they miss, and **stumble** after lunging past a shielded
+  ball — bait the poke, then break away. Defenders also contain at a standoff rather than
+  glue themselves to you. At kickoff the other team must stand off (centre-circle distance).
+- **Winning the ball**: your poke has generous reach and a forgiving window; approach from the
+  ball side (a carrier's back shields it). AI players need a **settling touch** (~a third of a
+  second) after receiving before they can pick a pressured pass — press them on the touch and
+  the ball is winnable. Passes released into an adjacent defender get dinked over them; a ball
+  dropping onto its receiver can't be walled off, only flat drilled balls can.
 - **Juke** is a quick sidestep with brief tackle immunity — beat a defender or escape a challenge.
 - Players have **bodies**: they block and bump each other, and a slide that connects shoves and
   briefly stuns the player it hits.

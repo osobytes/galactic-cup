@@ -36,7 +36,7 @@ return {
         marking = {
             scheme = "hybrid",
             man_marks = 1,
-            standoff = 24,
+            standoff = 32,
             compactness = 0.5,
             support = 0.5,
         },
@@ -50,7 +50,7 @@ return {
         marking = {
             scheme = "man",
             man_marks = 3,
-            standoff = 14,
+            standoff = 22,
             compactness = 0.7,
             support = 0.65,
         },
@@ -64,7 +64,7 @@ return {
         marking = {
             scheme = "zonal",
             man_marks = 0,
-            standoff = 34,
+            standoff = 40,
             compactness = 0.35,
             support = 0.4,
         },

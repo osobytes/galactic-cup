@@ -1600,6 +1600,79 @@ t.describe("match AI shooting", function()
     end)
 end)
 
+t.describe("match possession feel", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("an AI receiver settles the ball before passing under pressure", function()
+        local s = new_match()
+        -- A loose ball at an away outfielder's feet with a home defender pressing.
+        local recv, presser
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                recv = recv or i
+            elseif p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                presser = presser or i
+            end
+        end
+        s.players[recv].pos = Vec2.new(600, 270)
+        s.players[presser].pos = Vec2.new(650, 270) -- pressured (< 70) but out of poke range
+        s.players[s.controlled].pos = Vec2.new(100, 60)
+        s.owner = nil
+        s.pickup_cd = 0
+        s.ball = Vec2.new(600, 270)
+        s.ball_vel = Vec2.new(60, 0) -- rolling: collection reads as a touch
+        local touched_at, passed_at
+        for f = 1, 90 do
+            match.step(s, 1 / 60, NO_INPUT)
+            if not touched_at and s.owner == recv then
+                touched_at = f
+            end
+            if touched_at and not passed_at and has_event(s, "pass") then
+                passed_at = f
+            end
+        end
+        t.is_true(touched_at ~= nil, "the receiver takes the ball")
+        t.is_true(passed_at ~= nil, "and eventually moves it on")
+        t.is_true(passed_at - touched_at >= 15, "but only after a settling touch (~0.3s+)")
+    end)
+
+    t.it("a whiffed AI poke stumbles the defender", function()
+        local s = new_match()
+        local carrier, defender
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                carrier = carrier or i
+            elseif p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                defender = defender or i
+            end
+        end
+        local c = s.players[carrier]
+        c.facing = Vec2.new(-1, 0)
+        s.owner = carrier
+        s.ball = c.pos:add(Vec2.new(-18, 0))
+        -- Park the carrier's teammates out of range so it can't pass out.
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper and i ~= carrier then
+                p.pos = Vec2.new(40, 380 + i * 15)
+            end
+        end
+        -- On the carrier's back: ball shielded, poke commits but comes up short.
+        s.players[defender].pos = Vec2.new(c.pos.x + 20, c.pos.y)
+        s.players[defender].dash_cd = 0
+        s.players[s.controlled].pos = Vec2.new(60, 60)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, carrier, "the shielded carrier keeps it")
+        t.is_true(s.players[defender].stun_timer > 0, "the whiffing defender stumbles")
+    end)
+end)
+
 t.describe("match save grab-vs-parry odds", function()
     local function has_event(s, kind)
         for _, e in ipairs(s.events) do

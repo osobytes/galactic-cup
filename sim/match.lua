@@ -36,6 +36,10 @@ local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 
 local STEAL_DIST = 26 -- challenge range to the BALL to dislodge it
 local STEAL_ATTEMPT = 40 -- AI commits a poke when the ball is this close (may whiff)
+local WHIFF_STUMBLE = 0.3 -- a whiffed AI poke stumbles the defender (carrier's escape window)
+-- An AI player needs a beat to control a ball it just received before it can
+-- pick out a pressured pass — the defender's window to actually rob them.
+local CARRIER_SETTLE = 0.35
 local KICKOFF_CLEAR = 120 -- opponents keep this centre-circle distance at kickoff
 local TACKLE_POP_SPEED = 150 -- speed the ball pops out on a tackle
 local AI_STEAL_CD = 1.2 -- min seconds between AI tackle attempts (carriers get a beat on the ball)
@@ -44,7 +48,11 @@ local KEEPER_SMOTHER = 26 -- keeper takes the ball off a carrier's feet at this 
 -- Body blocking: a fast loose ball ricochets off an outfield body it hits instead
 -- of ghosting through — defenders between the shooter and the goal matter. Slow
 -- balls (below POSSESS_MAX_SPEED) are handled by collection; high balls fly over.
-local BLOCK_HEIGHT = 20 -- ball at/below this height hits a body (lobs clear ~24 at the blocker)
+local BLOCK_HEIGHT = 20 -- a flat/rising ball at/below this height hits a body
+-- A DESCENDING ball only blocks at trap height: you can't wall off a ball
+-- dropping over your shoulder, so lobbed deliveries reach their receiver while
+-- drilled shots and passes still slam into bodies.
+local BLOCK_HEIGHT_DESC = 12
 local BLOCK_DAMP = 0.5 -- fraction of speed kept by the ricochet
 
 -- AI on-ball decision making: an AI carrier passes out of pressure instead of
@@ -69,10 +77,10 @@ local SLIDE_DURATION = 0.4 -- how long the slide lunge lasts
 local SLIDE_MULT = 1.5 -- initial slide speed = current speed × this
 local SLIDE_BASE_MIN = 200 -- ...but never slower than this (slide has punch)
 local SLIDE_FRICTION = 2.5 -- slide speed decay per second
-local SLIDE_REACH = 36 -- slide tackle ball-win range (extended leg)
+local SLIDE_REACH = 38 -- slide tackle ball-win range (extended leg)
 local SLIDE_CD = 0.9 -- recovery before tackling again after a slide
-local STAND_TIMER = 0.14 -- standing-poke active window
-local STAND_REACH = 28 -- standing tackle ball-win range
+local STAND_TIMER = 0.22 -- standing-poke active window (forgiving timing)
+local STAND_REACH = 34 -- standing tackle ball-win range
 local STAND_CD = 0.4 -- recovery after a standing tackle
 local STUN_SLOW = 0.4 -- movement multiplier while stunned
 local STUN_TIME = 0.5 -- seconds a player is knocked off balance by a slide hit
@@ -129,6 +137,8 @@ local KEEPER_SAFE_DIST = 60 -- a distribution outlet must be this clear of oppon
 local THROW_MIN_OPEN = 30
 local DROPKICK_DIST = 420 -- how far upfield a drop-kick clearance lands
 local DROPKICK_CLEAR_H = 46 -- drop-kick loft: sails over every head on the way
+local THROW_CLEAR_H = 34 -- hand throws arc clearly over heads (> LOB_CLEAR_H foot lobs)
+local RELEASE_DINK_DIST = 44 -- a defender this close on the release line gets dinked over
 local SAVE_PAD = 18 -- on-target tolerance beyond the posts when projecting a shot
 local SAVE_ZONE = 130 -- the keeper commits a dive once the shot is this close to its line
 local KEEPER_GRAB_POSE = 0.25 -- seconds of the gather/reach pose after a grab
@@ -185,6 +195,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field save_pending "catch"|"parry"|nil  -- committed save verdict awaiting ball contact
 ---@field save_timer number  -- backstop countdown to force-resolve a pending save
 ---@field save_vx number  -- shot x-velocity at commit (sign flip = deflected, dive whiffs)
+---@field settle_timer number  -- AI first-touch control window (no pressured pass until settled)
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
 
@@ -321,6 +332,7 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             save_pending = nil,
             save_timer = 0,
             save_vx = 0,
+            settle_timer = 0,
         }
     end
     return list
@@ -379,6 +391,7 @@ local function place_kickoff(s, kicking)
         p.save_pending = nil
         p.save_timer = 0
         p.save_vx = 0
+        p.settle_timer = 0
     end
     -- Give the kicking team the ball at the centre spot.
     local kicker
@@ -431,7 +444,7 @@ end
 
 -- Hybrid default so tactics authored before the marking block still work.
 local DEFAULT_MARKING =
-    { scheme = "hybrid", man_marks = 1, standoff = 24, compactness = 0.5, support = 0.5 }
+    { scheme = "hybrid", man_marks = 1, standoff = 32, compactness = 0.5, support = 0.5 }
 
 ---@param tactic TacticData
 ---@return MarkingConfig
@@ -629,9 +642,27 @@ end
 ---@param owner_idx integer
 ---@param target_idx integer
 ---@param blocker_f number?  -- lob over this lane fraction; nil = driven ground pass
-local function release_pass(s, owner_idx, target_idx, blocker_f)
+---@param clear_h number?  -- loft clearance height (defaults to a foot lob)
+local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     local owner = s.players[owner_idx]
     local target = s.players[target_idx]
+    -- A defender right on the release point eats a driven ball — and even a lob
+    -- is still low in its first strides (the lane check ignores segment ends).
+    -- Dink over them: an arc that clears at 15% of the lane also stays above
+    -- head height through the middle, so any mid-lane blocker is cleared too.
+    do
+        local dirn = target.pos:sub(owner.pos):normalized()
+        for _, q in ipairs(s.players) do
+            if q.team ~= owner.team and not q.is_keeper then
+                local off = q.pos:sub(owner.pos)
+                local d = off:length()
+                if d < RELEASE_DINK_DIST and (off.x * dirn.x + off.y * dirn.y) > d * 0.2 then
+                    blocker_f = 0.15 -- clear them just after the release
+                    break
+                end
+            end
+        end
+    end
     target.receive_timer = RECEIVE_TIME
     s.events[#s.events + 1] = { kind = "pass", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
@@ -639,7 +670,7 @@ local function release_pass(s, owner_idx, target_idx, blocker_f)
     s.ball_spin = 0
     s.pickup_cd = RELEASE_CD
     if blocker_f then
-        s.ball_vel, s.ball_vz = lob_launch(owner.pos, target.pos, blocker_f, LOB_CLEAR_H)
+        s.ball_vel, s.ball_vz = lob_launch(owner.pos, target.pos, blocker_f, clear_h or LOB_CLEAR_H)
     else
         local d = owner.pos:dist(target.pos)
         s.ball_vel = target.pos:sub(owner.pos):normalized():scale(pass_speed_for(d))
@@ -870,6 +901,11 @@ local function attempt_steals(s)
                 active = true
                 p.dash_cd = AI_STEAL_CD
                 p.tackle_timer = STAND_TIMER -- poke pose for the renderer
+                if d > STEAL_DIST then
+                    -- Lunged past a shielded ball: stumble briefly. Baiting the
+                    -- poke and breaking away is the carrier's core move.
+                    p.stun_timer = math.max(p.stun_timer, WHIFF_STUMBLE)
+                end
             end
             if active and d <= reach then
                 local dir = p.pos:sub(owner.pos)
@@ -1394,12 +1430,12 @@ local function keeper_distribute(s, keeper_idx)
 
     keeper.throw_timer = KEEPER_THROW_POSE -- release/throw pose (visual)
     if best then
-        release_pass(s, keeper_idx, best, best_f)
+        release_pass(s, keeper_idx, best, best_f, THROW_CLEAR_H)
     elseif open_best then
         -- Float it over the traffic to the least-marked teammate: the ball spends
-        -- its flight above head height, so camped opponents can't pick it off.
+        -- its flight clearly above head height, so camped opponents can't pick it off.
         local f = ai.lane_blocker(keeper.pos, s.players[open_best].pos, opp, POSSESS_DIST) or 0.5
-        release_pass(s, keeper_idx, open_best, f)
+        release_pass(s, keeper_idx, open_best, f, THROW_CLEAR_H)
     else
         -- Everyone swarmed: drop-kick a high clearance upfield (lands around
         -- DROPKICK_DIST away, toward the middle of the pitch).
@@ -1623,7 +1659,7 @@ local function update_ball(s, dt, input)
                 -- Closed down with no power available: look for the square ball
                 -- to a better-placed teammate first; only shoot if nobody's on.
                 local passed = false
-                if space < AI_CHARGE_MIN_SPACE then
+                if space < AI_CHARGE_MIN_SPACE and owner.settle_timer <= 0 then
                     passed = ai_try_pass(s, s.owner)
                 end
                 if not passed then
@@ -1643,7 +1679,7 @@ local function update_ball(s, dt, input)
                         pressure = math.min(pressure, q.pos:dist(owner.pos))
                     end
                 end
-                if pressure <= AI_PASS_PRESSURE then
+                if pressure <= AI_PASS_PRESSURE and owner.settle_timer <= 0 then
                     ai_try_pass(s, s.owner)
                 end
             end
@@ -1700,7 +1736,8 @@ local function update_ball(s, dt, input)
     -- ball through saves and claims, never as a passive wall.
     do
         local speed = s.ball_vel:length()
-        if speed >= POSSESS_MAX_SPEED and s.ball_z <= BLOCK_HEIGHT then
+        local block_h = (s.ball_vz < 0) and BLOCK_HEIGHT_DESC or BLOCK_HEIGHT
+        if speed >= POSSESS_MAX_SPEED and s.ball_z <= block_h then
             for _, p in ipairs(s.players) do
                 if not p.is_keeper then
                     local off = s.ball:sub(p.pos)
@@ -1784,9 +1821,11 @@ local function update_ball(s, dt, input)
                 bp.grab_timer = KEEPER_GRAB_POSE
                 bp.hold_timer = KEEPER_HOLD
             elseif speed > 1 then
-                -- A moving ball trapped by an outfielder reads as a "touch".
+                -- A moving ball trapped by an outfielder reads as a "touch";
+                -- an AI needs a beat of control before it can pass on.
                 s.events[#s.events + 1] =
                     { kind = "touch", x = s.ball.x, y = s.ball.y, player = bp.id }
+                bp.settle_timer = CARRIER_SETTLE
             end
             s.owner = best
             s.ball_vel = Vec2.new(0, 0)
@@ -1878,6 +1917,9 @@ function match.step(s, dt, input)
         end
         if p.receive_timer > 0 then
             p.receive_timer = math.max(0, p.receive_timer - dt)
+        end
+        if p.settle_timer > 0 then
+            p.settle_timer = math.max(0, p.settle_timer - dt)
         end
     end
 
