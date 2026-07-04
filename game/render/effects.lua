@@ -89,6 +89,14 @@ function effects.update(s, dt)
             -- A hard hit: punchier and warmer than the rest.
             ring(e.x, e.y, 0.34, 18, { 1, 0.6, 0.3 })
             burst(e.x, e.y, 12, 260, 0.4, 3, { 1, 0.7, 0.4 })
+        elseif e.kind == "catch" or e.kind == "claim" then
+            -- Clean grab/gather: a tight, confident double ring, no spray.
+            ring(e.x, e.y, 0.3, 12, { 0.8, 1, 0.9 })
+            ring(e.x, e.y, 0.38, 20, { 0.6, 1, 0.8 })
+        elseif e.kind == "parry" then
+            -- Deflection: a sharp cool spark fan.
+            ring(e.x, e.y, 0.3, 16, { 0.7, 0.9, 1 })
+            burst(e.x, e.y, 9, 220, 0.34, 3, { 0.7, 0.9, 1 })
         end
     end
 

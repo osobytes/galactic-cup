@@ -3,6 +3,7 @@
   "runtime.version": "LuaJIT",
   "runtime.path": ["?.lua", "?/init.lua"],
   "workspace.library": ["types"],
+  "workspace.ignoreDir": [".claude"],
   "workspace.checkThirdParty": false,
   "diagnostics.globals": ["love"],
   "diagnostics.disable": ["duplicate-set-field"],

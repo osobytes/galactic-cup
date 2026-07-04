@@ -20,6 +20,7 @@ local function input(o)
         switch = o.switch or false,
         dash = o.dash or false,
         dodge = o.dodge or false,
+        lob = o.lob or false,
     }
 end
 
@@ -126,7 +127,7 @@ t.describe("match.step juke", function()
 end)
 
 t.describe("match.step tackling", function()
-    t.it("dashing into an opponent carrier knocks the ball loose", function()
+    local function carrier_setup()
         local s = new_match()
         local away_idx
         for i, p in ipairs(s.players) do
@@ -136,21 +137,68 @@ t.describe("match.step tackling", function()
             end
         end
         s.owner = away_idx
-        local carrier = s.players[away_idx]
+        return s, away_idx, s.players[away_idx]
+    end
+
+    t.it("a standing tackle (slow) knocks the ball loose", function()
+        local s, away_idx, carrier = carrier_setup()
         local me = s.players[s.controlled]
         me.pos = Vec2.new(carrier.pos.x + 8, carrier.pos.y)
-        me.dash_cd = 0
+        me.vel = Vec2.new(0, 0) -- standing -> standing poke
         match.step(s, 0.016, input({ dash = true }))
-        t.is_true(s.owner ~= away_idx, "carrier should lose possession to the tackle")
+        t.is_true(s.owner ~= away_idx, "carrier loses possession to the standing tackle")
+    end)
+
+    t.it("a slide (moving fast) wins the ball from further away and stuns the carrier", function()
+        local s, away_idx, carrier = carrier_setup()
+        local me = s.players[s.controlled]
+        -- approach from a slide's extended range, moving fast toward the carrier
+        me.pos = Vec2.new(carrier.pos.x + 32, carrier.pos.y)
+        me.vel = Vec2.new(-200, 0) -- fast -> slide
+        match.step(s, 0.016, input({ dash = true, move = Vec2.new(-1, 0) }))
+        t.is_true(s.owner ~= away_idx, "slide wins the ball at extended reach")
+        t.is_true(carrier.stun_timer > 0, "the slid-through carrier is knocked off balance")
+    end)
+
+    t.it("slide speed scales with current velocity", function()
+        local function slide_vel(speed)
+            local s = new_match()
+            local me = s.players[s.controlled]
+            me.vel = Vec2.new(speed, 0)
+            me.facing = Vec2.new(1, 0)
+            match.step(s, 0.001, input({ dash = true, move = Vec2.new(1, 0) }))
+            return me.slide_vel
+        end
+        t.is_true(slide_vel(300) > slide_vel(150), "a faster run produces a faster slide")
+    end)
+
+    t.it("a stunned defender cannot tackle", function()
+        local s, away_idx, carrier = carrier_setup()
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(carrier.pos.x + 8, carrier.pos.y)
+        me.vel = Vec2.new(0, 0)
+        me.stun_timer = 1.0
+        match.step(s, 0.016, input({ dash = true }))
+        t.is_true(s.owner == away_idx, "a stunned player can't win the ball")
     end)
 end)
 
 t.describe("match.step switching", function()
-    t.it("cycles the controlled player among home outfielders", function()
+    t.it("hands control to the home outfielder nearest the ball", function()
         local s = new_match()
         local before = s.controlled
+        -- Park a loose ball next to a specific teammate.
+        local target
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= before then
+                target = i
+            end
+        end
+        s.owner = nil
+        s.pickup_cd = 1
+        s.ball = Vec2.new(s.players[target].pos.x + 30, s.players[target].pos.y)
         match.step(s, 0.016, input({ switch = true }))
-        t.is_true(s.controlled ~= before)
+        t.eq(s.controlled, target, "switch picks the player closest to the ball")
         t.is_true(s.players[s.controlled].team == "home")
         t.is_true(not s.players[s.controlled].is_keeper)
     end)
@@ -213,5 +261,1085 @@ t.describe("match.step scoring", function()
         match.step(s, 0.016, NO_INPUT)
         t.eq(s.score.home, 1)
         t.eq(s.score.away, 0)
+    end)
+end)
+
+t.describe("match.step keeper", function()
+    local function keeper_of(s, team)
+        for i, p in ipairs(s.players) do
+            if p.team == team and p.is_keeper then
+                return i, p
+            end
+        end
+    end
+
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("catches a shot hit straight at it", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "away")
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(945, 270) -- between the ball and the goal
+        s.ball = Vec2.new(925, 270)
+        s.ball_vel = Vec2.new(100, 0) -- crosses the keeper's line right at it
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, ki, "keeper should hold the catch")
+        t.near(s.ball_vel:length(), 0, 1e-6)
+        t.eq(s.score.home, 0, "a catch concedes nothing")
+        t.is_true(has_event(s, "catch"), "expected a catch event")
+    end)
+
+    t.it("parries a shot to its side it can reach but not gather", function()
+        local s = new_match()
+        local _, k = keeper_of(s, "away")
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(935, 300)
+        s.ball = Vec2.new(890, 250)
+        s.ball_vel = Vec2.new(380, 0) -- crosses to the keeper's side, fast: reachable, not catchable
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.owner == nil, "a parry does not gain possession")
+        t.is_true(s.ball_vel.x < 0, "ball is deflected back away from the goal")
+        t.eq(s.score.home, 0)
+        t.is_true(has_event(s, "parry"), "expected a parry event")
+    end)
+
+    t.it("is beaten when the shot crosses out of dive reach", function()
+        local s = new_match()
+        local _, k = keeper_of(s, "away")
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(945, 120) -- stuck high; can't reach a central shot in time
+        s.ball = Vec2.new(880, 270)
+        s.ball_vel = Vec2.new(520, 0)
+        local saved = false
+        for _ = 1, 30 do
+            match.step(s, 0.016, NO_INPUT)
+            if has_event(s, "catch") or has_event(s, "parry") then
+                saved = true
+            end
+            if s.score.home > 0 then
+                break
+            end
+        end
+        t.eq(s.score.home, 1, "an unreachable shot scores")
+        t.is_true(not saved, "keeper made no save")
+    end)
+
+    t.it("holds a gathered ball safe from a challenging striker", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "away")
+        s.owner = ki
+        k.hold_timer = 1 -- still holding (won't distribute this step)
+        -- An AI striker right on top of the keeper, ready to challenge.
+        local striker
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                striker = p
+                break
+            end
+        end
+        striker.pos = Vec2.new(k.pos.x + 10, k.pos.y)
+        striker.dash_cd = 0
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, ki, "the keeper keeps the gathered ball")
+        t.is_true(not has_event(s, "tackle"), "a keeper in possession can't be tackled")
+    end)
+
+    t.it("distributes to a teammate instead of hoofing it", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "home")
+        for _, p in ipairs(s.players) do
+            if p.team == "away" then
+                p.pos = Vec2.new(950, 40) -- clear every outlet of pressure
+            end
+        end
+        s.owner = ki
+        k.hold_timer = 0 -- hold already elapsed: distribute this step
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.owner == nil, "the keeper releases the ball")
+        -- A paced short throw (arrives with a touch left), not a long clear.
+        local speed = s.ball_vel:length()
+        t.is_true(speed >= 320 and speed <= 620, "throw pace is a pass, not a hoof")
+        t.is_true(has_event(s, "pass"), "expected a pass event")
+        t.is_true(not has_event(s, "shot"), "should not hoof it upfield")
+    end)
+end)
+
+t.describe("match.step off-ball AI", function()
+    -- indices: home 1..5 (keeper 1), away 6..10 (keeper 6)
+    local AWAY_CARRIER = 7
+
+    local function pos_of(s)
+        local p = {}
+        for i, pl in ipairs(s.players) do
+            p[i] = pl.pos
+        end
+        return p
+    end
+
+    -- Home defenders (non-keeper, non-controlled) that received a target.
+    local function home_targets(s, targets)
+        local list = {}
+        for i, pl in ipairs(s.players) do
+            if pl.team == "home" and not pl.is_keeper and targets[i] then
+                list[#list + 1] = i
+            end
+        end
+        return list
+    end
+
+    -- Replicate the internal closest-to-carrier ordering for role identification.
+    local function defender_order(s, p)
+        local order = {}
+        for i, pl in ipairs(s.players) do
+            if pl.team == "home" and not pl.is_keeper and i ~= s.controlled then
+                order[#order + 1] = i
+            end
+        end
+        table.sort(order, function(a, b)
+            local da, db = p[a]:dist(p[AWAY_CARRIER]), p[b]:dist(p[AWAY_CARRIER])
+            if da ~= db then
+                return da < db
+            end
+            return a < b
+        end)
+        return order
+    end
+
+    local function defending_state(scheme)
+        local s = new_match()
+        if scheme then
+            s.marking.home.scheme = scheme
+        end
+        s.owner = AWAY_CARRIER
+        s.players[AWAY_CARRIER].pos = Vec2.new(480, 270)
+        s.ball = Vec2.new(480, 270)
+        return s
+    end
+
+    t.it("sends exactly one presser to the carrier", function()
+        local s = defending_state()
+        local targets = match._offball_targets(s, pos_of(s))
+        local carrier = s.players[AWAY_CARRIER].pos
+        local near = 0
+        for _, i in ipairs(home_targets(s, targets)) do
+            if targets[i]:dist(carrier) <= 24 + 25 then
+                near = near + 1
+            end
+        end
+        t.eq(near, 1, "exactly one defender presses; the rest hold shape")
+    end)
+
+    t.it("positions the cover goal-side between carrier and own goal", function()
+        local s = defending_state()
+        local p = pos_of(s)
+        local cover = defender_order(s, p)[2]
+        local targets = match._offball_targets(s, p)
+        t.is_true(cover ~= nil, "a cover defender exists")
+        t.is_true(
+            targets[cover].x > 5 and targets[cover].x < 480,
+            "cover sits between own goal and the carrier"
+        )
+    end)
+
+    t.it("shifts the defensive block toward the ball (zonal)", function()
+        local s = defending_state("zonal")
+        s.players[AWAY_CARRIER].pos = Vec2.new(480, 30) -- ball high near the top
+        s.ball = Vec2.new(480, 30)
+        local p = pos_of(s)
+        local rest = defender_order(s, p)[3] -- a zone-holding defender
+        local targets = match._offball_targets(s, p)
+        t.is_true(rest ~= nil, "a zonal defender exists")
+        t.is_true(
+            targets[rest].y < s.players[rest].anchor.y,
+            "the block slides up toward the high ball"
+        )
+    end)
+
+    t.it("man-marks an opponent on the goal side", function()
+        local s = defending_state("man")
+        local targets = match._offball_targets(s, pos_of(s))
+        local found = false
+        for def, opp in pairs(s.marks.home) do
+            found = true
+            t.is_true(
+                targets[def].x <= s.players[opp].pos.x + 1,
+                "marker stands goal-side (lower x) of its man"
+            )
+        end
+        t.is_true(found, "man scheme produced at least one mark")
+    end)
+
+    t.it("only man/hybrid schemes create marking assignments", function()
+        local function marks_count(scheme)
+            local s = defending_state(scheme)
+            match._offball_targets(s, pos_of(s))
+            local n = 0
+            for _ in pairs(s.marks.home) do
+                n = n + 1
+            end
+            return n
+        end
+        t.eq(marks_count("zonal"), 0)
+        t.is_true(marks_count("man") >= 1, "man scheme assigns marks")
+        t.is_true(marks_count("hybrid") >= 1, "hybrid scheme assigns marks")
+    end)
+
+    t.it("off-ball attackers leave their anchor to support the carrier", function()
+        local s = new_match()
+        local owner_idx
+        for i, pl in ipairs(s.players) do
+            if pl.team == "home" and not pl.is_keeper and i ~= s.controlled then
+                owner_idx = i
+                break
+            end
+        end
+        s.owner = owner_idx
+        s.players[owner_idx].pos = Vec2.new(500, 270)
+        s.ball = Vec2.new(500, 270)
+        local targets = match._offball_targets(s, pos_of(s))
+        local moved = false
+        for i, pl in ipairs(s.players) do
+            if pl.team == "home" and not pl.is_keeper and targets[i] then
+                if targets[i]:dist(pl.anchor) > 1 then
+                    moved = true
+                end
+            end
+        end
+        t.is_true(moved, "an off-ball attacker repositioned off its anchor to support")
+    end)
+end)
+
+t.describe("match player collisions", function()
+    t.it("pushes overlapping players apart to at least their combined radius", function()
+        local s =
+            match.new({ home = teams.nebula, away = teams.orion, field = { w = 960, h = 540 } })
+        local a, b = s.players[2], s.players[3]
+        a.pos = Vec2.new(200, 500) -- empty corner, away from other players
+        b.pos = Vec2.new(210, 500) -- 10px apart, radii 12+12=24 -> overlapping
+        match._resolve_collisions(s)
+        t.is_true(a.pos:dist(b.pos) >= 23.9, "bodies separated to ~combined radius")
+    end)
+
+    t.it("a sliding player barges through and stuns the one it hits", function()
+        local s =
+            match.new({ home = teams.nebula, away = teams.orion, field = { w = 960, h = 540 } })
+        local slider, victim = s.players[2], s.players[8] -- home vs away
+        slider.pos = Vec2.new(200, 500)
+        slider.slide_timer = 0.3
+        victim.pos = Vec2.new(210, 500)
+        victim.stun_timer = 0
+        match._resolve_collisions(s)
+        t.is_true(victim.stun_timer > 0, "the player hit by the slide is knocked off balance")
+    end)
+end)
+
+t.describe("match.step keeper claim", function()
+    local function keeper_of(s, team)
+        for i, p in ipairs(s.players) do
+            if p.team == team and p.is_keeper then
+                return i, p
+            end
+        end
+    end
+
+    t.it("comes off its line to claim a slow loose ball in the box", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "home")
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(40, 270) -- on its line
+        s.ball = Vec2.new(70, 270) -- loose, just inside the box
+        s.ball_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, NO_INPUT)
+        -- either it stepped out toward the ball, or already gathered it
+        t.is_true(s.owner == ki or s.players[ki].pos.x > 40, "keeper claims / advances on the ball")
+    end)
+
+    t.it("gathers a loose ball it reaches in its box", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "home")
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(60, 270)
+        s.ball = Vec2.new(80, 270) -- within the extended claim radius (30)
+        s.ball_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, ki, "keeper picks up the loose ball in its box")
+    end)
+
+    t.it("does not leave its line for a ball outside the box", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "home")
+        s.owner = nil
+        s.pickup_cd = 1 -- nobody collects this step
+        k.pos = Vec2.new(40, 270)
+        s.ball = Vec2.new(480, 270) -- midfield, well outside the box
+        s.ball_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.players[ki].pos.x < 70, "keeper holds its line, doesn't chase midfield")
+    end)
+end)
+
+t.describe("match.step keeper box dominance", function()
+    local function keeper_of(s, team)
+        for i, p in ipairs(s.players) do
+            if p.team == team and p.is_keeper then
+                return i, p
+            end
+        end
+    end
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+    local function away_outfielders(s)
+        local out = {}
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                out[#out + 1] = i
+            end
+        end
+        return out
+    end
+
+    t.it("keeper wins a contested loose ball in its own box", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "home")
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(40, 270)
+        s.players[away_outfielders(s)[1]].pos = Vec2.new(75, 270) -- attacker a step closer
+        s.ball = Vec2.new(60, 270) -- loose in the home box
+        s.ball_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, ki, "keeper claims the ball in its box over the closer attacker")
+    end)
+
+    t.it("fires a claim event when the keeper gathers in its box", function()
+        local s = new_match()
+        local _, k = keeper_of(s, "home")
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(60, 270)
+        s.ball = Vec2.new(80, 270)
+        s.ball_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "claim"), "a box gather emits a claim event")
+    end)
+
+    t.it("does NOT get priority outside its box (closer attacker wins)", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "home")
+        local att = away_outfielders(s)[1]
+        s.owner = nil
+        s.pickup_cd = 0
+        k.pos = Vec2.new(175, 270) -- ball at x=180 is outside the box (depth > 160)
+        s.players[att].pos = Vec2.new(182, 270) -- strictly closer to the ball
+        s.ball = Vec2.new(180, 270)
+        s.ball_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, att, "outside the box the nearer attacker wins")
+    end)
+
+    t.it("long-clears when every distribution outlet is marked", function()
+        local s = new_match()
+        local ki, k = keeper_of(s, "home")
+        -- pin an opponent onto each home outfielder so no safe outlet exists
+        local outs = away_outfielders(s)
+        local home_out = {}
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper then
+                home_out[#home_out + 1] = i
+            end
+        end
+        for n = 1, math.min(#outs, #home_out) do
+            s.players[outs[n]].pos =
+                Vec2.new(s.players[home_out[n]].pos.x, s.players[home_out[n]].pos.y)
+        end
+        s.owner = ki
+        k.hold_timer = 0
+        match.step(s, 0.001, NO_INPUT)
+        t.is_true(s.owner == nil, "keeper releases the ball")
+        t.is_true(s.ball_vel.x > 0, "it is cleared upfield, not passed sideways into pressure")
+        t.is_true(not has_event(s, "pass"), "a clearance is not a safe pass")
+    end)
+end)
+
+t.describe("match ball height (z)", function()
+    local function loose(z, vz, vx)
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 5 -- keep anyone from collecting during the flight
+        s.ball = Vec2.new(480, 270)
+        s.ball_vel = Vec2.new(vx or 0, 0)
+        s.ball_z = z
+        s.ball_vz = vz
+        return s
+    end
+
+    t.it("a lofted ball rises, slows under gravity, then comes back down", function()
+        local s = loose(0, 300, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.ball_z > 0, "it left the ground")
+        t.near(s.ball_vz, 300 - 900 * 0.016, 1e-6, "gravity decremented vertical speed")
+        for _ = 1, 80 do
+            match.step(s, 0.016, NO_INPUT)
+            t.is_true(s.ball_z >= 0, "height never goes negative")
+        end
+    end)
+
+    t.it("rebounds off the ground keeping its horizontal pace", function()
+        local s = loose(2, -300, 200)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.ball_vz > 0, "bounced back up")
+        t.is_true(s.ball_vel.x > 150, "kept most of its horizontal speed through the bounce")
+    end)
+
+    t.it("settles instead of micro-bouncing forever", function()
+        local s = loose(0.1, -40, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.ball_z, 0)
+        t.eq(s.ball_vz, 0)
+    end)
+
+    t.it("possession grounds the ball (z and vz reset)", function()
+        local s = new_match()
+        s.ball_z = 50
+        s.ball_vz = 200
+        s.owner = s.controlled
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.ball_z, 0)
+        t.eq(s.ball_vz, 0)
+    end)
+end)
+
+t.describe("match height gates", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("a ball in the air flies over heads and is not collected", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 0
+        -- park a teammate right under the ball
+        local p = s.players[2]
+        p.pos = Vec2.new(480, 270)
+        s.ball = Vec2.new(480, 270)
+        s.ball_vel = Vec2.new(0, 0)
+        s.ball_z = 40 -- above GROUND_GRAB_HEIGHT
+        s.ball_vz = 0
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.owner == nil, "nobody collects an overhead ball")
+    end)
+
+    t.it("the same ball on the ground IS collected", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 0
+        s.players[2].pos = Vec2.new(480, 270)
+        s.ball = Vec2.new(480, 270)
+        s.ball_vel = Vec2.new(0, 0)
+        s.ball_z = 0
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.owner ~= nil, "a grounded ball is collected")
+    end)
+
+    t.it("a shot over the crossbar is not a goal; under the bar scores", function()
+        local function shoot_at_line(z)
+            local s = new_match()
+            s.owner = nil
+            s.pickup_cd = 1
+            s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
+            s.ball_vel = Vec2.new(5, 0)
+            s.ball_z = z
+            s.ball_vz = 0
+            match.step(s, 0.016, NO_INPUT)
+            return s.score.home
+        end
+        t.eq(shoot_at_line(80), 0, "over the bar: no goal")
+        t.eq(shoot_at_line(10), 1, "under the bar: goal")
+    end)
+
+    t.it("a keeper does not save a ball above its aerial reach", function()
+        local s = new_match()
+        local ki
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and p.is_keeper then
+                ki = i
+                s.players[i].pos = Vec2.new(945, 270)
+            end
+        end
+        s.owner = nil
+        s.pickup_cd = 0
+        s.ball = Vec2.new(925, 270)
+        s.ball_vel = Vec2.new(100, 0)
+        s.ball_z = 80 -- well above the keeper's aerial reach as it crosses the line
+        s.ball_vz = 100 -- still rising, so it stays high over the keeper
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.owner ~= ki, "the high ball sails over the keeper")
+        t.is_true(not has_event(s, "catch"), "no catch on a ball over the keeper")
+    end)
+end)
+
+t.describe("match lobs and chips", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("a chip shot leaves the ground", function()
+        local s = new_match()
+        s.players[s.controlled].facing = Vec2.new(1, 0)
+        match.step(s, 0.016, input({ shoot = true, lob = true }))
+        t.is_true(s.owner == nil, "shot released")
+        t.is_true(s.ball_vz > 0, "the chip launches upward")
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.ball_z > 0, "and the ball is airborne next frame")
+    end)
+
+    t.it("a driven shot stays on the ground", function()
+        local s = new_match()
+        s.players[s.controlled].facing = Vec2.new(1, 0)
+        match.step(s, 0.016, input({ shoot = true }))
+        t.eq(s.ball_vz, 0, "no loft on a normal shot")
+    end)
+
+    t.it("the keeper lobs over a defender on its throwing lane and lands near a mate", function()
+        local s = new_match()
+        local ki, mate
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and p.is_keeper then
+                ki = i
+            end
+        end
+        local k = s.players[ki]
+        k.pos = Vec2.new(40, 270)
+        -- The ONLY open outlet is mate (idx 5), and its lane is blocked -> the keeper
+        -- must lob over the blocker. Mark the other home outfielders so they aren't
+        -- viable outlets (forcing the lob rather than a clear ground pass elsewhere).
+        mate = s.players[5]
+        mate.pos = Vec2.new(300, 270)
+        s.players[2].pos = Vec2.new(200, 150)
+        s.players[3].pos = Vec2.new(200, 400)
+        s.players[4].pos = Vec2.new(450, 270)
+        s.players[6].pos = Vec2.new(170, 270) -- blocks the keeper->mate lane (f=0.5)
+        s.players[7].pos = Vec2.new(208, 150) -- marks home 2
+        s.players[8].pos = Vec2.new(208, 400) -- marks home 3
+        s.players[9].pos = Vec2.new(458, 270) -- marks home 4
+        s.players[10].pos = Vec2.new(950, 40)
+        s.owner = ki
+        k.hold_timer = 0
+        match.step(s, 0.001, NO_INPUT)
+        t.is_true(s.owner == nil, "keeper released the ball")
+        t.is_true(s.ball_vz > 0, "it was lobbed over the camped defender")
+        t.is_true(has_event(s, "pass"), "still counts as a distribution pass")
+    end)
+end)
+
+t.describe("match keeper respect (hard retreat)", function()
+    t.it("opponents keep clear of a keeper holding the ball", function()
+        local s = new_match()
+        local ki
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and p.is_keeper then
+                ki = i
+            end
+        end
+        s.owner = ki
+        s.players[ki].pos = Vec2.new(40, 270)
+        -- an away outfielder camped right on the keeper
+        local att = 7
+        s.players[att].pos = Vec2.new(55, 270)
+        local targets = match._offball_targets(
+            s,
+            (function()
+                local p = {}
+                for i, pl in ipairs(s.players) do
+                    p[i] = pl.pos
+                end
+                return p
+            end)()
+        )
+        t.is_true(targets[att] ~= nil, "the opponent has a target")
+        t.is_true(
+            targets[att]:dist(s.players[ki].pos) >= 69.9,
+            "its target is pushed outside the keeper's respect ring"
+        )
+    end)
+end)
+
+t.describe("match auto-switch control", function()
+    t.it("control follows the home player who wins the ball", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 0
+        local target
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                target = i
+                break
+            end
+        end
+        s.players[target].pos = Vec2.new(300, 270) -- clear space in the home half
+        s.ball = Vec2.new(300, 270)
+        s.ball_vel = Vec2.new(0, 0)
+        s.ball_z = 0
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, target, "that player gathered the ball")
+        t.eq(s.controlled, target, "control auto-switched to the ball winner")
+    end)
+
+    t.it("does not hand control to the keeper", function()
+        local s = new_match()
+        local ki
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and p.is_keeper then
+                ki = i
+            end
+        end
+        s.owner = nil
+        s.pickup_cd = 0
+        s.players[ki].pos = Vec2.new(60, 270)
+        s.ball = Vec2.new(75, 270) -- in the home keeper's box
+        s.ball_vel = Vec2.new(0, 0)
+        s.ball_z = 0
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, ki, "keeper claimed it")
+        t.is_true(s.controlled ~= ki, "but control does not pass to the keeper")
+    end)
+end)
+
+t.describe("match.step keeper vs close-range shots", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("saves a shot released moments ago (inside the shooter's pickup lockout)", function()
+        local s = new_match()
+        local ki, k
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and p.is_keeper then
+                ki, k = i, p
+            end
+        end
+        k.pos = Vec2.new(938, 270)
+        s.owner = nil
+        s.pickup_cd = 0.3 -- the shot was just released: shooter can't re-collect...
+        s.ball = Vec2.new(908, 270)
+        s.ball_vel = Vec2.new(600, 0) -- ...but the keeper must still react to it
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "catch") or has_event(s, "parry"), "the keeper made a save")
+        t.eq(s.score.home, 0, "a close-range shot is not an automatic goal")
+    end)
+
+    t.it("smothers a carrier who brings the ball into its box", function()
+        local s = new_match()
+        local carrier
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                carrier = i
+                break
+            end
+        end
+        local c = s.players[carrier]
+        c.pos = Vec2.new(60, 270)
+        c.facing = Vec2.new(-1, 0)
+        s.players[1].pos = Vec2.new(24, 270) -- home keeper on its line
+        s.owner = carrier
+        s.ball = Vec2.new(42, 270) -- at the carrier's feet, in the keeper's box
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, 1, "the keeper takes the ball off the carrier's feet")
+        t.is_true(s.players[1].hold_timer > 0, "and holds it in hand")
+    end)
+
+    t.it("rushes a carrier in its box instead of holding the line", function()
+        local s = new_match()
+        local carrier
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                carrier = i
+                break
+            end
+        end
+        s.players[carrier].pos = Vec2.new(140, 240)
+        s.owner = carrier
+        s.ball = Vec2.new(122, 240)
+        local k = s.players[1]
+        k.pos = Vec2.new(24, 270)
+        local before = k.pos:dist(s.ball)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(k.pos:dist(s.ball) < before, "the keeper closes down the carrier")
+    end)
+end)
+
+t.describe("match.step kickoff rules", function()
+    t.it("the conceding team kicks off after a goal", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 1
+        s.ball = Vec2.new(s.field.w - 5, s.field.h / 2)
+        s.ball_vel = Vec2.new(200, 0)
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.score.home, 1)
+        t.is_true(s.owner ~= nil, "kickoff possession is assigned")
+        t.eq(s.players[s.owner].team, "away", "the team that conceded restarts play")
+        t.is_true(not s.players[s.owner].is_keeper)
+        t.eq(s.players[s.controlled].team, "home", "the human still controls a home player")
+        t.is_true(not s.players[s.controlled].is_keeper)
+    end)
+end)
+
+t.describe("match.step pass quality", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    -- Controlled passer at (300,270) facing +x with one teammate ahead at `tpos`;
+    -- every other outfielder parked behind, all opponents far away.
+    local function pass_setup(tpos)
+        local s = new_match()
+        local passer = s.controlled
+        local mate
+        s.players[passer].pos = Vec2.new(300, 270)
+        s.players[passer].facing = Vec2.new(1, 0)
+        local backy = 100
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= passer then
+                if not mate then
+                    mate = i
+                    p.pos = Vec2.new(tpos.x, tpos.y)
+                else
+                    p.pos = Vec2.new(100, backy)
+                    backy = backy + 120
+                end
+            elseif p.team == "away" then
+                p.pos = Vec2.new(940, 40)
+            end
+        end
+        s.owner = passer
+        s.ball = s.players[passer].pos:add(Vec2.new(18, 0))
+        return s, passer, mate
+    end
+
+    t.it("a long pass is driven hard enough to actually arrive", function()
+        local s, _, mate = pass_setup(Vec2.new(700, 270))
+        match.step(s, 0.016, input({ pass = true }))
+        t.is_true(has_event(s, "pass"))
+        t.is_true(s.players[mate].receive_timer > 0, "the receiver runs onto it")
+        t.is_true(s.ball_vel:length() > 450, "a 400px pass is driven, not rolled")
+        for _ = 1, 150 do
+            match.step(s, 1 / 60, NO_INPUT)
+            if s.owner then
+                break
+            end
+        end
+        t.eq(s.owner, mate, "the receiver collects the pass")
+    end)
+
+    t.it("falls back to the nearest teammate when nobody is in the aim cone", function()
+        local s = new_match()
+        local passer = s.controlled
+        s.players[passer].pos = Vec2.new(800, 270)
+        s.players[passer].facing = Vec2.new(1, 0) -- aiming at open space
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= passer then
+                p.pos = Vec2.new(500, p.pos.y) -- everyone behind the passer
+            end
+        end
+        s.owner = passer
+        s.ball = s.players[passer].pos:add(Vec2.new(18, 0))
+        match.step(s, 0.016, input({ pass = true }))
+        t.is_true(has_event(s, "pass"), "the pass button always finds someone")
+        t.is_true(s.ball_vel.x < 0, "played back to the nearest teammate")
+    end)
+
+    t.it("an AI carrier under pressure passes to an open teammate", function()
+        local s = new_match()
+        local carrier, mate
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                if not carrier then
+                    carrier = i
+                elseif not mate then
+                    mate = i
+                end
+            end
+        end
+        s.players[carrier].pos = Vec2.new(600, 270)
+        s.players[mate].pos = Vec2.new(450, 200) -- open, ahead (away attacks -x)
+        -- A home defender close enough to pressure but not to steal.
+        local defender
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                defender = i
+                break
+            end
+        end
+        s.players[defender].pos = Vec2.new(655, 270)
+        s.players[s.controlled].pos = Vec2.new(200, 100)
+        s.owner = carrier
+        s.ball = Vec2.new(582, 270)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "pass"), "the pressured carrier moves the ball on")
+        local receiver
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and p.receive_timer > 0 then
+                receiver = i
+            end
+        end
+        t.is_true(receiver ~= nil and receiver ~= carrier, "an away teammate runs onto it")
+        t.is_true(mate ~= nil) -- (setup sanity)
+    end)
+end)
+
+t.describe("match.step keeper floated throw (tier 2)", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("floats a throw over the traffic when outlets are marked but not swarmed", function()
+        local s = new_match()
+        local k = s.players[1] -- home keeper
+        k.pos = Vec2.new(40, 270)
+        -- Every outlet has a marker 40px away: not SAFE (60) but receivable (>=30).
+        s.players[2].pos = Vec2.new(250, 150)
+        s.players[3].pos = Vec2.new(250, 390)
+        s.players[4].pos = Vec2.new(420, 270)
+        s.players[5].pos = Vec2.new(560, 200)
+        s.players[7].pos = Vec2.new(290, 150)
+        s.players[8].pos = Vec2.new(290, 390)
+        s.players[9].pos = Vec2.new(460, 270)
+        s.players[10].pos = Vec2.new(600, 200)
+        s.players[6].pos = Vec2.new(938, 270) -- away keeper home
+        s.owner = 1
+        s.ball = Vec2.new(40, 270)
+        k.hold_timer = 0
+        match.step(s, 0.001, NO_INPUT)
+        t.is_true(s.owner == nil, "keeper releases the ball")
+        t.is_true(has_event(s, "pass"), "it is a distribution, not a clearance")
+        t.is_true(s.ball_vz > 0, "and it is floated over the opponents")
+    end)
+end)
+
+t.describe("match.step pass interception awareness", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("the pass button prefers a teammate whose lane cannot be cut", function()
+        local s = new_match()
+        local passer = s.controlled
+        s.players[passer].pos = Vec2.new(300, 270)
+        s.players[passer].facing = Vec2.new(1, 0)
+        -- mate1: nearest in the cone, but an away body camps its lane late in the
+        -- flight. mate2: a touch further, in the cone, and safely off that lane.
+        local mate1, mate2
+        local backy = 100
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= passer then
+                if not mate1 then
+                    mate1 = i
+                    p.pos = Vec2.new(440, 270)
+                elseif not mate2 then
+                    mate2 = i
+                    p.pos = Vec2.new(420, 400)
+                else
+                    p.pos = Vec2.new(100, backy) -- behind: outside the aim cone
+                    backy = backy + 120
+                end
+            end
+        end
+        local interceptor
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                if not interceptor then
+                    interceptor = i
+                    p.pos = Vec2.new(420, 270) -- sits on the passer->mate1 lane
+                else
+                    p.pos = Vec2.new(940, 40) -- everyone else far away
+                end
+            end
+        end
+        s.owner = passer
+        s.ball = s.players[passer].pos:add(Vec2.new(18, 0))
+        match.step(s, 0.016, input({ pass = true }))
+        t.is_true(has_event(s, "pass"), "a pass is released")
+        t.is_true(interceptor ~= nil) -- (setup sanity)
+        t.is_true(
+            s.players[mate2].receive_timer > 0,
+            "the ball goes to the mate whose lane cannot be cut"
+        )
+    end)
+
+    t.it("a pressured AI carrier lobs the pass a chaser would cut out", function()
+        local s = new_match()
+        -- Away carrier under pressure with one eligible outlet; a home defender
+        -- stands 26px off the ground lane (statically clear, POSSESS_DIST is 22)
+        -- but close enough to step onto the rolling ball.
+        local away_out = {}
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                away_out[#away_out + 1] = i
+            end
+        end
+        local carrier, outlet = away_out[1], away_out[2]
+        s.players[carrier].pos = Vec2.new(600, 270)
+        s.players[outlet].pos = Vec2.new(440, 270)
+        s.players[away_out[3]].pos = Vec2.new(820, 200)
+        s.players[away_out[4]].pos = Vec2.new(820, 340)
+        local home_out = {}
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                home_out[#home_out + 1] = i
+            end
+        end
+        s.players[home_out[1]].pos = Vec2.new(655, 270) -- pressures the carrier
+        s.players[home_out[2]].pos = Vec2.new(520, 296) -- lurks 26px off the lane
+        s.players[home_out[3]].pos = Vec2.new(824, 200) -- pins an away spare
+        s.players[s.controlled].pos = Vec2.new(824, 340) -- pins the other spare
+        s.owner = carrier
+        s.ball = Vec2.new(582, 270)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(has_event(s, "pass"), "the pressured carrier moves the ball on")
+        t.is_true(s.players[outlet].receive_timer > 0, "to the eligible outlet")
+        t.is_true(s.ball_vz > 0, "floated over the would-be interceptor, not rolled")
+    end)
+
+    t.it("the keeper floats its distribution over a chaser who could cut it", function()
+        local s = new_match()
+        local k = s.players[1] -- home keeper
+        k.pos = Vec2.new(40, 270)
+        -- Outlet 2 is the only viable target: its marker is 104px away (safe) and
+        -- its lane is statically clear, but that marker sits 30px off the lane —
+        -- near enough to cut a rolling ball. Every other outlet is pinned.
+        s.players[2].pos = Vec2.new(240, 270)
+        s.players[3].pos = Vec2.new(300, 100)
+        s.players[4].pos = Vec2.new(300, 440)
+        s.players[5].pos = Vec2.new(600, 270)
+        s.players[7].pos = Vec2.new(140, 300) -- the chaser off the keeper->2 lane
+        s.players[8].pos = Vec2.new(302, 100) -- pins home 3
+        s.players[9].pos = Vec2.new(302, 440) -- pins home 4
+        s.players[10].pos = Vec2.new(602, 270) -- pins home 5
+        s.players[6].pos = Vec2.new(938, 270) -- away keeper home
+        s.owner = 1
+        s.ball = Vec2.new(40, 270)
+        k.hold_timer = 0
+        match.step(s, 0.001, NO_INPUT)
+        t.is_true(s.owner == nil, "keeper releases the ball")
+        t.is_true(has_event(s, "pass"), "it is a distribution, not a clearance")
+        t.is_true(s.players[2].receive_timer > 0, "aimed at the open outlet")
+        t.is_true(s.ball_vz > 0, "floated over the chaser instead of rolled past it")
+    end)
+end)
+
+t.describe("match.step loose-ball pursuit", function()
+    t.it("chasers lead a rolling ball instead of trailing it", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 1
+        s.ball = Vec2.new(700, 400) -- open space: no player is standing on it
+        s.ball_vel = Vec2.new(200, 0) -- rolling toward the away goal
+        local pos = {}
+        for i, pl in ipairs(s.players) do
+            pos[i] = pl.pos
+        end
+        local targets = match._offball_targets(s, pos)
+        -- The away press-set chaser (nearest away outfielder to the ball).
+        local chaser, best_d
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                local d = p.pos:dist(s.ball)
+                if not best_d or d < best_d then
+                    best_d, chaser = d, i
+                end
+            end
+        end
+        t.is_true(targets[chaser] ~= nil, "the chaser has a target")
+        t.is_true(targets[chaser].x > s.ball.x, "it aims ahead of the ball along its path")
+        t.near(targets[chaser].y, s.ball.y, 1e-6, "the lead stays on the ball's line")
+    end)
+end)
+
+t.describe("match scenario: keeper retains possession under pressure", function()
+    -- A scripted "real game" situation: the home keeper has gathered the ball with
+    -- a striker pressing and two defenders available as outlets. Played out over 3
+    -- seconds, the keeper must keep it for the team and never hand it to the
+    -- opponent. Control is parked on the keeper so every outfielder is pure AI.
+    t.it("the keeper builds out without losing the ball to the opponent", function()
+        local s = new_match()
+        s.owner = 1 -- home keeper
+        s.players[1].pos = Vec2.new(40, 270)
+        s.players[1].hold_timer = 0.9
+        s.ball = Vec2.new(40, 270)
+        s.players[2].pos = Vec2.new(210, 170) -- home defender (outlet)
+        s.players[3].pos = Vec2.new(210, 370) -- home defender (outlet)
+        s.players[4].pos = Vec2.new(450, 200)
+        s.players[5].pos = Vec2.new(600, 270)
+        s.players[7].pos = Vec2.new(62, 270) -- away striker pressing the keeper
+        s.players[8].pos = Vec2.new(230, 170) -- away marking a defender
+        s.players[9].pos = Vec2.new(500, 270)
+        s.players[10].pos = Vec2.new(700, 270)
+
+        local away_ticks, home_outfielder_owned = 0, false
+        for _ = 1, 180 do
+            s.controlled = 1 -- keep the human out of it; all outfielders are AI
+            match.step(s, 1 / 60, NO_INPUT)
+            s.controlled = 1
+            local o = s.owner
+            if o then
+                if s.players[o].team == "away" then
+                    away_ticks = away_ticks + 1
+                elseif not s.players[o].is_keeper then
+                    home_outfielder_owned = true
+                end
+            end
+        end
+
+        t.eq(away_ticks, 0, "the opponent never wins the ball off the keeper's build-up")
+        t.is_true(home_outfielder_owned, "a home outfielder received the keeper's distribution")
     end)
 end)

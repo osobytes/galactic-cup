@@ -11,12 +11,15 @@ local camera = {}
 ---@field horizon_frac number  -- screen-height fraction where the far edge sits
 ---@field bottom_frac number  -- screen-height fraction where the near edge sits
 
+-- Tuned so the pitch is inset within the viewport (margins on all sides) rather
+-- than filling the screen — the arena floats in space, like a broadcast frame.
+-- Keep near_scale < 1 so even the widest (near) edge stays off the screen edges.
 ---@type CameraConfig
 camera.DEFAULTS = {
-    far_scale = 0.72, -- raised from 0.62: wider far edge, less of a sharp wedge
-    near_scale = 1.18,
-    horizon_frac = 0.18,
-    bottom_frac = 0.94,
+    far_scale = 0.51, -- wide far edge (less of a sharp wedge), but inset
+    near_scale = 0.84, -- < 1: near edge sits ~8% in from each side
+    horizon_frac = 0.24, -- space/HUD band above the pitch
+    bottom_frac = 0.88, -- margin below the pitch
 }
 
 -- Project a world point onto the screen.

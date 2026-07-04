@@ -97,6 +97,7 @@ function Match:update(dt)
         switch = self._switch,
         dash = self._dash,
         dodge = self._dodge,
+        lob = love.keyboard.isDown("l"), -- held modifier: chip/lob
     }
     self._shoot_held_prev = held
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
@@ -129,9 +130,14 @@ function Match:draw_frame(s, vp)
         "center"
     )
     love.graphics.print(
-        "WASD move  -  Space shoot  -  K pass  -  Tab switch  -  Esc quit",
+        "Move: WASD/Arrows    Shoot: Space/J (hold = charge, hold left/right = curve)    Pass: K",
         16,
-        vp.h - 28
+        vp.h - 44
+    )
+    love.graphics.print(
+        "Tackle/Slide: Shift or X    Juke: C    Lob/Chip: L (hold)    Switch: Tab/Q    Quit: Esc",
+        16,
+        vp.h - 26
     )
 
     if s.finished then

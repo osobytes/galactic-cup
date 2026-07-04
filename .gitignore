@@ -19,3 +19,4 @@ lua_modules/
 
 # Vendored type definitions (re-fetched by scripts/setup.sh)
 types/
+.claude/

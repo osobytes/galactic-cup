@@ -21,6 +21,10 @@ local function stub_graphics()
         "circle",
         "ellipse",
         "arc",
+        "push",
+        "pop",
+        "translate",
+        "rotate",
         "print",
         "printf",
     }) do

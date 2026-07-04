@@ -110,11 +110,28 @@ end
 ---@param r number   -- projected body radius (px)
 ---@param color number[]
 ---@param v PlayerView?  -- nil = idle fallback
----@param opts { facing: Vec2, is_keeper: boolean, controlled: boolean, dashing: boolean? }
+---@param opts { facing: Vec2, is_keeper: boolean, controlled: boolean, dashing: boolean?, dive: number?, dive_dir: Vec2?, holding: boolean?, grab: number?, throw: number? }
 function renderer.draw(sx, gy, r, color, v, opts)
     -- Ground shadow (kept here so it tracks the figure).
     love.graphics.setColor(0, 0, 0, 0.35)
     love.graphics.ellipse("fill", sx, gy, r * 1.15, r * 0.5)
+
+    -- Keeper dive: pivot the whole body at the feet toward the dive side and
+    -- shove it laterally, so the figure lunges horizontally for the save. `dive`
+    -- is 0..1 progress (1 = just launched). Reuses figure() under a transform.
+    if opts.dive and opts.dive > 0 and opts.dive_dir then
+        local d = opts.dive_dir ---@type Vec2
+        local sign = (d.x >= 0) and 1 or -1
+        local angle = sign * math.rad(72) * opts.dive
+        love.graphics.push()
+        love.graphics.translate(sx + d.x * r * 1.6 * opts.dive, gy)
+        love.graphics.rotate(angle)
+        love.graphics.translate(-sx, -gy)
+        figure(sx, gy, r, color, v, opts)
+        love.graphics.pop()
+        -- Facing tick still helps read the dive direction.
+        return
+    end
 
     -- Selection ring on the ground, under everything.
     if opts.controlled then
@@ -137,6 +154,28 @@ function renderer.draw(sx, gy, r, color, v, opts)
     end
 
     figure(sx, gy, r, color, v, opts)
+
+    -- Keeper ball handling: cradle the ball in raised hands while holding it (lower
+    -- while gathering), or thrust the arms forward on release (no ball — it's away).
+    local fx = (opts.facing and opts.facing.x) or 0
+    local sh_y = gy - r * 2.15
+    if opts.holding then
+        local gathering = (opts.grab or 0) > 0
+        local hy = gathering and (gy - r * 1.6) or (gy - r * 2.1)
+        local hx = sx + fx * r * 0.35
+        set(lighten(color, 0.55), 0.95)
+        love.graphics.setLineWidth(math.max(1.5, r * 0.26))
+        love.graphics.line(sx - r * 0.5, sh_y, hx - r * 0.35, hy)
+        love.graphics.line(sx + r * 0.5, sh_y, hx + r * 0.35, hy)
+        love.graphics.setColor(1, 0.95, 0.7)
+        love.graphics.circle("fill", hx, hy, r * 0.5)
+    elseif (opts.throw or 0) > 0 then
+        local hx = sx + fx * r * (0.6 + opts.throw * 0.8)
+        set(lighten(color, 0.55), 0.9)
+        love.graphics.setLineWidth(math.max(1.5, r * 0.26))
+        love.graphics.line(sx - r * 0.5, sh_y, hx, gy - r * 1.9)
+        love.graphics.line(sx + r * 0.5, sh_y, hx, gy - r * 1.9)
+    end
 
     -- Ground-plane facing tick (kept from the old renderer as a clear aim cue).
     if opts.facing then

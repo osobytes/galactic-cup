@@ -178,6 +178,7 @@ function pitch.draw(s, vp, opts)
         return a.depth < b.depth
     end)
 
+    local keeper_holds = s.owner ~= nil and s.players[s.owner].is_keeper
     for _, it in ipairs(items) do
         if it.kind == "player" then
             local p = it.p
@@ -188,14 +189,27 @@ function pitch.draw(s, vp, opts)
                 facing = p.facing,
                 is_keeper = p.is_keeper,
                 controlled = (it.idx == s.controlled),
-                dashing = p.dash_timer > 0,
+                dashing = p.slide_timer > 0,
+                -- 0.3 is a visual normalizer (~ the sim's dive duration); exactness
+                -- doesn't matter, it just eases the lunge back upright.
+                dive = (p.dive_timer > 0) and math.min(1, p.dive_timer / 0.3) or 0,
+                dive_dir = p.dive_dir,
+                -- Keeper holding the ball: render it cradled in the hands (below).
+                holding = (it.idx == s.owner and p.is_keeper),
+                grab = (p.grab_timer > 0) and math.min(1, p.grab_timer / 0.25) or 0,
+                throw = (p.throw_timer > 0) and math.min(1, p.throw_timer / 0.25) or 0,
             })
-        else
+        elseif not keeper_holds then
+            -- Loose / dribbled ball. (A keeper-held ball is drawn in its hands by the
+            -- keeper avatar, so skip the ground ball then.) The shadow stays on the
+            -- ground and shrinks/fades with height; the ball lifts by its height.
             local sx, sy, scale = project(s.ball.x, s.ball.y)
-            love.graphics.setColor(0, 0, 0, 0.3)
-            love.graphics.ellipse("fill", sx, sy, 6 * scale, 3 * scale)
+            local z = s.ball_z or 0
+            local hk = 1 / (1 + z / 80)
+            love.graphics.setColor(0, 0, 0, 0.3 * hk)
+            love.graphics.ellipse("fill", sx, sy, 6 * scale * hk, 3 * scale * hk)
             love.graphics.setColor(1, 0.95, 0.7)
-            love.graphics.circle("fill", sx, sy - 4 * scale, 5 * scale)
+            love.graphics.circle("fill", sx, sy - (z + 4) * scale, 5 * scale)
         end
     end
 
