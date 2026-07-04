@@ -33,7 +33,9 @@ local AI_SHOOT_RANGE = 240 -- AI owner shoots when this close to goal
 local GOAL_MOUTH = 110
 local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 
-local STEAL_DIST = 26 -- AI challenge range to dislodge the ball
+local STEAL_DIST = 26 -- challenge range to the BALL to dislodge it
+local STEAL_ATTEMPT = 40 -- AI commits a poke when the ball is this close (may whiff)
+local KICKOFF_CLEAR = 120 -- opponents keep this centre-circle distance at kickoff
 local TACKLE_POP_SPEED = 150 -- speed the ball pops out on a tackle
 local AI_STEAL_CD = 1.2 -- min seconds between AI tackle attempts (carriers get a beat on the ball)
 local KEEPER_SMOTHER = 26 -- keeper takes the ball off a carrier's feet at this range (in its box)
@@ -379,6 +381,23 @@ local function place_kickoff(s, kicking)
     s.pickup_cd = 0
     s.charge = 0
     s.ball_spin = 0
+    -- Centre-circle rule: the non-kicking team keeps its distance from the
+    -- ball at the restart — push any intruder straight back out.
+    for _, p in ipairs(s.players) do
+        if p.team ~= kicking and not p.is_keeper then
+            local off = p.pos:sub(s.ball)
+            local d = off:length()
+            if d < KICKOFF_CLEAR then
+                local dir = (d > 0) and off:normalized()
+                    or Vec2.new(p.team == "home" and -1 or 1, 0)
+                local np = s.ball:add(dir:scale(KICKOFF_CLEAR))
+                p.pos = Vec2.new(
+                    math.max(PLAYER_RADIUS, math.min(s.field.w - PLAYER_RADIUS, np.x)),
+                    math.max(PLAYER_RADIUS, math.min(s.field.h - PLAYER_RADIUS, np.y))
+                )
+            end
+        end
+    end
 end
 
 -- Hybrid default so tactics authored before the marking block still work.
@@ -751,10 +770,15 @@ local function keeper_hold_pos(s, keeper)
     return Vec2.new(hold_x, keeper.pos.y)
 end
 
--- Knock the ball loose when a challenger reaches the carrier. The human challenges
--- with a standing poke or a slide (longer reach); AI defenders challenge on a
--- cooldown. A stunned defender can't tackle. The ball pops toward the challenger
--- so a clean tackle tends to win possession; a slide also knocks the carrier down.
+-- Knock the ball loose when a challenger reaches THE BALL — not the carrier's
+-- body. The ball sticks a step ahead of the carrier's feet, so a carrier who
+-- turns their body between the challenger and the ball SHIELDS it: challenges
+-- from behind come up short. The human challenges with a standing poke or a
+-- slide (longer reach); an AI defender COMMITS to a poke as soon as the ball
+-- looks reachable and pays its cooldown even on a whiff, so a carrier who keeps
+-- moving makes defenders miss. A stunned defender can't tackle. The ball pops
+-- toward the challenger so a clean tackle tends to win possession; a slide also
+-- knocks the carrier down.
 ---@param s MatchState
 local function attempt_steals(s)
     if not s.owner then
@@ -793,6 +817,7 @@ local function attempt_steals(s)
     for i, p in ipairs(s.players) do
         if p.team ~= owner.team and not p.is_keeper and p.stun_timer <= 0 then
             local human = i == s.controlled
+            local d = p.pos:dist(s.ball) -- reach for the ball: shielding matters
             local sliding = false
             local active, reach = false, STEAL_DIST
             if human then
@@ -801,10 +826,15 @@ local function attempt_steals(s)
                 elseif p.tackle_timer > 0 then
                     active, reach = true, STAND_REACH
                 end
-            elseif p.dash_cd <= 0 then
+            elseif p.dash_cd <= 0 and d <= STEAL_ATTEMPT then
+                -- The AI pokes as soon as the ball looks reachable — and goes on
+                -- cooldown whether or not it connects (a whiff is the carrier's
+                -- window to escape).
                 active = true
+                p.dash_cd = AI_STEAL_CD
+                p.tackle_timer = STAND_TIMER -- poke pose for the renderer
             end
-            if active and p.pos:dist(owner.pos) <= reach then
+            if active and d <= reach then
                 local dir = p.pos:sub(owner.pos)
                 if dir.x == 0 and dir.y == 0 then
                     dir = p.facing
@@ -814,9 +844,6 @@ local function attempt_steals(s)
                 s.owner = nil
                 s.ball_vel = dir:normalized():scale(TACKLE_POP_SPEED)
                 s.pickup_cd = 0.12
-                if not human then
-                    p.dash_cd = AI_STEAL_CD
-                end
                 if sliding then
                     owner.stun_timer = math.max(owner.stun_timer, STUN_TIME) -- slide knocks them down
                 end

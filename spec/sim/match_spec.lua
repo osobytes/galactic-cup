@@ -138,13 +138,24 @@ t.describe("match.step tackling", function()
             end
         end
         s.owner = away_idx
-        return s, away_idx, s.players[away_idx]
+        -- Challenges reach for the ball, so put it at the carrier's feet.
+        local c = s.players[away_idx]
+        s.ball = c.pos:add(c.facing:scale(18))
+        -- Park the carrier's teammates out of passing range so it can't bail
+        -- out of the challenge with a pressure pass.
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper and i ~= away_idx then
+                p.pos = Vec2.new(40, 380 + i * 15)
+            end
+        end
+        return s, away_idx, c
     end
 
     t.it("a standing tackle (slow) knocks the ball loose", function()
         local s, away_idx, carrier = carrier_setup()
         local me = s.players[s.controlled]
-        me.pos = Vec2.new(carrier.pos.x + 8, carrier.pos.y)
+        -- stand on the BALL side (in front of the carrier), inside poke reach
+        me.pos = Vec2.new(carrier.pos.x - 26, carrier.pos.y)
         me.vel = Vec2.new(0, 0) -- standing -> standing poke
         match.step(s, 0.016, input({ dash = true }))
         t.is_true(s.owner ~= away_idx, "carrier loses possession to the standing tackle")
@@ -153,13 +164,50 @@ t.describe("match.step tackling", function()
     t.it("a slide (sprinting) wins the ball from further away and stuns the carrier", function()
         local s, away_idx, carrier = carrier_setup()
         local me = s.players[s.controlled]
-        -- approach from a slide's extended range, sprinting at the carrier
-        me.pos = Vec2.new(carrier.pos.x + 32, carrier.pos.y)
-        me.vel = Vec2.new(-200, 0)
+        -- approach the BALL side (in front of the carrier), sprinting into a slide
+        me.pos = Vec2.new(carrier.pos.x - 32, carrier.pos.y)
+        me.vel = Vec2.new(200, 0)
         me.sprinting = true -- sprint + tackle = slide
-        match.step(s, 0.016, input({ dash = true, move = Vec2.new(-1, 0), sprint = true }))
+        match.step(s, 0.016, input({ dash = true, move = Vec2.new(1, 0), sprint = true }))
         t.is_true(s.owner ~= away_idx, "slide wins the ball at extended reach")
         t.is_true(carrier.stun_timer > 0, "the slid-through carrier is knocked off balance")
+    end)
+
+    t.it("a carrier shields the ball from a challenge behind them", function()
+        local s, away_idx, carrier = carrier_setup()
+        carrier.facing = Vec2.new(-1, 0) -- ball sticks a step toward -x
+        s.ball = carrier.pos:add(Vec2.new(-18, 0))
+        local defender
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                defender = i
+                break
+            end
+        end
+        s.players[defender].pos = Vec2.new(carrier.pos.x + 20, carrier.pos.y) -- on their back
+        s.players[defender].dash_cd = 0
+        s.players[s.controlled].pos = Vec2.new(60, 60) -- human well away
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.owner, away_idx, "the shielded ball stays with the carrier")
+        t.is_true(s.players[defender].dash_cd > 0, "the failed poke still goes on cooldown")
+    end)
+
+    t.it("the same challenge from the ball side wins it", function()
+        local s, away_idx, carrier = carrier_setup()
+        carrier.facing = Vec2.new(-1, 0)
+        s.ball = carrier.pos:add(Vec2.new(-18, 0))
+        local defender
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                defender = i
+                break
+            end
+        end
+        s.players[defender].pos = Vec2.new(carrier.pos.x - 20, carrier.pos.y) -- goal side, on the ball
+        s.players[defender].dash_cd = 0
+        s.players[s.controlled].pos = Vec2.new(60, 60)
+        match.step(s, 0.016, NO_INPUT)
+        t.is_true(s.owner ~= away_idx, "a front-on challenge dislodges the ball")
     end)
 
     t.it("a jogging (non-sprint) tackle is a poke, not a slide", function()
@@ -1549,22 +1597,26 @@ t.describe("match scenario: keeper retains possession under pressure", function(
         s.players[9].pos = Vec2.new(500, 270)
         s.players[10].pos = Vec2.new(700, 270)
 
-        local away_ticks, home_outfielder_owned = 0, false
+        -- The guarantee: the keeper's distribution reaches a home outfielder
+        -- before the opponent ever touches the ball. (What happens later in
+        -- open play — e.g. that outfielder dribbling into a challenge — is the
+        -- game, not a build-up failure.)
+        local away_before_receive, home_outfielder_owned = false, false
         for _ = 1, 180 do
             s.controlled = 1 -- keep the human out of it; all outfielders are AI
             match.step(s, 1 / 60, NO_INPUT)
             s.controlled = 1
             local o = s.owner
             if o then
-                if s.players[o].team == "away" then
-                    away_ticks = away_ticks + 1
-                elseif not s.players[o].is_keeper then
+                if s.players[o].team == "away" and not home_outfielder_owned then
+                    away_before_receive = true
+                elseif s.players[o].team == "home" and not s.players[o].is_keeper then
                     home_outfielder_owned = true
                 end
             end
         end
 
-        t.eq(away_ticks, 0, "the opponent never wins the ball off the keeper's build-up")
+        t.is_true(not away_before_receive, "the opponent never intercepts the build-up")
         t.is_true(home_outfielder_owned, "a home outfielder received the keeper's distribution")
     end)
 end)
