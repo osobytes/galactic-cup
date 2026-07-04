@@ -736,8 +736,9 @@ end
 ---@param s MatchState
 ---@param owner_idx integer
 ---@param lofted boolean?  -- lob the pass over a defender on the lane
-local function try_pass(s, owner_idx, lofted)
+local function try_pass(s, owner_idx, lofted, aim)
     local owner = s.players[owner_idx]
+    aim = aim or owner.facing
     -- Candidates are outfield teammates only: passing to the keeper's hands would
     -- break the back-pass rule, so the keeper is never a pass target.
     local cand, positions, opp_positions = {}, {}, {}
@@ -766,7 +767,7 @@ local function try_pass(s, owner_idx, lofted)
                 safe_pos[#safe_pos + 1] = positions[k]
             end
         end
-        rel = passing.target(owner.pos, owner.facing, safe_pos, range)
+        rel = passing.target(owner.pos, aim, safe_pos, range)
         if rel then
             pick_cand, pick_pos = safe_cand, safe_pos
         end
@@ -774,8 +775,7 @@ local function try_pass(s, owner_idx, lofted)
     if not rel then
         -- No safe cone target: take the plain cone pick, then the nearest
         -- teammate, so the button always does something (risk included).
-        rel = passing.target(owner.pos, owner.facing, positions, range)
-            or ai.closest(owner.pos, positions)
+        rel = passing.target(owner.pos, aim, positions, range) or ai.closest(owner.pos, positions)
         if not rel then
             return
         end
@@ -817,8 +817,9 @@ end
 ---@param s MatchState
 ---@param keeper_idx integer
 ---@param range number
-local function keeper_throw(s, keeper_idx, range)
+local function keeper_throw(s, keeper_idx, range, aim)
     local keeper = s.players[keeper_idx]
+    aim = aim or keeper.facing
     local cand, positions, opp_positions = {}, {}, {}
     for i, p in ipairs(s.players) do
         if p.team == keeper.team and i ~= keeper_idx and not p.is_keeper then
@@ -828,8 +829,40 @@ local function keeper_throw(s, keeper_idx, range)
             opp_positions[#opp_positions + 1] = p.pos
         end
     end
-    local rel = passing.target(keeper.pos, keeper.facing, positions, range)
-        or ai.closest(keeper.pos, positions)
+    -- Pick the receiver by aim and charged range — but SAFELY: the throw is a
+    -- slow float, so any opponent who can chase to the landing during its
+    -- flight time contests the reception. Score openness AT LANDING (current
+    -- gap minus what a chaser covers during the flight) so a covered outlet
+    -- loses to a nearby open one, unless the aim clearly insists.
+    local naim = aim:normalized()
+    local rel, best_score
+    if naim.x ~= 0 or naim.y ~= 0 then
+        for k, pk in ipairs(positions) do
+            local to = pk:sub(keeper.pos)
+            local d = to:length()
+            if d > 1 then
+                local cos = (to.x * naim.x + to.y * naim.y) / d
+                if cos >= 0.5 then
+                    -- Flight time mirrors lob_launch for the throw arc.
+                    local tf = math.min(
+                        1,
+                        math.max(math.sqrt(2 * THROW_CLEAR_H / (GRAVITY * 0.25)), d / MAX_LOB_VH)
+                    )
+                    local open = math.huge
+                    for _, qp in ipairs(opp_positions) do
+                        open = math.min(open, qp:dist(pk) - tf * 170)
+                    end
+                    local score = cos * 4
+                        - math.abs(d - range) / 150
+                        + math.max(0, math.min(open, 100)) / 40
+                    if not best_score or score > best_score then
+                        best_score, rel = score, k
+                    end
+                end
+            end
+        end
+    end
+    rel = rel or ai.closest(keeper.pos, positions)
     if not rel then
         return
     end
@@ -1674,7 +1707,9 @@ local function human_keeper_actions(s, dt, input, owner)
         s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
     elseif input.pass then
         local range = PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN)
-        keeper_throw(s, s.owner, range)
+        local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
+            or owner.facing
+        keeper_throw(s, s.owner, range, aim)
         s.pass_charge = 0
     elseif input.pass_held then
         s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
@@ -1872,7 +1907,9 @@ local function update_ball(s, dt, input)
             elseif input.shoot_held then
                 s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
             elseif input.pass then
-                try_pass(s, s.owner, input.lob)
+                local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
+                    or nil
+                try_pass(s, s.owner, input.lob, aim)
             elseif input.pass_held then
                 -- Holding K charges the pass RANGE (consumed by try_pass).
                 s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)

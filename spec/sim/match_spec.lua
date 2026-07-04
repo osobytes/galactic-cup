@@ -1862,6 +1862,11 @@ t.describe("match human keeper control", function()
             s.players[3].pos = Vec2.new(480, 270) -- long option on the aim line
             s.players[4].pos = Vec2.new(120, 60)
             s.players[5].pos = Vec2.new(120, 480)
+            for i, p in ipairs(s.players) do
+                if p.team == "away" then
+                    p.pos = Vec2.new(900, 40 + i * 40) -- both options genuinely open
+                end
+            end
             s.pass_charge = charge
             match.step(s, 0.016, input({ pass = true }))
             for i, pl in ipairs(s.players) do
@@ -1875,6 +1880,56 @@ t.describe("match human keeper control", function()
         t.eq(near_i, 2, "a tap throw goes short")
         t.eq(far_i, 3, "a charged throw picks out the long option")
         t.is_true(s2.controlled ~= 1, "control returns to an outfielder after the release")
+    end)
+end)
+
+t.describe("match keeper throw aim & safety", function()
+    local function setup(s)
+        s.owner = 1
+        s.controlled = 1
+        s.players[1].pos = Vec2.new(40, 270)
+        s.players[1].facing = Vec2.new(1, 0)
+        s.players[1].hold_timer = 5
+        s.ball = Vec2.new(46, 270)
+        -- Two outlets fanned up-right and down-right, others parked far.
+        s.players[2].pos = Vec2.new(240, 160)
+        s.players[3].pos = Vec2.new(240, 380)
+        s.players[4].pos = Vec2.new(700, 60)
+        s.players[5].pos = Vec2.new(700, 480)
+        for i, p in ipairs(s.players) do
+            if p.team == "away" then
+                p.pos = Vec2.new(900, 40 + i * 40)
+            end
+        end
+    end
+
+    local function receiver(s)
+        for i, pl in ipairs(s.players) do
+            if pl.receive_timer > 0 then
+                return i
+            end
+        end
+    end
+
+    t.it("holding a direction at release aims the throw", function()
+        local s = new_match()
+        setup(s)
+        match.step(s, 0.016, input({ pass = true, move = Vec2.new(1, 1) })) -- down-right
+        t.eq(receiver(s), 3, "down-right aim picks the lower outlet")
+
+        local s2 = new_match()
+        setup(s2)
+        match.step(s2, 0.016, input({ pass = true, move = Vec2.new(1, -1) })) -- up-right
+        t.eq(receiver(s2), 2, "up-right aim picks the upper outlet")
+    end)
+
+    t.it("a covered outlet loses to a nearby open one", function()
+        local s = new_match()
+        setup(s)
+        -- Both outlets on symmetric aim; a striker camps the upper one's landing.
+        s.players[7].pos = Vec2.new(250, 175)
+        match.step(s, 0.016, input({ pass = true, move = Vec2.new(1, 0) })) -- aim straight
+        t.eq(receiver(s), 3, "the throw picks the outlet the defense can't contest")
     end)
 end)
 
