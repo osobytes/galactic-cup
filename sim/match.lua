@@ -135,7 +135,8 @@ local HEADER_SPEED = 0.85 -- header pace as a fraction of shot speed
 local CLEAR_HEADER_SPEED = 320 -- defensive header clearance pace
 local VOLLEY_SPEED = 1.3 -- volley pace multiplier
 local VOLLEY_SKY_P = 0.35 -- chance a volley is skied (seeded roll)
-local AI_HEADER_RANGE_PAD = 80 -- AI strikes at goal from a bit beyond shot range
+local AI_HEADER_RANGE = 200 -- AI heads at goal only from realistic range
+local CROSS_MIN_SPACE = 30 -- a winger needs a step of space to swing a cross
 
 -- Goalkeeper saves + distribution. Reach/handling are per-keeper (see sim.stats);
 -- these are the shared thresholds.
@@ -2170,7 +2171,17 @@ local function ai_outfield_decision(s, owner_idx, owner)
             or (owner.team == "away" and owner.pos.x < s.field.w * 0.38)
         local wide = math.abs(owner.pos.y - s.field.h / 2) > 130
         if third and wide and owner.settle_timer <= 0 then
-            crossed = ai_try_cross(s, owner_idx)
+            -- Only with a step of space: a pressured winger shouldn't spam
+            -- hopeful crosses.
+            local space = math.huge
+            for _, q in ipairs(s.players) do
+                if q.team ~= owner.team and not q.is_keeper then
+                    space = math.min(space, q.pos:dist(owner.pos))
+                end
+            end
+            if space > CROSS_MIN_SPACE then
+                crossed = ai_try_cross(s, owner_idx)
+            end
         end
         if not crossed then
             -- Out of range: pass out of pressure rather than dribble
@@ -2401,7 +2412,14 @@ local function update_ball(s, dt, input)
     -- range, an AI defender in its own third heads clear. Headers are safe;
     -- volleys (lower contact) hit harder but can be SKIED into the cage
     -- ceiling — the seeded roll keeps the sim reproducible.
-    if s.ball_z > GROUND_GRAB_HEIGHT and s.ball_z <= HEADER_MAX_Z and s.pickup_cd == 0 then
+    -- Only a DESCENDING ball is attackable in the air (you meet a cross, you
+    -- don't chase a rising clearance) — this also breaks header ping-pong.
+    if
+        s.ball_z > GROUND_GRAB_HEIGHT
+        and s.ball_z <= HEADER_MAX_Z
+        and s.ball_vz < 0
+        and s.pickup_cd == 0
+    then
         local striker
         for i, p in ipairs(s.players) do
             if not p.is_keeper and p.header_cd <= 0 and p.pos:dist(s.ball) <= AERIAL_REACH then
@@ -2415,7 +2433,7 @@ local function update_ball(s, dt, input)
                     local gl = Vec2.new((p.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
                     local own_third = (p.team == "home") and (p.pos.x < s.field.w * 0.33)
                         or (p.team == "away" and p.pos.x > s.field.w * 0.67)
-                    if p.pos:dist(gl) <= AI_SHOOT_RANGE + AI_HEADER_RANGE_PAD or own_third then
+                    if p.pos:dist(gl) <= AI_HEADER_RANGE or own_third then
                         striker = i
                         break
                     end
