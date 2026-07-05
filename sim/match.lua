@@ -65,6 +65,9 @@ local BLOCK_HEIGHT = 20 -- a flat/rising ball at/below this height hits a body
 -- dropping over your shoulder, so lobbed deliveries reach their receiver while
 -- drilled shots and passes still slam into bodies.
 local BLOCK_HEIGHT_DESC = 12
+-- A just-released ball can't be body-blocked for a beat: it is leaving at foot
+-- level through the immediate crowd (including the passer's own teammates).
+local BLOCK_GRACE = 0.08
 local BLOCK_DAMP = 0.5 -- fraction of speed kept by the ricochet
 
 -- AI on-ball decision making: an AI carrier passes out of pressure instead of
@@ -305,6 +308,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field pass_target integer?  -- index of the player who would receive if pass released now (nil when idle)
 ---@field ball_spin number  -- lateral curve applied to the loose ball
 ---@field rng integer  -- seeded PRNG state (core.rng): same seed = same match
+---@field block_grace number  -- body-blocking re-enabled when this hits 0 (set on release)
 ---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
 
 local match = {}
@@ -496,6 +500,7 @@ local function place_kickoff(s, kicking)
     s.pickup_cd = 0
     s.charge = 0
     s.pass_charge = 0
+    s.block_grace = 0
     s.pass_target = nil
     s.ball_spin = 0
     -- Centre-circle rule: the non-kicking team keeps its distance from the
@@ -578,6 +583,7 @@ function match.new(opts)
         marks = { home = {}, away = {} },
         charge = 0,
         pass_charge = 0,
+        block_grace = 0,
         pass_target = nil,
         ball_spin = 0,
         rng = rstate,
@@ -612,7 +618,10 @@ end
 local function nearest_n(s, team, count)
     local cand = {}
     for i, p in ipairs(s.players) do
-        if p.team == team and not p.is_keeper then
+        -- The controlled player is the human's business, not an AI resource:
+        -- counting them here used to spend the whole chase allocation on the
+        -- human, leaving every AI teammate statically watching a loose ball.
+        if p.team == team and not p.is_keeper and i ~= s.controlled then
             cand[#cand + 1] = { idx = i, d = p.pos:dist(s.ball) }
         end
     end
@@ -694,6 +703,7 @@ local function release_shot(s, owner, dir, speed, vz)
     s.ball_z = 0
     s.ball_vz = vz or 0
     s.pickup_cd = RELEASE_CD
+    s.block_grace = BLOCK_GRACE
 end
 
 -- Pace a ground pass so it actually arrives: friction sheds FRICTION of the
@@ -748,8 +758,11 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     -- head height through the middle, so any mid-lane blocker is cleared too.
     do
         local dirn = target.pos:sub(owner.pos):normalized()
-        for _, q in ipairs(s.players) do
-            if q.team ~= owner.team and not q.is_keeper then
+        for qi, q in ipairs(s.players) do
+            -- ANY body on the release line eats a driven ball — an adjacent
+            -- TEAMMATE ricochets it just like a defender does. Dink over both
+            -- (but never over the intended receiver).
+            if qi ~= owner_idx and qi ~= target_idx and not q.is_keeper then
                 local off = q.pos:sub(owner.pos)
                 local d = off:length()
                 if d < RELEASE_DINK_DIST and (off.x * dirn.x + off.y * dirn.y) > d * 0.2 then
@@ -765,6 +778,7 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     s.ball_z = 0
     s.ball_spin = 0
     s.pickup_cd = RELEASE_CD
+    s.block_grace = BLOCK_GRACE
     if blocker_f then
         s.ball_vel, s.ball_vz = lob_launch(owner.pos, target.pos, blocker_f, clear_h or LOB_CLEAR_H)
     else
@@ -1234,6 +1248,7 @@ local function attempt_steals(s)
 end
 
 -- Off-ball movement tuning (see docs/plan). All deterministic.
+local TRIANGLE_JOIN = 320 -- supporters this close to the carrier triangulate around them
 local PURSUE_LEAD = 0.004 -- prediction horizon per px of distance (s/px)
 local MARK_GOALSIDE = 16 -- px a marker stands goal-side of its man
 local MARK_LANE_OFF = 44 -- ...but during a keeper's build-up they mark the LANE instead:
@@ -1443,7 +1458,34 @@ local function offball_targets(s, pos)
                         Vec2.new(base.x + atk * SUPPORT_FAN, base.y),
                         Vec2.new(base.x - atk * SUPPORT_FAN, base.y),
                     }
-                    targets[idx] = sep(idx, ai.support_spot(cpos, cands, opp_all_pos, atk, s.field))
+                    -- Triangulation: supporters near the play also consider
+                    -- angular spots around the CARRIER at pass range (±40° and
+                    -- ±80° off the attacking axis), so there is always a short
+                    -- option to either side for a one-two.
+                    if pos[idx]:dist(cpos) < TRIANGLE_JOIN then
+                        for _, ang in ipairs({ -1.4, -0.7, 0.7, 1.4 }) do
+                            local dirv = Vec2.new(math.cos(ang) * atk, math.sin(ang))
+                            local c = cpos:add(dirv:scale(TUNE.TRIANGLE_DIST))
+                            cands[#cands + 1] = Vec2.new(
+                                math.max(20, math.min(s.field.w - 20, c.x)),
+                                math.max(20, math.min(s.field.h - 20, c.y))
+                            )
+                        end
+                    end
+                    -- Clear the carrier's dribbling lane: drop candidates that
+                    -- sit right ahead of them (don't clog the path).
+                    local ahead = cpos:add(s.players[s.owner].facing:scale(120))
+                    local open_cands = {}
+                    for _, c in ipairs(cands) do
+                        if c:dist(ahead) > 70 then
+                            open_cands[#open_cands + 1] = c
+                        end
+                    end
+                    if #open_cands == 0 then
+                        open_cands = cands
+                    end
+                    targets[idx] =
+                        sep(idx, ai.support_spot(cpos, open_cands, opp_all_pos, atk, s.field))
                 end
             end
             s.marks[team] = {}
@@ -1454,7 +1496,10 @@ local function offball_targets(s, pos)
             -- not just a static lane check. Everyone else holds shape.
             local chasers = nearest_n(s, team, s.press[team])
             for _, idx in ipairs(mine) do
-                if chasers[idx] then
+                -- The press-set chases — and so does ANYONE the ball lands
+                -- near: a ball at your feet is yours to claim, whatever your
+                -- assigned role (the ball magnet).
+                if chasers[idx] or pos[idx]:dist(s.ball) < TUNE.LOOSE_MAGNET then
                     targets[idx] = ai.pursue(pos[idx], s.ball, s.ball_vel, PURSUE_LEAD)
                 else
                     targets[idx] = block_shift(s.players[idx].anchor, s.ball, cfg.compactness)
@@ -1868,6 +1913,7 @@ local function keeper_distribute(s, keeper_idx)
         s.ball_z = 0
         s.ball_spin = 0
         s.pickup_cd = RELEASE_CD
+        s.block_grace = BLOCK_GRACE
         s.ball_vel, s.ball_vz = lob_launch(keeper.pos, target, 0.5, DROPKICK_CLEAR_H)
     end
 end
@@ -2048,6 +2094,7 @@ local function resolve_pending_save(s, dt)
                 s.ball_vz = PARRY_POP_VZ
                 s.ball_spin = 0
                 s.pickup_cd = PARRY_CD
+                s.block_grace = BLOCK_GRACE
                 return "parry"
             end
         end
@@ -2370,9 +2417,11 @@ local function update_ball(s, dt, input)
     do
         local speed = s.ball_vel:length()
         local block_h = (s.ball_vz < 0) and BLOCK_HEIGHT_DESC or BLOCK_HEIGHT
-        if speed >= POSSESS_MAX_SPEED and s.ball_z <= block_h then
+        if speed >= POSSESS_MAX_SPEED and s.ball_z <= block_h and s.block_grace == 0 then
             for _, p in ipairs(s.players) do
-                if not p.is_keeper then
+                -- The designated receiver never walls a ball off: they let it
+                -- arrive and take the touch.
+                if not p.is_keeper and p.receive_timer <= 0 then
                     local off = s.ball:sub(p.pos)
                     local d = off:length()
                     local contact = p.radius + BALL_RADIUS
@@ -2606,6 +2655,9 @@ function match.step(s, dt, input)
 
     if s.pickup_cd > 0 then
         s.pickup_cd = math.max(0, s.pickup_cd - dt)
+    end
+    if s.block_grace > 0 then
+        s.block_grace = math.max(0, s.block_grace - dt)
     end
     for _, p in ipairs(s.players) do
         if p.dash_cd > 0 then

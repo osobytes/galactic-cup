@@ -243,6 +243,24 @@ tuning.knobs = {
         max = 60,
         step = 5,
     },
+    {
+        key = "LOOSE_MAGNET",
+        label = "Loose-ball magnet",
+        cat = "AI",
+        default = 90,
+        min = 40,
+        max = 160,
+        step = 10,
+    },
+    {
+        key = "TRIANGLE_DIST",
+        label = "Triangle pass range",
+        cat = "AI",
+        default = 170,
+        min = 120,
+        max = 260,
+        step = 10,
+    },
 }
 
 ---@type table<string, Knob>

@@ -2209,6 +2209,110 @@ t.describe("match crossing", function()
     end)
 end)
 
+t.describe("match teammate awareness", function()
+    t.it("an AI teammate claims a loose ball that lands near it", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 1
+        -- The HUMAN is nearest the ball (would previously eat the whole chase
+        -- allocation); an AI teammate 70px away must still go claim it.
+        s.ball = Vec2.new(480, 300)
+        s.ball_vel = Vec2.new(0, 0)
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(480, 320) -- human nearest
+        local mate
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                mate = i
+                p.pos = Vec2.new(480, 230) -- 70px off: inside the magnet
+                break
+            end
+        end
+        local pos = {}
+        for i, pl in ipairs(s.players) do
+            pos[i] = pl.pos
+        end
+        local targets = match._offball_targets(s, pos)
+        t.is_true(targets[mate] ~= nil, "the teammate has a target")
+        t.is_true(targets[mate]:dist(s.ball) < 40, "and it is the ball, not a shape point")
+    end)
+
+    t.it("a nearby supporter triangulates: offers a short angled option", function()
+        local s = new_match()
+        local carrier
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                carrier = carrier or i
+            end
+        end
+        s.owner = carrier
+        local c = s.players[carrier]
+        c.pos = Vec2.new(500, 270)
+        c.facing = Vec2.new(1, 0)
+        s.ball = Vec2.new(518, 270)
+        local supporter
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled and i ~= carrier then
+                supporter = i
+                p.pos = Vec2.new(420, 300) -- near the play
+                -- Park its anchor-region under opponents so base spots score badly.
+                p.anchor = Vec2.new(300, 300)
+                break
+            end
+        end
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                p.pos = Vec2.new(300 + (i % 3) * 60, 240 + (i % 2) * 90) -- crowd the base area
+            end
+        end
+        local pos = {}
+        for i, pl in ipairs(s.players) do
+            pos[i] = pl.pos
+        end
+        local targets = match._offball_targets(s, pos)
+        t.is_true(targets[supporter] ~= nil)
+        t.is_true(
+            targets[supporter]:dist(c.pos) < 170 + 80,
+            "the supporter comes short to a triangle spot near the carrier"
+        )
+    end)
+
+    t.it("supporters do not clog the carrier's dribbling path", function()
+        local s = new_match()
+        local carrier
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                carrier = carrier or i
+            end
+        end
+        s.owner = carrier
+        local c = s.players[carrier]
+        c.pos = Vec2.new(400, 270)
+        c.facing = Vec2.new(1, 0)
+        s.ball = Vec2.new(418, 270)
+        local supporter
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled and i ~= carrier then
+                supporter = i
+                p.pos = Vec2.new(500, 270)
+                p.anchor = Vec2.new(430, 270) -- base spot lands right on the path
+                break
+            end
+        end
+        local pos = {}
+        for i, pl in ipairs(s.players) do
+            pos[i] = pl.pos
+        end
+        local targets = match._offball_targets(s, pos)
+        local ahead = c.pos:add(c.facing:scale(120))
+        t.is_true(targets[supporter] ~= nil)
+        t.is_true(
+            targets[supporter]:dist(ahead) > 65,
+            "the spot right ahead of the carrier is vacated"
+        )
+    end)
+end)
+
 t.describe("match save grab-vs-parry odds", function()
     local function has_event(s, kind)
         for _, e in ipairs(s.events) do
