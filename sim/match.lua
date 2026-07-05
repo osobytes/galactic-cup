@@ -276,6 +276,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field marks { home: table<integer, integer>, away: table<integer, integer> }  -- prev marking assignment (hysteresis)
 ---@field charge number  -- controlled carrier's shot charge, 0..1
 ---@field pass_charge number  -- controlled carrier's pass-range charge, 0..1
+---@field pass_target integer?  -- index of the player who would receive if pass released now (nil when idle)
 ---@field ball_spin number  -- lateral curve applied to the loose ball
 ---@field rng integer  -- seeded PRNG state (core.rng): same seed = same match
 ---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
@@ -461,6 +462,7 @@ local function place_kickoff(s, kicking)
     s.pickup_cd = 0
     s.charge = 0
     s.pass_charge = 0
+    s.pass_target = nil
     s.ball_spin = 0
     -- Centre-circle rule: the non-kicking team keeps its distance from the
     -- ball at the restart — push any intruder straight back out.
@@ -542,6 +544,7 @@ function match.new(opts)
         marks = { home = {}, away = {} },
         charge = 0,
         pass_charge = 0,
+        pass_target = nil,
         ball_spin = 0,
         rng = rstate,
         events = {},
@@ -737,14 +740,18 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     end
 end
 
+-- Pure receiver selection for an outfield pass: returns the player index that
+-- would receive a pass if released right now, or nil if nobody is available.
+-- Does NOT draw from s.rng — deterministic, safe to call every frame for preview.
 ---@param s MatchState
 ---@param owner_idx integer
----@param lofted boolean?  -- lob the pass over a defender on the lane
-local function try_pass(s, owner_idx, lofted, aim)
+---@param lofted boolean?
+---@param aim Vec2?
+---@param range number?
+---@return integer? target_idx
+local function select_pass_target(s, owner_idx, lofted, aim, range)
     local owner = s.players[owner_idx]
     aim = aim or owner.facing
-    -- Candidates are outfield teammates only: passing to the keeper's hands would
-    -- break the back-pass rule, so the keeper is never a pass target.
     local cand, positions, opp_positions = {}, {}, {}
     for i, p in ipairs(s.players) do
         if p.team == owner.team and i ~= owner_idx and not p.is_keeper then
@@ -754,13 +761,6 @@ local function try_pass(s, owner_idx, lofted, aim)
             opp_positions[#opp_positions + 1] = p.pos
         end
     end
-    -- Hold-to-charge picks the RANGE: a tap prefers someone close, a charged
-    -- release picks out the long option along the aim.
-    local range = (s.pass_charge > 0.12)
-            and (PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN))
-        or nil
-    -- Prefer a cone target whose driven ball can't be cut out mid-flight. A
-    -- lofted pass sails over any would-be interceptor, so it skips the filter.
     local rel, pick_cand, pick_pos
     if not lofted then
         local threats = pass_threats(s, owner.team)
@@ -777,9 +777,6 @@ local function try_pass(s, owner_idx, lofted, aim)
         end
     end
     if not rel then
-        -- No safe cone target: take the plain cone pick; if nobody is in the
-        -- cone at all, prefer the OPEN nearby man over the blindly nearest one
-        -- (who is usually marked) — the button always does something.
         rel = passing.target(owner.pos, aim, positions, range)
         if not rel then
             local best_fb
@@ -795,13 +792,11 @@ local function try_pass(s, owner_idx, lofted, aim)
             end
         end
         if not rel then
-            return
+            return nil
         end
         pick_cand, pick_pos = cand, positions
     end
-    -- A lofted ball from wide in the attacking third is a CROSS: it targets
-    -- the teammate in the box (who can head it) rather than the cone pick.
-    local clear_h = nil
+    -- Cross override (lofted from wide in attacking third): redirect to box runner.
     if lofted then
         local third = (owner.team == "home") and (owner.pos.x > s.field.w * 0.62)
             or (owner.team == "away" and owner.pos.x < s.field.w * 0.38)
@@ -820,22 +815,21 @@ local function try_pass(s, owner_idx, lofted, aim)
             end
             if best_k then
                 rel = best_k
-                clear_h = CROSS_CLEAR_H
             end
         end
     end
-    local target = pick_pos[rel]
-    local f = lofted and (ai.lane_blocker(owner.pos, target, opp_positions, POSSESS_DIST) or 0.5)
-        or nil
-    release_pass(s, owner_idx, pick_cand[rel], f, clear_h)
+    return pick_cand[rel]
 end
 
--- Human keeper throw: aimed like a pass (facing cone), the charged range
--- picking WHICH teammate; a floaty hand throw that sails over heads.
+-- Pure receiver selection for a keeper throw: returns the player index that
+-- would receive the throw if released right now, or nil if nobody is available.
+-- Does NOT draw from s.rng — deterministic, safe to call every frame for preview.
 ---@param s MatchState
 ---@param keeper_idx integer
 ---@param range number
-local function keeper_throw(s, keeper_idx, range, aim)
+---@param aim Vec2?
+---@return integer? target_idx
+local function select_throw_target(s, keeper_idx, range, aim)
     local keeper = s.players[keeper_idx]
     aim = aim or keeper.facing
     local cand, positions, opp_positions = {}, {}, {}
@@ -847,11 +841,6 @@ local function keeper_throw(s, keeper_idx, range, aim)
             opp_positions[#opp_positions + 1] = p.pos
         end
     end
-    -- Pick the receiver by aim and charged range — but SAFELY: the throw is a
-    -- slow float, so any opponent who can chase to the landing during its
-    -- flight time contests the reception. Score openness AT LANDING (current
-    -- gap minus what a chaser covers during the flight) so a covered outlet
-    -- loses to a nearby open one, unless the aim clearly insists.
     local naim = aim:normalized()
     local rel, best_score
     if naim.x ~= 0 or naim.y ~= 0 then
@@ -861,7 +850,6 @@ local function keeper_throw(s, keeper_idx, range, aim)
             if d > 1 then
                 local cos = (to.x * naim.x + to.y * naim.y) / d
                 if cos >= 0.5 then
-                    -- Flight time mirrors lob_launch for the throw arc.
                     local tf = math.min(
                         1,
                         math.max(math.sqrt(2 * THROW_CLEAR_H / (GRAVITY * 0.25)), d / MAX_LOB_VH)
@@ -881,8 +869,6 @@ local function keeper_throw(s, keeper_idx, range, aim)
         end
     end
     if not rel then
-        -- No aim held / nobody in the cone: pick the SAFEST outlet, never
-        -- blindly the nearest (that's usually the marked short man).
         local best_fb
         for k, pk in ipairs(positions) do
             local d = keeper.pos:dist(pk)
@@ -894,8 +880,6 @@ local function keeper_throw(s, keeper_idx, range, aim)
             for _, qp in ipairs(opp_positions) do
                 open = math.min(open, qp:dist(pk) - tf * 170)
             end
-            -- Safety first, but stay near the charged range: a tap picks the
-            -- safe SHORT man, a full hold the safe LONG one.
             local score = math.min(open, 100) - math.abs(d - range) * 0.2
             if not best_fb or score > best_fb then
                 best_fb, rel = score, k
@@ -903,10 +887,72 @@ local function keeper_throw(s, keeper_idx, range, aim)
         end
     end
     if not rel then
+        return nil
+    end
+    return cand[rel]
+end
+
+---@param s MatchState
+---@param owner_idx integer
+---@param lofted boolean?  -- lob the pass over a defender on the lane
+local function try_pass(s, owner_idx, lofted, aim)
+    local owner = s.players[owner_idx]
+    aim = aim or owner.facing
+    -- Hold-to-charge picks the RANGE: a tap prefers someone close, a charged
+    -- release picks out the long option along the aim.
+    local range = (s.pass_charge > 0.12)
+            and (PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN))
+        or nil
+    local target_idx = select_pass_target(s, owner_idx, lofted, aim, range)
+    if not target_idx then
         return
     end
-    local f = ai.lane_blocker(keeper.pos, positions[rel], opp_positions, POSSESS_DIST) or 0.5
-    release_pass(s, keeper_idx, cand[rel], f, THROW_CLEAR_H)
+    -- Determine loft: cross gets CROSS_CLEAR_H; regular lob gets lane-blocker fraction.
+    local opp_positions = {}
+    for _, p in ipairs(s.players) do
+        if p.team ~= owner.team then
+            opp_positions[#opp_positions + 1] = p.pos
+        end
+    end
+    local target_pos = s.players[target_idx].pos
+    local clear_h = nil
+    local f = nil
+    if lofted then
+        local third = (owner.team == "home") and (owner.pos.x > s.field.w * 0.62)
+            or (owner.team == "away" and owner.pos.x < s.field.w * 0.38)
+        local wide = math.abs(owner.pos.y - s.field.h / 2) > 120
+        if third and wide then
+            local depth = (owner.team == "home") and (s.field.w - target_pos.x) or target_pos.x
+            if depth < 220 and math.abs(target_pos.y - s.field.h / 2) < 140 then
+                clear_h = CROSS_CLEAR_H
+            end
+        end
+        f = ai.lane_blocker(owner.pos, target_pos, opp_positions, POSSESS_DIST) or 0.5
+    end
+    release_pass(s, owner_idx, target_idx, f, clear_h)
+end
+
+-- Human keeper throw: aimed like a pass (facing cone), the charged range
+-- picking WHICH teammate; a floaty hand throw that sails over heads.
+---@param s MatchState
+---@param keeper_idx integer
+---@param range number
+local function keeper_throw(s, keeper_idx, range, aim)
+    local keeper = s.players[keeper_idx]
+    aim = aim or keeper.facing
+    local target_idx = select_throw_target(s, keeper_idx, range, aim)
+    if not target_idx then
+        return
+    end
+    local opp_positions = {}
+    for _, p in ipairs(s.players) do
+        if p.team ~= keeper.team then
+            opp_positions[#opp_positions + 1] = p.pos
+        end
+    end
+    local f = ai.lane_blocker(keeper.pos, s.players[target_idx].pos, opp_positions, POSSESS_DIST)
+        or 0.5
+    release_pass(s, keeper_idx, target_idx, f, THROW_CLEAR_H)
     keeper.throw_timer = KEEPER_THROW_POSE
 end
 
@@ -1900,12 +1946,79 @@ local function resolve_pending_save(s, dt)
     return nil
 end
 
+-- Recompute pass_target for a human outfield carrier holding the pass button.
+-- Pure: no RNG draws. Safe to call every frame while pass_held is true.
+---@param s MatchState
+---@param input MatchInput
+local function update_pass_target_outfield(s, input)
+    local range = (s.pass_charge > 0.12)
+            and (PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN))
+        or nil
+    local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
+    s.pass_target = select_pass_target(s, s.owner, input.lob, aim, range)
+end
+
+-- Recompute pass_target for a human keeper holding the pass button.
+-- Pure: no RNG draws. Safe to call every frame while pass_held is true.
+---@param s MatchState
+---@param input MatchInput
+local function update_pass_target_keeper(s, input)
+    local range = PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN)
+    local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
+    s.pass_target = select_throw_target(s, s.owner, range, aim)
+end
+
+-- Human outfield ball-control: charging, shooting, passing. Extracted from
+-- update_ball to keep that function's upvalue count below the LuaJIT 60 limit.
+---@param s MatchState
+---@param dt number
+---@param input MatchInput
+---@param owner MatchPlayer
+local function human_outfield_actions(s, dt, input, owner)
+    local fire_shot, fire_pass = input.shoot, input.pass
+    if input.shoot_held then
+        s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
+        fire_shot = fire_shot or s.charge >= 1
+        s.pass_target = nil
+    elseif input.pass_held then
+        s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
+        fire_pass = fire_pass or s.pass_charge >= 1
+        -- Preview: recompute intended receiver every frame (pure, no RNG).
+        update_pass_target_outfield(s, input)
+    else
+        s.pass_target = nil
+    end
+    if fire_shot then
+        local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
+        local speed = owner.shot_speed * (1 + s.charge * CHARGE_POWER)
+        local target = shot_target(s, owner, vbias)
+        local vz = 0
+        if input.lob then
+            local tline = math.max(0.05, owner.pos:dist(target) / speed)
+            vz = (CHIP_LINE_Z + 0.5 * GRAVITY * tline * tline) / tline
+        end
+        release_shot(s, owner, target:sub(owner.pos), speed, vz)
+        local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
+        s.ball_spin = (vz == 0) and side * s.charge * CURVE_MAX or 0
+        s.charge = 0
+        s.pass_target = nil
+    elseif fire_pass then
+        local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
+        try_pass(s, s.owner, input.lob, aim)
+        s.pass_charge = 0
+        s.pass_target = nil
+    elseif not (input.shoot_held or input.pass_held) then
+        s.charge = 0
+    end
+end
+
 ---@param s MatchState
 local function update_ball(s, dt, input)
     -- Only the controlled carrier accumulates charge; drop it otherwise.
     if not (s.owner and s.owner == s.controlled) then
         s.charge = 0
         s.pass_charge = 0
+        s.pass_target = nil
     end
 
     if s.owner then
@@ -1927,48 +2040,23 @@ local function update_ball(s, dt, input)
 
         if owner.is_keeper then
             if s.owner == s.controlled then
+                -- Preview: while pass_held, show which teammate would receive.
+                if input.pass_held then
+                    update_pass_target_keeper(s, input)
+                else
+                    s.pass_target = nil
+                end
                 human_keeper_actions(s, dt, input, owner)
-            elseif owner.hold_timer <= 0 then
-                -- AI keeper: survey, then distribute to a safe outlet (build
-                -- from the back) instead of hoofing it upfield every frame.
-                keeper_distribute(s, s.owner)
+            else
+                s.pass_target = nil
+                if owner.hold_timer <= 0 then
+                    -- AI keeper: survey, then distribute to a safe outlet (build
+                    -- from the back) instead of hoofing it upfield every frame.
+                    keeper_distribute(s, s.owner)
+                end
             end
         elseif s.owner == s.controlled then
-            -- A full meter LETS FLY on its own (predictable, like the meter
-            -- promises); release fires early at the current charge.
-            local fire_shot, fire_pass = input.shoot, input.pass
-            if input.shoot_held then
-                s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
-                fire_shot = fire_shot or s.charge >= 1
-            elseif input.pass_held then
-                s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
-                fire_pass = fire_pass or s.pass_charge >= 1
-            end
-            if fire_shot then
-                -- Aim at the goal; vertical of `facing` picks the corner. Charge
-                -- (held shoot) scales power; lateral input bends the shot.
-                local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
-                local speed = owner.shot_speed * (1 + s.charge * CHARGE_POWER)
-                local target = shot_target(s, owner, vbias)
-                local vz = 0
-                if input.lob then
-                    -- Chip: same aim, but lofted so it crosses the line over the
-                    -- keeper's reach yet under the bar. Pick vz from time-to-line.
-                    local tline = math.max(0.05, owner.pos:dist(target) / speed)
-                    vz = (CHIP_LINE_Z + 0.5 * GRAVITY * tline * tline) / tline
-                end
-                release_shot(s, owner, target:sub(owner.pos), speed, vz)
-                local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
-                s.ball_spin = (vz == 0) and side * s.charge * CURVE_MAX or 0
-                s.charge = 0
-            elseif fire_pass then
-                local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
-                    or nil
-                try_pass(s, s.owner, input.lob, aim)
-                s.pass_charge = 0
-            elseif not (input.shoot_held or input.pass_held) then
-                s.charge = 0
-            end
+            human_outfield_actions(s, dt, input, owner)
         else
             local g = attack_goal(s, owner.team)
             local gc = Vec2.new((owner.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
@@ -2447,5 +2535,8 @@ match.PENALTY_BOX = { depth = PENALTY_DEPTH, h = PENALTY_H }
 -- Test seam: expose the pure off-ball target computation for assertions.
 match._offball_targets = offball_targets
 match._resolve_collisions = resolve_collisions
+-- Test seam: pure receiver selectors (used for pass preview and acceptance specs).
+match._select_pass_target = select_pass_target
+match._select_throw_target = select_throw_target
 
 return match
