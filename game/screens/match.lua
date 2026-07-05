@@ -9,6 +9,7 @@ local bloom = require("game.render.bloom")
 local effects = require("game.render.effects")
 local view_state = require("game.render.view_state")
 local audio = require("game.audio")
+local tuning_panel = require("game.ui.tuning_panel")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -37,6 +38,9 @@ Match.__index = Match
 function Match.new(opts)
     local self = setmetatable({}, Match)
     self._opts = opts or {}
+    if love.window then
+        tuning_panel.load() -- playtest tuning persists across runs (F1 panel)
+    end
     self.home_color = teams.nebula.color
     self.away_color = teams.orion.color
     self.home_name = teams.nebula.name
@@ -76,6 +80,16 @@ function Match:event(evt)
         if evt.key == "r" or evt.key == "return" then
             self:restart()
         end
+        return
+    end
+    -- Tuning panel (playtest): F1 toggles; while open it owns the keyboard
+    -- and the match is paused (see update).
+    if evt.key == "f1" then
+        tuning_panel.toggle()
+        return
+    end
+    if tuning_panel.open then
+        tuning_panel.key(evt.key, love.keyboard.isDown("lshift", "rshift"))
         return
     end
     -- Contextual actions: the same key means the natural thing for the moment.
@@ -118,6 +132,9 @@ end
 
 ---@param dt number
 function Match:update(dt)
+    if tuning_panel.open then
+        return -- paused for tuning: tweak, close, resume
+    end
     -- Space reads as "shoot" while carrying (hold to charge, release to fire);
     -- off the ball it is "jockey" while held and fires the poke on release
     -- — mirroring the on-ball hold/release pattern so muscle memory transfers.
@@ -207,6 +224,8 @@ function Match:draw_frame(s, vp)
         love.graphics.setColor(0.4, 0.9, 1, 0.9)
         love.graphics.rectangle("fill", 16, vp.h - 58, 120 * me.sprint_meter, 6)
     end
+
+    tuning_panel.draw(vp)
 
     if s.finished then
         love.graphics.setColor(0, 0, 0, 0.6)

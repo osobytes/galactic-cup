@@ -13,6 +13,7 @@ Two contextual action keys + sprint. The same key does the natural thing for the
 | Lob / chip modifier | L (hold) |
 | Juke / Dodge | C |
 | Rematch (after full time) | R or Enter |
+| Tuning panel (playtest) | F1 (pauses; F2 save, F3 load) |
 | Toggle bloom | B (debug) |
 | Toggle mute | M |
 | Quit   | Esc |
@@ -81,6 +82,20 @@ Your **facing** follows your actual velocity so you can still aim while braking 
 to wherever you're pointing, not where you're running).
 Shooting is a discrete, edge-triggered event (queued on key press, consumed on the next
 simulation step), so taps don't get lost between frames.
+
+## Tuning panel (playtesting)
+
+Press **F1** during a match to pause and open the live tuning panel — the
+gameplay knobs from `sim/tuning.lua` (movement, attacking, defending, keeper,
+AI), editable mid-session the way studio balance tools work:
+
+- **↑/↓** select a knob, **←/→** adjust it (**Shift** = ×10 steps), **Tab**
+  switches category. Changed knobs show a `*`.
+- **Backspace** resets the selected knob (**Shift+Backspace** resets all).
+- **F2** saves your tuning, **F3** loads it; saved tuning is auto-loaded when a
+  match starts, so experiments persist across runs. Tests always run on
+  defaults.
+- **F1/Esc** closes and resumes play.
 
 ## Menus (pre-match flow)
 

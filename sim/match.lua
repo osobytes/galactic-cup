@@ -7,6 +7,7 @@
 
 local Vec2 = require("core.vec2")
 local rng = require("core.rng")
+local TUNE = require("sim.tuning").values -- live-tunable knobs (F1 panel)
 local stats = require("sim.stats")
 local placement = require("sim.placement")
 local ai = require("sim.ai")
@@ -34,11 +35,11 @@ local POSSESS_MAX_SPEED = 350 -- outfield can only collect a slow-enough ball
 local PASS_SPEED = 320 -- minimum pass pace; long passes are driven harder (see pass_speed_for)
 local PASS_ARRIVE_PACE = 70 -- ball speed left when a pass reaches its receiver
 local PASS_SPEED_MAX = 620 -- cap so long passes are driven, never rockets
-local PASS_CHARGE_RATE = 1.6 -- pass-range charge per second held (caps at 1)
+-- PASS_CHARGE_RATE: live-tunable — see sim/tuning.lua (F1 panel)
 local PASS_RANGE_MIN = 110 -- a tap pass prefers someone close
-local PASS_RANGE_MAX = 520 -- a fully charged pass picks out the long option
+-- PASS_RANGE_MAX: live-tunable — see sim/tuning.lua (F1 panel)
 local CROSS_CLEAR_H = 50 -- crosses arc high into the box (headers live here)
-local AI_SHOOT_RANGE = 240 -- AI owner shoots when this close to goal
+-- AI_SHOOT_RANGE: live-tunable — see sim/tuning.lua (F1 panel)
 local GOAL_MOUTH = 110
 local GOAL_DEPTH = 30 -- net box depth behind the goal line (outside the field)
 local NET_DAMP = 0.3 -- velocity kept when bouncing off the net
@@ -46,14 +47,14 @@ local NET_ROLLOUT = 200 -- net "slope": a netted ball rolls back out toward the 
 local RELEASE_CD = 0.3 -- pickup lockout after a shot/pass (seconds)
 
 local STEAL_DIST = 26 -- challenge range to the BALL to dislodge it
-local STEAL_ATTEMPT = 40 -- AI commits a poke when the ball is this close (may whiff)
-local WHIFF_STUMBLE = 0.3 -- a whiffed AI poke stumbles the defender (carrier's escape window)
+-- STEAL_ATTEMPT: live-tunable — see sim/tuning.lua (F1 panel)
+-- WHIFF_STUMBLE: live-tunable — see sim/tuning.lua (F1 panel)
 -- An AI player needs a beat to control a ball it just received before it can
 -- pick out a pressured pass — the defender's window to actually rob them.
-local CARRIER_SETTLE = 0.35
+-- CARRIER_SETTLE: live-tunable — see sim/tuning.lua (F1 panel)
 local KICKOFF_CLEAR = 120 -- opponents keep this centre-circle distance at kickoff
 local TACKLE_POP_SPEED = 150 -- speed the ball pops out on a tackle
-local AI_STEAL_CD = 1.2 -- min seconds between AI tackle attempts (carriers get a beat on the ball)
+-- AI_STEAL_CD: live-tunable — see sim/tuning.lua (F1 panel)
 local KEEPER_SMOTHER = 26 -- keeper takes the ball off a carrier's feet at this range (in its box)
 
 -- Body blocking: a fast loose ball ricochets off an outfield body it hits instead
@@ -68,7 +69,7 @@ local BLOCK_DAMP = 0.5 -- fraction of speed kept by the ricochet
 
 -- AI on-ball decision making: an AI carrier passes out of pressure instead of
 -- dribbling blindly into a challenge.
-local AI_PASS_PRESSURE = 70 -- an opponent this close = pressured, look for a pass
+-- AI_PASS_PRESSURE: live-tunable — see sim/tuning.lua (F1 panel)
 local AI_PASS_MIN_OPEN = 40 -- an outlet must have this much space to be worth it
 local AI_PASS_MIN_DIST = 40 -- don't pass to someone standing on your toes
 local AI_PASS_MAX_DIST = 420 -- or to someone the other side of the pitch
@@ -98,7 +99,7 @@ local STUN_TIME = 0.5 -- seconds a player is knocked off balance by a slide hit
 
 -- Jockey stance: hold Space off the ball to shadow the carrier at reduced speed, facing
 -- the ball (or loose ball). Releasing Space from jockey fires the poke with bonus reach.
-local JOCKEY_SLOW = 0.75 -- speed multiplier while in jockey stance
+-- JOCKEY_SLOW: live-tunable — see sim/tuning.lua (F1 panel)
 local JOCKEY_REACH_BONUS = 6 -- extra poke reach when jockey_timer > 0 at tackle time
 local JOCKEY_HOLD = 0.2 -- seconds jockey_timer is set to each held frame (decays)
 
@@ -110,7 +111,7 @@ local AIR_FRICTION = 0.3 -- horizontal decay/s while airborne (vs ground FRICTIO
 local GROUND_GRAB_HEIGHT = 14 -- ball collectable/tacklable only at/below this height
 local KEEPER_AIR_GRAB = 60 -- a keeper can claim up to this height inside its box
 local CROSSBAR = 70 -- ball at/above this height at the line = over the bar, no goal
-local KEEPER_RESPECT_DIST = 120 -- opponents must back off this far from a keeper in possession
+-- KEEPER_RESPECT_DIST: live-tunable — see sim/tuning.lua (F1 panel)
 local LAND_SETTLE_VZ = 60 -- below this |vz| on landing, the ball settles (stops bouncing)
 local LOB_CLEAR_H = 24 -- a lob must clear roughly head height over a blocker
 -- Cap a lob's horizontal speed so it isn't a flat rocket — and so a lobbed pass
@@ -131,12 +132,12 @@ local HEADER_MAX_Z = 60 -- headable up to here
 local VOLLEY_MAX_Z = 34 -- at/below this an aerial strike is a volley
 local AERIAL_REACH = 24 -- horizontal reach to meet an airborne ball
 local HEADER_CD = 0.5 -- per-player cooldown between aerial attempts
-local HEADER_SPEED = 0.85 -- header pace as a fraction of shot speed
+-- HEADER_SPEED: live-tunable — see sim/tuning.lua (F1 panel)
 local CLEAR_HEADER_SPEED = 320 -- defensive header clearance pace
 local VOLLEY_SPEED = 1.3 -- volley pace multiplier
-local VOLLEY_SKY_P = 0.35 -- chance a volley is skied (seeded roll)
-local AI_HEADER_RANGE = 200 -- AI heads at goal only from realistic range
-local CROSS_MIN_SPACE = 30 -- a winger needs a step of space to swing a cross
+-- VOLLEY_SKY_P: live-tunable — see sim/tuning.lua (F1 panel)
+-- AI_HEADER_RANGE: live-tunable — see sim/tuning.lua (F1 panel)
+-- CROSS_MIN_SPACE: live-tunable — see sim/tuning.lua (F1 panel)
 
 -- Goalkeeper saves + distribution. Reach/handling are per-keeper (see sim.stats);
 -- these are the shared thresholds.
@@ -148,8 +149,8 @@ local CROSS_MIN_SPACE = 30 -- a winger needs a step of space to swing a cross
 -- almost every time; a blistering or full-stretch ball is usually pushed away.
 -- Tuned so an uncharged shot placed at a corner is kept out (mostly a parry) by
 -- a decent keeper, while a fully charged corner shot still beats it clean.
-local SAVE_SPEED_REF = 1300 -- shot speed that fully cancels save quality
-local CATCH_EVEN_QUALITY = 0.45 -- quality at which grab-vs-parry is a coin flip
+-- SAVE_SPEED_REF: live-tunable — see sim/tuning.lua (F1 panel)
+-- CATCH_EVEN_QUALITY: live-tunable — see sim/tuning.lua (F1 panel)
 local CATCH_SOFTNESS = 0.12 -- how fast the odds saturate either side of even
 local PARRY_QUALITY = 0.1 -- at/above this the keeper at least gets a hand to it; below: beaten
 local HANDLING_WEIGHT = 0.5 -- how much keeper handling lifts save quality
@@ -161,9 +162,9 @@ local MIN_PARRY_CLEAR = 260 -- a parry is always punched at least this fast (cle
 -- their body straight back at the goal — a guaranteed rebound tap-in).
 local PARRY_POP_VZ = 240
 local KEEPER_HOLD = 0.9 -- seconds an AI keeper surveys/holds before distributing
-local KEEPER_HOLD_HUMAN = 5 -- six-second-rule budget for the human-controlled keeper
+-- KEEPER_HOLD_HUMAN: live-tunable — see sim/tuning.lua (F1 panel)
 local PUNT_MIN = 240 -- keeper punt (clearance kick) distance floor
-local PUNT_MAX = 640 -- fully charged punt
+-- PUNT_MAX: live-tunable — see sim/tuning.lua (F1 panel)
 local PUNT_CLEAR_H = 60 -- punts sail high over midfield
 local KEEPER_DIVE_DURATION = 0.32 -- dive lunge / animation window
 -- A committed save resolves when the ball ACTUALLY arrives at the keeper (real
@@ -189,16 +190,16 @@ local RECEIVE_TIME = 1.3 -- seconds the intended receiver runs onto a keeper's d
 -- dribble, keeper positioning, off-ball AI) goes through apply_locomotion, which
 -- accelerates run_vel toward a desired velocity. Slides, dodges, and dives keep
 -- their own bespoke movement and bypass this helper.
-local MOVE_ACCEL = 1100 -- px/s^2 toward the desired velocity
-local MOVE_DECEL = 1500 -- px/s^2 when the desired velocity is zero (stopping)
+-- MOVE_ACCEL: live-tunable — see sim/tuning.lua (F1 panel)
+-- MOVE_DECEL: live-tunable — see sim/tuning.lua (F1 panel)
 -- Facing follows run_vel when moving; below this threshold, keep the last facing
 -- so a stationary player can still aim without snapping to zero.
 local RUN_VEL_FACE_MIN = 20
 
-local SHOT_WINDUP = 0.15 -- wind-up before a shot/punt releases (seconds)
+-- SHOT_WINDUP: live-tunable — see sim/tuning.lua (F1 panel)
 local WINDUP_MOVE = 0.3 -- movement multiplier during the wind-up plant phase
 
-local CHARGE_RATE = 1.5 -- charge per second while holding shoot (caps at 1)
+-- CHARGE_RATE: live-tunable — see sim/tuning.lua (F1 panel)
 local CHARGE_POWER = 0.9 -- full charge adds this fraction to shot speed
 local CURVE_MAX = 520 -- lateral acceleration of a full-charge curved shot
 local SPIN_DECAY = 1.4 -- how fast curve bleeds off
@@ -208,8 +209,8 @@ local DODGE_SPEED_MULT = 2.4 -- sideways speed during a juke
 
 -- Sprint (controlled player): a hold-to-run burst from a stamina tank. The tank
 -- size is stamina-derived (see sim.stats); it refills while not sprinting.
-local SPRINT_MULT = 1.35 -- speed multiplier while sprinting
-local SPRINT_REFILL = 0.4 -- meter refilled per second when not sprinting
+-- SPRINT_MULT: live-tunable — see sim/tuning.lua (F1 panel)
+-- SPRINT_REFILL: live-tunable — see sim/tuning.lua (F1 panel)
 local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicker at empty)
 
 ---@class MatchPlayer
@@ -934,7 +935,7 @@ local function try_pass(s, owner_idx, lofted, aim)
     -- Hold-to-charge picks the RANGE: a tap prefers someone close, a charged
     -- release picks out the long option along the aim.
     local range = (s.pass_charge > 0.12)
-            and (PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN))
+            and (PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN))
         or nil
     local target_idx = select_pass_target(s, owner_idx, lofted, aim, range)
     if not target_idx then
@@ -1197,17 +1198,17 @@ local function attempt_steals(s)
                     local jockey_bonus = (p.jockey_timer > 0) and JOCKEY_REACH_BONUS or 0
                     active, reach = true, STAND_REACH + jockey_bonus
                 end
-            elseif p.dash_cd <= 0 and d <= STEAL_ATTEMPT then
+            elseif p.dash_cd <= 0 and d <= TUNE.STEAL_ATTEMPT then
                 -- The AI pokes as soon as the ball looks reachable — and goes on
                 -- cooldown whether or not it connects (a whiff is the carrier's
                 -- window to escape).
                 active = true
-                p.dash_cd = AI_STEAL_CD
+                p.dash_cd = TUNE.AI_STEAL_CD
                 p.tackle_timer = STAND_TIMER -- poke pose for the renderer
                 if d > STEAL_DIST then
                     -- Lunged past a shielded ball: stumble briefly. Baiting the
                     -- poke and breaking away is the carrier's core move.
-                    p.stun_timer = math.max(p.stun_timer, WHIFF_STUMBLE)
+                    p.stun_timer = math.max(p.stun_timer, TUNE.WHIFF_STUMBLE)
                 end
             end
             if active and d <= reach then
@@ -1480,9 +1481,9 @@ local function offball_targets(s, pos)
             if s.players[i].team ~= kteam then
                 local off = tgt:sub(kpos)
                 local d = off:length()
-                if d < KEEPER_RESPECT_DIST then
+                if d < TUNE.KEEPER_RESPECT_DIST then
                     local dir = (d > 0) and off:normalized() or Vec2.new(1, 0)
-                    targets[i] = kpos:add(dir:scale(KEEPER_RESPECT_DIST))
+                    targets[i] = kpos:add(dir:scale(TUNE.KEEPER_RESPECT_DIST))
                 end
             end
         end
@@ -1550,7 +1551,7 @@ local function apply_locomotion(s, p, desired, dt)
     local diff_len = math.sqrt(dx * dx + dy * dy)
     local dlen = desired:length()
     -- Use DECEL when stopping (no input), ACCEL when steering toward any speed.
-    local rate = (dlen < 1) and MOVE_DECEL or MOVE_ACCEL
+    local rate = (dlen < 1) and TUNE.MOVE_DECEL or TUNE.MOVE_ACCEL
     local max_step = rate * dt
     if diff_len <= max_step then
         p.run_vel = desired
@@ -1650,13 +1651,13 @@ local function move_players(s, dt, input)
                 if p.sprinting then
                     p.sprint_meter = math.max(0, p.sprint_meter - dt / p.sprint_dur)
                 else
-                    p.sprint_meter = math.min(1, p.sprint_meter + SPRINT_REFILL * dt)
+                    p.sprint_meter = math.min(1, p.sprint_meter + TUNE.SPRINT_REFILL * dt)
                 end
                 local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
                 if jockeying then
-                    mv = mv * JOCKEY_SLOW
+                    mv = mv * TUNE.JOCKEY_SLOW
                 elseif p.sprinting then
-                    mv = mv * SPRINT_MULT
+                    mv = mv * TUNE.SPRINT_MULT
                 end
                 -- Plant during wind-up: striker slows to 30% while winding up.
                 if p.windup_timer > 0 then
@@ -1712,7 +1713,7 @@ local function move_players(s, dt, input)
                 p.facing = Vec2.new((p.team == "home") and 1 or -1, 0)
                 local camper
                 for _, q in ipairs(s.players) do
-                    if q.team ~= p.team and q.pos:dist(p.pos) < KEEPER_RESPECT_DIST then
+                    if q.team ~= p.team and q.pos:dist(p.pos) < TUNE.KEEPER_RESPECT_DIST then
                         camper = q
                         break
                     end
@@ -1776,9 +1777,9 @@ local function move_players(s, dt, input)
             if p.team ~= k.team then
                 local off = p.pos:sub(k.pos)
                 local d = off:length()
-                if d < KEEPER_RESPECT_DIST then
+                if d < TUNE.KEEPER_RESPECT_DIST then
                     local dir = (d > 0) and off:normalized() or Vec2.new(1, 0)
-                    p.pos = clamp_to_field(s, k.pos:add(dir:scale(KEEPER_RESPECT_DIST)))
+                    p.pos = clamp_to_field(s, k.pos:add(dir:scale(TUNE.KEEPER_RESPECT_DIST)))
                 end
             end
         end
@@ -1885,14 +1886,14 @@ local function human_keeper_actions(s, dt, input, owner)
     -- the current charge.
     local fire_shot, fire_pass = input.shoot, input.pass
     if input.shoot_held then
-        s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
+        s.charge = math.min(1, s.charge + TUNE.CHARGE_RATE * dt)
         fire_shot = fire_shot or s.charge >= 1
     elseif input.pass_held then
-        s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
+        s.pass_charge = math.min(1, s.pass_charge + TUNE.PASS_CHARGE_RATE * dt)
         fire_pass = fire_pass or s.pass_charge >= 1
     end
     if fire_shot and owner.windup_timer == 0 then
-        local dist = PUNT_MIN + s.charge * (PUNT_MAX - PUNT_MIN)
+        local dist = PUNT_MIN + s.charge * (TUNE.PUNT_MAX - PUNT_MIN)
         local dir = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
         if dir.x == 0 and dir.y == 0 then
@@ -1906,10 +1907,10 @@ local function human_keeper_actions(s, dt, input, owner)
         -- Parameters captured at commit; ball releases after the wind-up.
         local vel, vz = lob_launch(owner.pos, tgt, 0.5, PUNT_CLEAR_H)
         s.charge = 0
-        owner.windup_timer = SHOT_WINDUP
+        owner.windup_timer = TUNE.SHOT_WINDUP
         owner.windup_shot = { dir = vel:normalized(), speed = vel:length(), vz = vz, spin = 0 }
     elseif fire_pass then
-        local range = PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN)
+        local range = PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
         keeper_throw(s, s.owner, range, aim)
@@ -1968,7 +1969,7 @@ local function attempt_save(s)
                     -- or blistering shots drop to a parry or beat the keeper.
                     local quality = (1 - dive_dist / keeper.reach)
                         + keeper.handling * HANDLING_WEIGHT
-                        - speed / SAVE_SPEED_REF
+                        - speed / TUNE.SAVE_SPEED_REF
 
                     if quality >= PARRY_QUALITY then
                         -- Grab or parry: probabilistic, from the match's seeded
@@ -1976,7 +1977,7 @@ local function attempt_save(s)
                         -- — soft and central sticks in the gloves, hot or at
                         -- full stretch usually gets pushed away.
                         local p_catch = 1
-                            / (1 + math.exp(-(quality - CATCH_EVEN_QUALITY) / CATCH_SOFTNESS))
+                            / (1 + math.exp(-(quality - TUNE.CATCH_EVEN_QUALITY) / CATCH_SOFTNESS))
                         local sample
                         s.rng, sample = rng.roll(s.rng)
                         keeper.save_pending = (sample < p_catch) and "catch" or "parry"
@@ -2060,7 +2061,7 @@ end
 ---@param input MatchInput
 local function update_pass_target_outfield(s, input)
     local range = (s.pass_charge > 0.12)
-            and (PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN))
+            and (PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN))
         or nil
     local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
     s.pass_target = select_pass_target(s, s.owner, input.lob, aim, range)
@@ -2071,13 +2072,13 @@ end
 ---@param s MatchState
 ---@param input MatchInput
 local function update_pass_target_keeper(s, input)
-    local range = PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN)
+    local range = PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
     local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
     s.pass_target = select_throw_target(s, s.owner, range, aim)
 end
 
 -- Human outfield controlled shot commit: build charge and, on fire, store a
--- wind-up payload (parameters captured now, released after SHOT_WINDUP seconds).
+-- wind-up payload (parameters captured now, released after TUNE.SHOT_WINDUP seconds).
 -- Extracted from update_ball to keep it under LuaJIT's 60-upvalue cap.
 ---@param s MatchState
 ---@param dt number
@@ -2086,11 +2087,11 @@ end
 local function human_outfield_actions(s, dt, input, owner)
     local fire_shot, fire_pass = input.shoot, input.pass
     if input.shoot_held then
-        s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
+        s.charge = math.min(1, s.charge + TUNE.CHARGE_RATE * dt)
         fire_shot = fire_shot or s.charge >= 1
         s.pass_target = nil
     elseif input.pass_held then
-        s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
+        s.pass_charge = math.min(1, s.pass_charge + TUNE.PASS_CHARGE_RATE * dt)
         fire_pass = fire_pass or s.pass_charge >= 1
         -- Preview: recompute intended receiver every frame (pure, no RNG).
         update_pass_target_outfield(s, input)
@@ -2115,7 +2116,7 @@ local function human_outfield_actions(s, dt, input, owner)
         local spin = (vz == 0) and side * s.charge * CURVE_MAX or 0
         s.charge = 0
         s.pass_target = nil
-        owner.windup_timer = SHOT_WINDUP
+        owner.windup_timer = TUNE.SHOT_WINDUP
         owner.windup_shot = { dir = target:sub(owner.pos), speed = speed, vz = vz, spin = spin }
     elseif fire_pass then
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
@@ -2135,7 +2136,7 @@ end
 local function ai_outfield_decision(s, owner_idx, owner)
     local g = attack_goal(s, owner.team)
     local gc = Vec2.new((owner.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
-    if owner.pos:dist(gc) < AI_SHOOT_RANGE then
+    if owner.pos:dist(gc) < TUNE.AI_SHOOT_RANGE then
         -- Shoot to the corner away from the defending keeper, with power
         -- scaled by the space the striker has been given (see constants).
         local keeper = team_keeper(s, owner.team == "home" and "away" or "home")
@@ -2160,7 +2161,7 @@ local function ai_outfield_decision(s, owner_idx, owner)
                 math.max(0, math.min(1, (space - AI_CHARGE_MIN_SPACE) / AI_CHARGE_SPACE_RANGE))
             local speed = owner.shot_speed * (1 + frac * CHARGE_POWER)
             local sdir = shot_target(s, owner, vbias):sub(owner.pos)
-            owner.windup_timer = SHOT_WINDUP
+            owner.windup_timer = TUNE.SHOT_WINDUP
             owner.windup_shot = { dir = sdir, speed = speed, vz = 0, spin = 0 }
         end
     else
@@ -2179,7 +2180,7 @@ local function ai_outfield_decision(s, owner_idx, owner)
                     space = math.min(space, q.pos:dist(owner.pos))
                 end
             end
-            if space > CROSS_MIN_SPACE then
+            if space > TUNE.CROSS_MIN_SPACE then
                 crossed = ai_try_cross(s, owner_idx)
             end
         end
@@ -2192,7 +2193,7 @@ local function ai_outfield_decision(s, owner_idx, owner)
                     pressure = math.min(pressure, q.pos:dist(owner.pos))
                 end
             end
-            if pressure <= AI_PASS_PRESSURE and owner.settle_timer <= 0 then
+            if pressure <= TUNE.AI_PASS_PRESSURE and owner.settle_timer <= 0 then
                 ai_try_pass(s, owner_idx)
             end
         end
@@ -2433,7 +2434,7 @@ local function update_ball(s, dt, input)
                     local gl = Vec2.new((p.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
                     local own_third = (p.team == "home") and (p.pos.x < s.field.w * 0.33)
                         or (p.team == "away" and p.pos.x > s.field.w * 0.67)
-                    if p.pos:dist(gl) <= AI_HEADER_RANGE or own_third then
+                    if p.pos:dist(gl) <= TUNE.AI_HEADER_RANGE or own_third then
                         striker = i
                         break
                     end
@@ -2471,7 +2472,7 @@ local function update_ball(s, dt, input)
                         { kind = "volley", x = s.ball.x, y = s.ball.y, player = p.id }
                     local roll
                     s.rng, roll = rng.roll(s.rng)
-                    if roll < VOLLEY_SKY_P then
+                    if roll < TUNE.VOLLEY_SKY_P then
                         -- Skied! Blasted over everything; the cage returns it.
                         s.ball_vel = target:sub(p.pos):normalized():scale(p.shot_speed * 0.5)
                         s.ball_vz = 520
@@ -2483,7 +2484,8 @@ local function update_ball(s, dt, input)
                 else
                     s.events[#s.events + 1] =
                         { kind = "header", x = s.ball.x, y = s.ball.y, player = p.id }
-                    s.ball_vel = target:sub(p.pos):normalized():scale(p.shot_speed * HEADER_SPEED)
+                    s.ball_vel =
+                        target:sub(p.pos):normalized():scale(p.shot_speed * TUNE.HEADER_SPEED)
                     s.ball_vz = -40 -- headed down toward the goal
                 end
                 s.ball_spin = 0
@@ -2542,7 +2544,7 @@ local function update_ball(s, dt, input)
                 -- an AI needs a beat of control before it can pass on.
                 s.events[#s.events + 1] =
                     { kind = "touch", x = s.ball.x, y = s.ball.y, player = bp.id }
-                bp.settle_timer = CARRIER_SETTLE
+                bp.settle_timer = TUNE.CARRIER_SETTLE
             end
             s.owner = best
             s.ball_vel = Vec2.new(0, 0)
@@ -2681,7 +2683,7 @@ function match.step(s, dt, input)
     if s.owner and s.players[s.owner].team == "home" and s.players[s.owner].is_keeper then
         if s.owner ~= prev_owner then
             s.controlled = s.owner
-            s.players[s.owner].hold_timer = KEEPER_HOLD_HUMAN
+            s.players[s.owner].hold_timer = TUNE.KEEPER_HOLD_HUMAN
         end
     elseif s.players[s.controlled].is_keeper then
         s.controlled = best_defender(s)
