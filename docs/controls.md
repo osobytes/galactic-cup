@@ -14,6 +14,7 @@ Two contextual action keys + sprint. The same key does the natural thing for the
 | Juke / Dodge | C |
 | Rematch (after full time) | R or Enter |
 | Toggle bloom | B (debug) |
+| Toggle mute | M |
 | Quit   | Esc |
 
 - **Shooting** (Space with the ball) aims at the goal; hold up/down to place it into a corner.
