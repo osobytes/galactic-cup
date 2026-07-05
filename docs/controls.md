@@ -45,7 +45,10 @@ Two contextual action keys + sprint. The same key does the natural thing for the
   mid/front field as far as you charge it. You can walk it around inside your box; after ~5
   seconds the keeper distributes on its own (six-second rule).
 - **Crosses**: a lofted pass (hold L + K) from wide in the attacking third becomes a **cross**
-  aimed at your teammate in the box — AI wingers swing them in too.
+  aimed at your teammate in the box — AI wingers swing them in too. **Control follows every
+  pass you make**: the moment the ball leaves your foot you're driving the receiver, so run
+  onto the cross and meet it with Space — holding a direction at contact **aims the header or
+  volley** wherever you point (undirected strikes go at goal).
 - **Aerial play**: an airborne ball at head height can be met first-time — press **Space**
   under it. Above the waist it's a **header** (safe, placed); lower it's a **volley** — much
   harder, but with a real chance of skying it. The arena is a **cage**: a skied ball bounces

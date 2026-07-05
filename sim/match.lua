@@ -752,6 +752,12 @@ end
 local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     local owner = s.players[owner_idx]
     local target = s.players[target_idx]
+    -- Control follows a HUMAN pass to its receiver (standard soccer-game
+    -- behavior): you take over the man the ball is travelling to — attack the
+    -- cross, time the first touch — while it is still in flight.
+    if owner_idx == s.controlled and target.team == "home" and not target.is_keeper then
+        s.controlled = target_idx
+    end
     -- A defender right on the release point eats a driven ball — and even a lob
     -- is still low in its first strides (the lane check ignores segment ends).
     -- Dink over them: an arc that clears at 15% of the lane also stays above
@@ -2508,14 +2514,21 @@ local function update_ball(s, dt, input)
                 s.ball_spin = 0
                 s.pickup_cd = RELEASE_CD * 0.6
             else
-                -- Strike at goal: header above the waist, volley below.
-                local keeper = team_keeper(s, p.team == "home" and "away" or "home")
-                local g = attack_goal(s, p.team)
-                local vbias = 0.85
-                if keeper then
-                    vbias = (keeper.pos.y < g.y + g.h / 2) and 0.85 or -0.85
+                -- Strike at goal: header above the waist, volley below. The
+                -- human holding a direction strikes THAT way instead (a
+                -- directed header/flick — pass it down, nod it wide, anything).
+                local target
+                if striker == s.controlled and (input.move.x ~= 0 or input.move.y ~= 0) then
+                    target = p.pos:add(input.move:normalized():scale(240))
+                else
+                    local keeper = team_keeper(s, p.team == "home" and "away" or "home")
+                    local g = attack_goal(s, p.team)
+                    local vbias = 0.85
+                    if keeper then
+                        vbias = (keeper.pos.y < g.y + g.h / 2) and 0.85 or -0.85
+                    end
+                    target = shot_target(s, p, vbias)
                 end
-                local target = shot_target(s, p, vbias)
                 if s.ball_z <= VOLLEY_MAX_Z then
                     s.events[#s.events + 1] =
                         { kind = "volley", x = s.ball.x, y = s.ball.y, player = p.id }

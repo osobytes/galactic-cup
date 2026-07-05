@@ -2313,6 +2313,80 @@ t.describe("match teammate awareness", function()
     end)
 end)
 
+t.describe("match control follows the pass", function()
+    t.it("a human cross hands control to the box receiver in flight", function()
+        local s = new_match()
+        local passer = s.controlled
+        s.players[passer].pos = Vec2.new(750, 100) -- wide right, attacking third
+        s.players[passer].facing = Vec2.new(1, 0)
+        local box_mate
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= passer then
+                if not box_mate then
+                    box_mate = i
+                    p.pos = Vec2.new(830, 270) -- in the box
+                else
+                    p.pos = Vec2.new(200, 60 + i * 40)
+                end
+            end
+        end
+        for i, p in ipairs(s.players) do
+            if p.team == "away" then
+                s.players[i].pos = Vec2.new(120, 40 + i * 30)
+            end
+        end
+        s.owner = passer
+        s.ball = s.players[passer].pos:add(Vec2.new(18, 0))
+        match.step(s, 0.016, input({ pass = true, lob = true }))
+        t.is_true(s.owner == nil, "the cross is away")
+        t.eq(s.controlled, box_mate, "and you now control the man attacking it")
+    end)
+
+    t.it("an AI pass never moves the human's control", function()
+        local s = new_match()
+        local carrier, mate
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                if not carrier then
+                    carrier = i
+                elseif not mate then
+                    mate = i
+                end
+            end
+        end
+        s.players[carrier].pos = Vec2.new(600, 270)
+        s.players[mate].pos = Vec2.new(450, 200)
+        s.players[s.controlled].pos = Vec2.new(660, 270) -- pressuring
+        s.owner = carrier
+        s.ball = Vec2.new(582, 270)
+        local before = s.controlled
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.controlled, before, "AI passes don't steal your control")
+    end)
+
+    t.it("a directed header goes where you aim", function()
+        local s = new_match()
+        -- The controlled player under a dropping ball, aiming up-left.
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(480, 300)
+        s.owner = nil
+        s.pickup_cd = 0
+        s.ball = Vec2.new(486, 300)
+        s.ball_vel = Vec2.new(0, 0)
+        s.ball_z = 45
+        s.ball_vz = -50
+        match.step(s, 0.016, input({ dash = true, move = Vec2.new(-1, -1) }))
+        local headed = false
+        for _, e in ipairs(s.events) do
+            if e.kind == "header" then
+                headed = true
+            end
+        end
+        t.is_true(headed, "the human meets the ball first-time")
+        t.is_true(s.ball_vel.x < 0 and s.ball_vel.y < 0, "and it goes where they aimed")
+    end)
+end)
+
 t.describe("match save grab-vs-parry odds", function()
     local function has_event(s, kind)
         for _, e in ipairs(s.events) do
