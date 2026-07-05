@@ -12,6 +12,7 @@ Two contextual action keys + sprint. The same key does the natural thing for the
 | Sprint | Shift (hold) |
 | Lob / chip modifier | L (hold) |
 | Juke / Dodge | C |
+| Skip goal replay | Space or Enter |
 | Rematch (after full time) | R or Enter |
 | Tuning panel (playtest) | F1 (pauses; F2 save, F3 load) |
 | Toggle bloom | B (debug) |
@@ -85,6 +86,14 @@ Your **facing** follows your actual velocity so you can still aim while braking 
 to wherever you're pointing, not where you're running).
 Shooting is a discrete, edge-triggered event (queued on key press, consumed on the next
 simulation step), so taps don't get lost between frames.
+
+## Goal replays
+
+Every goal rolls an automatic **slow-motion replay** of the last few seconds
+from the broadcast camera — the buffer is recorded live every frame and played
+back through the normal renderer with interpolation, ending with the ball in
+the net. **Space/Enter** skips. Replay speed and length are on the tuning
+panel (F1 → Replay).
 
 ## Tuning panel (playtesting)
 

@@ -10,6 +10,7 @@ local effects = require("game.render.effects")
 local view_state = require("game.render.view_state")
 local audio = require("game.audio")
 local tuning_panel = require("game.ui.tuning_panel")
+local replay = require("game.render.replay")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -64,6 +65,9 @@ function Match:restart()
     self._pass_held_prev = false
     self._lob_latch = false
     self._space_held_prev = false
+    self._last_score = 0
+    self._replay_state = nil
+    replay.reset()
     view_state.reset()
     effects.reset()
     audio.load()
@@ -90,6 +94,14 @@ function Match:event(evt)
     end
     if tuning_panel.open then
         tuning_panel.key(evt.key, love.keyboard.isDown("lshift", "rshift"))
+        return
+    end
+    -- During a replay the only action is skipping it.
+    if replay.active() then
+        if evt.key == "space" or evt.key == "return" or evt.key == "k" then
+            replay.stop()
+            effects.reset() -- drop replay particles before live play returns
+        end
         return
     end
     -- Contextual actions: the same key means the natural thing for the moment.
@@ -135,6 +147,19 @@ function Match:update(dt)
     if tuning_panel.open then
         return -- paused for tuning: tweak, close, resume
     end
+    -- Slow-motion goal replay: the sim freezes while the buffer plays back
+    -- through the normal renderer (same camera).
+    if replay.active() then
+        self._replay_state = replay.step(dt)
+        if self._replay_state then
+            view_state.update(self._replay_state.players, dt)
+            effects.update(self._replay_state, dt)
+        else
+            effects.reset() -- replay over: clean slate for the live kickoff
+        end
+        return
+    end
+    replay.record(self.state) -- pre-step: the goal flight stays in the buffer
     -- Space reads as "shoot" while carrying (hold to charge, release to fire);
     -- off the ball it is "jockey" while held and fires the poke on release
     -- — mirroring the on-ball hold/release pattern so muscle memory transfers.
@@ -179,6 +204,15 @@ function Match:update(dt)
     view_state.update(self.state.players, dt)
     effects.update(self.state, dt) -- juice layer: event bursts + ball trail
     audio.update(self.state, dt) -- synthesized SFX from event queue
+
+    -- A goal just went in (score edge, match still live): roll the replay.
+    local total = self.state.score.home + self.state.score.away
+    if total > self._last_score and not self.state.finished then
+        if replay.start() then
+            effects.reset() -- the scene jumps back in time; drop live particles
+        end
+    end
+    self._last_score = total
 end
 
 ---@param s MatchState
@@ -244,9 +278,18 @@ end
 
 function Match:draw()
     local s = self.state
+    if replay.active() and self._replay_state then
+        s = self._replay_state --[[@as MatchState]]
+    end
     local vp = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
     bloom.draw(function()
         self:draw_frame(s, vp)
+        if replay.active() then
+            love.graphics.setColor(1, 0.45, 0.45)
+            love.graphics.printf("● REPLAY", 0, 48, vp.w, "center")
+            love.graphics.setColor(0.8, 0.85, 0.95)
+            love.graphics.printf("Space — skip", 0, 66, vp.w, "center")
+        end
     end)
 end
 

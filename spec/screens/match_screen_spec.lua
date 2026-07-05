@@ -157,3 +157,44 @@ t.describe("match screen lob latch (tier 2)", function()
         end)
     end)
 end)
+
+t.describe("match screen goal replay (tier 2)", function()
+    local replay = require("game.render.replay")
+
+    local function with_keys(fn)
+        local saved = love.keyboard
+        local down = {}
+        love.keyboard = {
+            isDown = function(...)
+                for _, k in ipairs({ ... }) do
+                    if down[k] then
+                        return true
+                    end
+                end
+                return false
+            end,
+        }
+        local ok, err = pcall(fn, down)
+        love.keyboard = saved
+        assert(ok, err)
+    end
+
+    t.it("a goal freezes the sim into a slow-mo replay; skipping resumes", function()
+        with_keys(function()
+            local m = Match.new()
+            for _ = 1, 40 do -- build up recorded footage
+                m:update(1 / 60)
+            end
+            m.state.score.home = m.state.score.home + 1 -- goal edge
+            m:update(1 / 60)
+            t.is_true(replay.active(), "the replay rolls after a goal")
+            local t0 = m.state.time_left
+            m:update(1 / 60)
+            t.eq(m.state.time_left, t0, "the sim is frozen during the replay")
+            m:event({ kind = "key", key = "space" })
+            t.is_true(not replay.active(), "Space skips the replay")
+            m:update(1 / 60)
+            t.is_true(m.state.time_left < t0, "live play resumes")
+        end)
+    end)
+end)

@@ -261,6 +261,35 @@ tuning.knobs = {
         max = 260,
         step = 10,
     },
+    {
+        key = "STAND_WAKE",
+        label = "Positional calm",
+        cat = "AI",
+        default = 34,
+        min = 16,
+        max = 80,
+        step = 2,
+    },
+
+    -- Replay (presentation)
+    {
+        key = "REPLAY_SLOWMO",
+        label = "Replay speed x",
+        cat = "Replay",
+        default = 0.35,
+        min = 0.1,
+        max = 1.0,
+        step = 0.05,
+    },
+    {
+        key = "REPLAY_SECONDS",
+        label = "Replay length s",
+        cat = "Replay",
+        default = 4,
+        min = 2,
+        max = 8,
+        step = 0.5,
+    },
 }
 
 ---@type table<string, Knob>
