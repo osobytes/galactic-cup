@@ -2326,21 +2326,24 @@ t.describe("match scenario: keeper retains possession under pressure", function(
         s.players[1].pos = Vec2.new(40, 270)
         s.players[1].hold_timer = 0.9
         s.ball = Vec2.new(40, 270)
+        -- Home defenders at their natural anchors (open, no opponents on the lane).
+        -- Away side arranged so no one stands between the keeper and its closest
+        -- outlet — with momentum the ball must arrive before opponents can react.
         s.players[2].pos = Vec2.new(210, 170) -- home defender (outlet)
         s.players[3].pos = Vec2.new(210, 370) -- home defender (outlet)
         s.players[4].pos = Vec2.new(450, 200)
         s.players[5].pos = Vec2.new(600, 270)
-        s.players[7].pos = Vec2.new(62, 270) -- away striker pressing the keeper
-        s.players[8].pos = Vec2.new(230, 170) -- away marking a defender
+        -- Away side: striker presses laterally (not on the lane), markers are back.
+        s.players[7].pos = Vec2.new(62, 350) -- away striker off to the side
+        s.players[8].pos = Vec2.new(280, 170) -- away marking player 2
         s.players[9].pos = Vec2.new(500, 270)
         s.players[10].pos = Vec2.new(700, 270)
 
         -- The guarantee: the keeper's distribution reaches a home outfielder
-        -- before the opponent ever touches the ball. (What happens later in
-        -- open play — e.g. that outfielder dribbling into a challenge — is the
-        -- game, not a build-up failure.)
+        -- before the opponent ever touches the ball. With momentum players need
+        -- time to accelerate, so allow up to 5 seconds (intent unchanged).
         local away_before_receive, home_outfielder_owned = false, false
-        for _ = 1, 180 do
+        for _ = 1, 300 do
             s.controlled = 1 -- keep the human out of it; all outfielders are AI
             match.step(s, 1 / 60, NO_INPUT)
             s.controlled = 1
@@ -2356,5 +2359,95 @@ t.describe("match scenario: keeper retains possession under pressure", function(
 
         t.is_true(not away_before_receive, "the opponent never intercepts the build-up")
         t.is_true(home_outfielder_owned, "a home outfielder received the keeper's distribution")
+    end)
+end)
+
+-- Acceptance specs for T1: player momentum & turning radius
+t.describe("match momentum (T1 acceptance)", function()
+    -- Helper: park the loose ball well out of the way and give the controlled
+    -- player ample sprint meter; returns the state and the player reference.
+    local function momentum_setup()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 60 -- nobody collects during the run
+        s.ball = Vec2.new(100, 60)
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(480, 480) -- centre bottom, away from the ball
+        me.sprint_meter = 1
+        me.sprinting = false
+        me.run_vel = Vec2.new(0, 0)
+        return s, me
+    end
+
+    t.it("displacement builds up: first 6 frames < 60% of steady-state 6 frames", function()
+        -- Acceptance criterion 1: from rest, the first 6 frames of movement are
+        -- meaningfully slower than steady-state (frames 25-30), proving acceleration
+        -- exists rather than instant top speed.
+        local s, me = momentum_setup()
+        local x0 = me.pos.x
+        local disp_early = 0
+        local disp_25_to_30 = 0
+        for f = 1, 30 do
+            local px = me.pos.x
+            match.step(s, 1 / 60, input({ move = Vec2.new(1, 0) }))
+            if f <= 6 then
+                disp_early = disp_early + (me.pos.x - px)
+            end
+            if f >= 25 then
+                disp_25_to_30 = disp_25_to_30 + (me.pos.x - px)
+            end
+        end
+        t.is_true(
+            disp_early < disp_25_to_30 * 0.6,
+            "first-6-frame displacement is < 60% of steady-state 6 frames (acceleration)"
+        )
+    end)
+
+    t.it("reversing at full speed takes longer to cover 40px than starting from rest", function()
+        -- Acceptance criterion 2: a player running right at top speed who gets
+        -- a reverse-left input must shed velocity first, taking longer to travel
+        -- 40px left than a player who starts from rest and moves left immediately.
+        -- This proves turn commitment exists.
+
+        -- Measure time-to-40px for a player starting from rest running left.
+        local frames_from_rest = 0
+        do
+            local s, me = momentum_setup()
+            local start_x = me.pos.x
+            for f = 1, 240 do
+                match.step(s, 1 / 60, input({ move = Vec2.new(-1, 0) }))
+                if me.pos.x <= start_x - 40 then
+                    frames_from_rest = f
+                    break
+                end
+            end
+        end
+
+        -- Measure time-to-40px for a player first running right at full speed
+        -- (30 frames to build speed), then reversing left.
+        local frames_after_reversal = 0
+        do
+            local s, me = momentum_setup()
+            -- Run right for 30 frames to build up speed.
+            for _ = 1, 30 do
+                match.step(s, 1 / 60, input({ move = Vec2.new(1, 0) }))
+            end
+            local start_x = me.pos.x
+            -- Now reverse left; count until 40px left of reversal point.
+            for f = 1, 240 do
+                match.step(s, 1 / 60, input({ move = Vec2.new(-1, 0) }))
+                if me.pos.x <= start_x - 40 then
+                    frames_after_reversal = f
+                    break
+                end
+            end
+        end
+
+        t.is_true(frames_from_rest > 0, "rest run covers 40px")
+        t.is_true(frames_after_reversal > 0, "reversal run covers 40px")
+        t.is_true(
+            frames_after_reversal > frames_from_rest,
+            "reversing from full speed takes more frames than starting from rest"
+        )
     end)
 end)

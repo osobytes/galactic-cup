@@ -178,6 +178,16 @@ local KEEPER_GRAB_POSE = 0.25 -- seconds of the gather/reach pose after a grab
 local KEEPER_THROW_POSE = 0.25 -- seconds of the release/throw pose after distributing
 local RECEIVE_TIME = 1.3 -- seconds the intended receiver runs onto a keeper's distribution
 
+-- Locomotion momentum. All walking/running movement (controlled player, AI owner
+-- dribble, keeper positioning, off-ball AI) goes through apply_locomotion, which
+-- accelerates run_vel toward a desired velocity. Slides, dodges, and dives keep
+-- their own bespoke movement and bypass this helper.
+local MOVE_ACCEL = 1100 -- px/s^2 toward the desired velocity
+local MOVE_DECEL = 1500 -- px/s^2 when the desired velocity is zero (stopping)
+-- Facing follows run_vel when moving; below this threshold, keep the last facing
+-- so a stationary player can still aim without snapping to zero.
+local RUN_VEL_FACE_MIN = 20
+
 local CHARGE_RATE = 1.5 -- charge per second while holding shoot (caps at 1)
 local CHARGE_POWER = 0.9 -- full charge adds this fraction to shot speed
 local CURVE_MAX = 520 -- lateral acceleration of a full-charge curved shot
@@ -198,6 +208,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field team "home"|"away"
 ---@field pos Vec2
 ---@field vel Vec2  -- realized velocity (px/s) from last tick's movement; AI prediction source
+---@field run_vel Vec2  -- locomotion velocity (px/s); accel/decel toward desired each tick
 ---@field facing Vec2
 ---@field anchor Vec2
 ---@field move_speed number
@@ -338,6 +349,7 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             team = side,
             pos = Vec2.new(anchor.x, anchor.y),
             vel = Vec2.new(0, 0),
+            run_vel = Vec2.new(0, 0),
             facing = Vec2.new(side == "home" and 1 or -1, 0),
             anchor = anchor,
             move_speed = stats.move_speed(pd.stats),
@@ -410,6 +422,7 @@ local function place_kickoff(s, kicking)
         end
         p.pos = Vec2.new(ax, p.anchor.y)
         p.vel = Vec2.new(0, 0)
+        p.run_vel = Vec2.new(0, 0)
         p.facing = Vec2.new(p.team == "home" and 1 or -1, 0)
         p.dive_timer = 0
         p.dive_dir = Vec2.new(0, 0)
@@ -1445,6 +1458,40 @@ local function resolve_collisions(s)
     end
 end
 
+-- Locomotion helper: nudge `p.run_vel` toward `desired` by at most accel*dt
+-- (DECEL when desired is zero), then move `p.pos` by run_vel*dt clamped to the
+-- field. Updates `p.facing` to follow run_vel when the player is actually moving,
+-- keeping the last facing when stationary so aim still works.
+--
+-- `desired` is the target velocity vector (direction × speed); passing zero
+-- = stopping. Returns the new position (already applied to p.pos).
+---@param s MatchState
+---@param p MatchPlayer
+---@param desired Vec2
+---@param dt number
+local function apply_locomotion(s, p, desired, dt)
+    local dx = desired.x - p.run_vel.x
+    local dy = desired.y - p.run_vel.y
+    local diff_len = math.sqrt(dx * dx + dy * dy)
+    local dlen = desired:length()
+    -- Use DECEL when stopping (no input), ACCEL when steering toward any speed.
+    local rate = (dlen < 1) and MOVE_DECEL or MOVE_ACCEL
+    local max_step = rate * dt
+    if diff_len <= max_step then
+        p.run_vel = desired
+    else
+        local scale = max_step / diff_len
+        p.run_vel = Vec2.new(p.run_vel.x + dx * scale, p.run_vel.y + dy * scale)
+    end
+    p.pos = clamp_to_field(s, p.pos:add(p.run_vel:scale(dt)))
+    -- Facing: follow run_vel when moving, keep last facing when stationary so
+    -- a stopped player can aim without their facing snapping to zero.
+    local rvlen = p.run_vel:length()
+    if rvlen > RUN_VEL_FACE_MIN then
+        p.facing = p.run_vel:normalized()
+    end
+end
+
 ---@param s MatchState
 local function move_players(s, dt, input)
     local owner = s.owner and s.players[s.owner] or nil
@@ -1497,14 +1544,18 @@ local function move_players(s, dt, input)
 
             if p.slide_timer > 0 then
                 -- Committed slide: locked direction, decaying speed, can't steer.
+                -- Also drain run_vel so momentum doesn't carry after the slide ends.
                 p.pos = clamp_to_field(s, p.pos:add(p.slide_dir:scale(p.slide_vel * dt)))
                 p.slide_vel = p.slide_vel * math.max(0, 1 - SLIDE_FRICTION * dt)
+                p.run_vel = Vec2.new(0, 0)
             elseif p.dodge_timer > 0 then
                 -- Juke overrides steering: slide sideways fast.
+                -- Drain run_vel so the exit from the juke starts from rest.
                 p.pos = clamp_to_field(
                     s,
                     p.pos:add(p.dodge_dir:scale(p.move_speed * DODGE_SPEED_MULT * dt))
                 )
+                p.run_vel = Vec2.new(0, 0)
             else
                 local dir = input.move
                 local moving = dir.x ~= 0 or dir.y ~= 0
@@ -1519,14 +1570,19 @@ local function move_players(s, dt, input)
                 else
                     p.sprint_meter = math.min(1, p.sprint_meter + SPRINT_REFILL * dt)
                 end
-                if moving then
-                    local nd = dir:normalized()
-                    local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
-                    if p.sprinting then
-                        mv = mv * SPRINT_MULT
-                    end
-                    p.pos = clamp_to_field(s, p.pos:add(nd:scale(mv * dt)))
-                    p.facing = nd
+                local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
+                if p.sprinting then
+                    mv = mv * SPRINT_MULT
+                end
+                -- Stationary-aiming exception: when input is held but the player
+                -- hasn't built speed yet, facing should follow input, not run_vel.
+                -- apply_locomotion handles facing via run_vel; for the input case
+                -- we override after the call when run_vel is still tiny.
+                local desired = moving and dir:normalized():scale(mv) or Vec2.new(0, 0)
+                local had_input_facing = moving and p.run_vel:length() <= RUN_VEL_FACE_MIN
+                apply_locomotion(s, p, desired, dt)
+                if had_input_facing then
+                    p.facing = dir:normalized()
                 end
             end
             -- A keeper holding the ball may not carry it out of the penalty
@@ -1547,11 +1603,11 @@ local function move_players(s, dt, input)
                 local goal = (p.team == "home") and s.goal_away or s.goal_home
                 local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
                 local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
-                local np, dir = ai.steer(p.pos, gc, mv * dt)
-                p.pos = clamp_to_field(s, np)
-                if dir.x ~= 0 or dir.y ~= 0 then
-                    p.facing = dir
-                end
+                -- Derive desired direction from ai.steer (which returns a clamped
+                -- position and a unit direction), then feed apply_locomotion.
+                local _, dir = ai.steer(p.pos, gc, mv * dt)
+                local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(mv) or Vec2.new(0, 0)
+                apply_locomotion(s, p, desired, dt)
             else
                 -- A keeper holding the ball faces upfield; if an opponent is camped
                 -- right in front of it, step laterally to open a throwing angle.
@@ -1565,26 +1621,32 @@ local function move_players(s, dt, input)
                 end
                 if camper then
                     -- Sidestep away from the camper's side to open a throwing angle.
+                    -- Use apply_locomotion for the keeper lateral step too.
                     local side = (camper.pos.y >= p.pos.y) and -1 or 1
-                    p.pos = clamp_to_field(s, p.pos:add(Vec2.new(0, side * p.move_speed * dt)))
+                    apply_locomotion(s, p, Vec2.new(0, side * p.move_speed), dt)
+                    -- Override facing: keeper always faces upfield.
+                    p.facing = Vec2.new((p.team == "home") and 1 or -1, 0)
+                else
+                    apply_locomotion(s, p, Vec2.new(0, 0), dt)
+                    p.facing = Vec2.new((p.team == "home") and 1 or -1, 0)
                 end
             end
         elseif p.is_keeper then
             local opp_owns = owner ~= nil and owner.team ~= p.team
             if p.dive_timer > 0 then
-                -- Diving: lunge hard toward the ball to extend the save.
+                -- Diving: lunge hard toward the ball to extend the save. Dives
+                -- bypass locomotion (bespoke movement — keep as-is).
                 p.pos = clamp_to_field(s, p.pos:add(p.dive_dir:scale(p.move_speed * 1.6 * dt)))
                 p.facing = p.dive_dir
+                p.run_vel = Vec2.new(0, 0)
             elseif (s.owner == nil or opp_owns) and in_claim_zone(s, p) then
                 -- Come off the line to claim a loose ball in the box — or to close
-                -- down a carrier who brings it in (the 1v1 rush) — anticipating
-                -- its path (pursuit) so the keeper meets it rather than trailing.
+                -- down a carrier who brings it in (the 1v1 rush).
                 local aim = ai.pursue(p.pos, s.ball, s.ball_vel, KEEPER_LEAD)
-                local np, dir = ai.steer(p.pos, aim, p.move_speed * dt)
-                p.pos = clamp_to_field(s, np)
-                if dir.x ~= 0 or dir.y ~= 0 then
-                    p.facing = dir
-                end
+                local _, dir = ai.steer(p.pos, aim, p.move_speed * dt)
+                local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
+                    or Vec2.new(0, 0)
+                apply_locomotion(s, p, desired, dt)
             else
                 -- Hold the goal line, tracking the ball but only across a centre band
                 -- (KEEPER_GUARD) so well-placed corner shots stay scorable.
@@ -1592,21 +1654,18 @@ local function move_players(s, dt, input)
                 local line_x = (p.team == "home") and (goal.x + goal.w + 12) or (goal.x - 12)
                 local cy = goal.y + goal.h / 2
                 local ty = math.max(cy - KEEPER_GUARD, math.min(cy + KEEPER_GUARD, s.ball.y))
-                local np, dir = ai.steer(p.pos, Vec2.new(line_x, ty), p.move_speed * dt)
-                p.pos = np
-                if dir.x ~= 0 or dir.y ~= 0 then
-                    p.facing = dir
-                end
+                local _, dir = ai.steer(p.pos, Vec2.new(line_x, ty), p.move_speed * dt)
+                local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
+                    or Vec2.new(0, 0)
+                apply_locomotion(s, p, desired, dt)
             end
         else
             -- Off-ball AI: role-assigned target (press/cover/mark/support/zone).
             local target = targets[i] or p.anchor
             local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
-            local np, dir = ai.steer(p.pos, target, mv * dt)
-            p.pos = clamp_to_field(s, np)
-            if dir.x ~= 0 or dir.y ~= 0 then
-                p.facing = dir
-            end
+            local _, dir = ai.steer(p.pos, target, mv * dt)
+            local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(mv) or Vec2.new(0, 0)
+            apply_locomotion(s, p, desired, dt)
         end
     end
 

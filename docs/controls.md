@@ -70,9 +70,13 @@ Two contextual action keys + sprint. The same key does the natural thing for the
   AI strikers work the same way — the space you give them becomes shot power, so close
   shooters down.
 
-Movement is continuous (read each frame as a direction vector). Shooting is a discrete,
-edge-triggered event (queued on key press, consumed on the next simulation step), so taps don't
-get lost between frames.
+Movement is continuous (read each frame as a direction vector) and **momentum-based**: players
+accelerate to top speed over ~0.25 s and decelerate to a stop over ~0.18 s. Sprinting commits
+you to your current direction — reversing while at full speed takes an arc, not an instant pivot.
+Your **facing** follows your actual velocity so you can still aim while braking (the ball sticks
+to wherever you're pointing, not where you're running).
+Shooting is a discrete, edge-triggered event (queued on key press, consumed on the next
+simulation step), so taps don't get lost between frames.
 
 ## Menus (pre-match flow)
 
