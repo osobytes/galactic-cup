@@ -1255,6 +1255,12 @@ end
 
 -- Off-ball movement tuning (see docs/plan). All deterministic.
 local TRIANGLE_JOIN = 320 -- supporters this close to the carrier triangulate around them
+-- Positional calm: an off-ball player close enough to their role spot PLANTS
+-- and stands (no robotic shuffling), only walking again once the spot drifts
+-- meaningfully away. Urgent roles (chasing, receiving, pressing) are exempt.
+local ARRIVE_RADIUS = 60 -- ease in below this distance (no full-speed overshoot)
+local STAND_DEADBAND = 14 -- close enough: plant
+local STAND_STILL_SPEED = 25 -- run_vel below this counts as standing (hysteresis memory)
 local PURSUE_LEAD = 0.004 -- prediction horizon per px of distance (s/px)
 local MARK_GOALSIDE = 16 -- px a marker stands goal-side of its man
 local MARK_LANE_OFF = 44 -- ...but during a keeper's build-up they mark the LANE instead:
@@ -1298,14 +1304,18 @@ end
 
 -- Compute off-ball steering targets for every AI player NOT handled by the
 -- controlled / owner / keeper branches. Pure function of the top-of-tick
--- snapshot `pos`. Returns player_index -> target Vec2, and refreshes s.marks for
--- man-marking hysteresis. Roles: one presser + one cover + scheme-driven rest
--- when defending; support-spot runs when attacking; press-set chase when loose.
+-- snapshot `pos`. Returns player_index -> target Vec2 plus an URGENCY set
+-- (roles needing full-speed precision, exempt from positional calm), and
+-- refreshes s.marks for man-marking hysteresis. Roles: one presser + one cover
+-- + scheme-driven rest when defending; support-spot runs when attacking;
+-- press-set chase when loose.
 ---@param s MatchState
 ---@param pos Vec2[]
----@return table<integer, Vec2>
+---@return table<integer, Vec2> targets
+---@return table<integer, boolean> urgent
 local function offball_targets(s, pos)
     local targets = {}
+    local urgent = {} -- roles that need precision, exempt from positional calm
     local owner_team = s.owner and s.players[s.owner].team or nil
 
     for _, team in ipairs({ "home", "away" }) do
@@ -1367,6 +1377,7 @@ local function offball_targets(s, pos)
                 -- poking. Half the standoff keeps the press goal-side honest.
                 local aim = ai.pursue(pos[presser], s.ball, carrier.vel, PURSUE_LEAD)
                 targets[presser] = aim:add(goal:sub(aim):normalized():scale(cfg.standoff * 0.5))
+                urgent[presser] = true
             end
             if cover then
                 targets[cover] = ai.interpose(cpos, goal, COVER_FRAC)
@@ -1507,6 +1518,7 @@ local function offball_targets(s, pos)
                 -- assigned role (the ball magnet).
                 if chasers[idx] or pos[idx]:dist(s.ball) < TUNE.LOOSE_MAGNET then
                     targets[idx] = ai.pursue(pos[idx], s.ball, s.ball_vel, PURSUE_LEAD)
+                    urgent[idx] = true
                 else
                     targets[idx] = block_shift(s.players[idx].anchor, s.ball, cfg.compactness)
                 end
@@ -1520,6 +1532,7 @@ local function offball_targets(s, pos)
     for i, p in ipairs(s.players) do
         if p.receive_timer > 0 and targets[i] then
             targets[i] = Vec2.new(s.ball.x, s.ball.y)
+            urgent[i] = true
         end
     end
 
@@ -1540,7 +1553,7 @@ local function offball_targets(s, pos)
         end
     end
 
-    return targets
+    return targets, urgent
 end
 
 -- Resolve player-vs-player overlaps so bodies block instead of passing through.
@@ -1630,7 +1643,7 @@ local function move_players(s, dt, input)
     for i, p in ipairs(s.players) do
         prev[i] = p.pos
     end
-    local targets = offball_targets(s, prev)
+    local targets, urgent = offball_targets(s, prev)
 
     for i, p in ipairs(s.players) do
         if i == s.controlled then
@@ -1811,10 +1824,21 @@ local function move_players(s, dt, input)
             end
         else
             -- Off-ball AI: role-assigned target (press/cover/mark/support/zone).
+            -- Positional roles have CALM: ease in on approach, plant inside the
+            -- deadband, and once standing, stay planted until the spot drifts
+            -- beyond the wake radius — no robotic shuffling on the spot.
             local target = targets[i] or p.anchor
             local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
-            local _, dir = ai.steer(p.pos, target, mv * dt)
-            local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(mv) or Vec2.new(0, 0)
+            local dist = p.pos:dist(target)
+            local standing = p.run_vel:length() < STAND_STILL_SPEED
+            local desired = Vec2.new(0, 0)
+            if urgent[i] or dist > (standing and TUNE.STAND_WAKE or STAND_DEADBAND) then
+                local _, dir = ai.steer(p.pos, target, mv * dt)
+                if dir.x ~= 0 or dir.y ~= 0 then
+                    local speed = urgent[i] and mv or mv * math.min(1, dist / ARRIVE_RADIUS)
+                    desired = dir:scale(speed)
+                end
+            end
             apply_locomotion(s, p, desired, dt)
         end
     end

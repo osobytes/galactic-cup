@@ -2387,6 +2387,87 @@ t.describe("match control follows the pass", function()
     end)
 end)
 
+t.describe("match positional calm", function()
+    -- A home defender in a positional (non-urgent) role, parked exactly on its
+    -- zone spot with a static loose ball (nobody may collect it): the target
+    -- geometry stays put, so any movement is shuffle, not repositioning.
+    local function calm_setup()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 60
+        s.ball = Vec2.new(480, 300)
+        s.ball_vel = Vec2.new(0, 0)
+        s.players[s.controlled].pos = Vec2.new(100, 60) -- human out of the way
+        local pos = {}
+        for i, pl in ipairs(s.players) do
+            pos[i] = pl.pos
+        end
+        local targets, urgent = match._offball_targets(s, pos)
+        local calm_idx
+        for i, p in ipairs(s.players) do
+            if
+                p.team == "home"
+                and not p.is_keeper
+                and i ~= s.controlled
+                and targets[i]
+                and not urgent[i]
+                and p.pos:dist(s.ball) > 150 -- well outside the ball magnet
+            then
+                calm_idx = i
+                break
+            end
+        end
+        s.players[calm_idx].pos = targets[calm_idx] -- already at the spot
+        s.players[calm_idx].run_vel = Vec2.new(0, 0)
+        return s, calm_idx
+    end
+
+    t.it("a player at their role spot stands still instead of shuffling", function()
+        local s, idx = calm_setup()
+        local start = s.players[idx].pos
+        for _ = 1, 45 do
+            match.step(s, 1 / 60, NO_INPUT)
+        end
+        t.is_true(s.players[idx].pos:dist(start) < 10, "no back-and-forth: they plant at the spot")
+    end)
+
+    t.it("they walk again once the spot drifts meaningfully away", function()
+        local s, idx = calm_setup()
+        -- Displace the player well beyond the wake radius from their spot.
+        s.players[idx].pos = s.players[idx].pos:add(Vec2.new(80, 0))
+        local start = s.players[idx].pos
+        for _ = 1, 45 do
+            match.step(s, 1 / 60, NO_INPUT)
+        end
+        t.is_true(s.players[idx].pos:dist(start) > 25, "far from the spot: they move to it")
+    end)
+
+    t.it("a loose-ball chaser is exempt from the calm (full urgency)", function()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 60
+        s.ball = Vec2.new(480, 300)
+        s.ball_vel = Vec2.new(0, 0)
+        local mate
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                mate = i
+                p.pos = Vec2.new(480, 220) -- 80px off: inside the magnet
+                p.run_vel = Vec2.new(0, 0)
+                break
+            end
+        end
+        s.players[s.controlled].pos = Vec2.new(100, 60)
+        for _ = 1, 60 do
+            match.step(s, 1 / 60, NO_INPUT)
+        end
+        t.is_true(
+            s.players[mate].pos:dist(s.ball) < 40,
+            "the chaser closes on the ball at full speed"
+        )
+    end)
+end)
+
 t.describe("match save grab-vs-parry odds", function()
     local function has_event(s, kind)
         for _, e in ipairs(s.events) do
