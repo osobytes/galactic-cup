@@ -8,6 +8,7 @@ local pitch = require("game.render.pitch")
 local bloom = require("game.render.bloom")
 local effects = require("game.render.effects")
 local view_state = require("game.render.view_state")
+local audio = require("game.audio")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -61,6 +62,8 @@ function Match:restart()
     self._space_held_prev = false
     view_state.reset()
     effects.reset()
+    audio.load()
+    audio.reset()
 end
 
 ---@param evt InputEvent
@@ -90,6 +93,8 @@ function Match:event(evt)
         self._dodge = true
     elseif evt.key == "b" then
         bloom.config.enabled = not bloom.config.enabled
+    elseif evt.key == "m" then
+        audio.toggle_mute()
     end
 end
 
@@ -156,6 +161,7 @@ function Match:update(dt)
     sim_match.step(self.state, dt, input)
     view_state.update(self.state.players, dt)
     effects.update(self.state, dt) -- juice layer: event bursts + ball trail
+    audio.update(self.state, dt) -- synthesized SFX from event queue
 end
 
 ---@param s MatchState
