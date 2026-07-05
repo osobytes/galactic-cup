@@ -2446,6 +2446,87 @@ t.describe("match jockey stance", function()
     end)
 end)
 
+t.describe("match.step pass-target preview", function()
+    -- Acceptance 1 & 3: pass_target is nil when not charging.
+    t.it("pass_target is nil when idle (not holding pass)", function()
+        local s = new_match()
+        match.step(s, 0.016, NO_INPUT)
+        t.eq(s.pass_target, nil, "pass_target is nil when idle")
+    end)
+
+    -- Acceptance 1: outfielder preview equals the actual receiver.
+    t.it("outfielder preview equals the actual receiver", function()
+        local s = new_match()
+        local passer = s.controlled
+        s.players[passer].pos = Vec2.new(300, 270)
+        s.players[passer].facing = Vec2.new(1, 0)
+        -- One teammate ahead; all others and all opponents parked well away.
+        local mate
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= passer then
+                if not mate then
+                    mate = i
+                    p.pos = Vec2.new(500, 270)
+                else
+                    p.pos = Vec2.new(100, 60 + i * 30)
+                end
+            elseif p.team == "away" then
+                p.pos = Vec2.new(900, 40 + i * 30)
+            end
+        end
+        s.owner = passer
+        s.ball = s.players[passer].pos:add(Vec2.new(18, 0))
+        -- Hold pass for several frames to accumulate charge and read the preview.
+        local recorded_target
+        for _ = 1, 10 do
+            match.step(s, 0.016, input({ pass_held = true }))
+            if s.pass_target then
+                recorded_target = s.pass_target
+            end
+        end
+        t.is_true(recorded_target ~= nil, "pass_target was set while charging")
+        -- Now fire the pass and verify the recorded target actually receives it.
+        match.step(s, 0.016, input({ pass = true }))
+        t.is_true(
+            s.players[recorded_target].receive_timer > 0,
+            "recorded preview == actual receiver"
+        )
+    end)
+
+    -- Acceptance 2: keeper preview equals the actual throw receiver.
+    t.it("keeper preview equals the actual throw receiver", function()
+        local s = new_match()
+        s.owner = 1
+        s.controlled = 1
+        s.players[1].pos = Vec2.new(40, 270)
+        s.players[1].facing = Vec2.new(1, 0)
+        s.players[1].hold_timer = 5
+        s.ball = Vec2.new(46, 270)
+        s.players[2].pos = Vec2.new(200, 270)
+        s.players[3].pos = Vec2.new(480, 270)
+        s.players[4].pos = Vec2.new(120, 60)
+        s.players[5].pos = Vec2.new(120, 480)
+        for i, p in ipairs(s.players) do
+            if p.team == "away" then
+                p.pos = Vec2.new(900, 40 + i * 40)
+            end
+        end
+        local recorded_target
+        for _ = 1, 10 do
+            match.step(s, 0.016, input({ pass_held = true, move = Vec2.new(1, 0) }))
+            if s.pass_target then
+                recorded_target = s.pass_target
+            end
+        end
+        t.is_true(recorded_target ~= nil, "keeper pass_target was set while charging")
+        match.step(s, 0.016, input({ pass = true, move = Vec2.new(1, 0) }))
+        t.is_true(
+            s.players[recorded_target].receive_timer > 0,
+            "keeper preview == actual throw receiver"
+        )
+    end)
+end)
+
 t.describe("match scenario: keeper retains possession under pressure", function()
     -- A scripted "real game" situation: the home keeper has gathered the ball with
     -- a striker pressing and two defenders available as outlets. Played out over 3

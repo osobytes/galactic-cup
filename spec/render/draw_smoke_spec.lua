@@ -69,6 +69,23 @@ t.describe("renderer smoke", function()
         t.is_true(ok, "pitch.draw error: " .. tostring(err))
     end)
 
+    t.it("pitch.draw renders the pass-target marker without error", function()
+        local ok, err = with_stub(function()
+            local s = match_sim.new({
+                home = teams.nebula,
+                away = teams.orion,
+                field = { w = 960, h = 540 },
+            })
+            -- Point at player index 2 (a home outfielder) as the preview target.
+            s.pass_target = 2
+            pitch.draw(s, { w = 1280, h = 720 }, {
+                home_color = teams.nebula.color,
+                away_color = teams.orion.color,
+            })
+        end)
+        t.is_true(ok, "pitch.draw with pass_target error: " .. tostring(err))
+    end)
+
     t.it("ui_draw.layout runs over a mixed layout", function()
         local ok, err = with_stub(function()
             ---@type Layout
