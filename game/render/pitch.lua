@@ -302,6 +302,8 @@ function pitch.draw(s, vp, opts)
                 holding = (it.idx == s.owner and p.is_keeper),
                 grab = (p.grab_timer > 0) and math.min(1, p.grab_timer / 0.25) or 0,
                 throw = (p.throw_timer > 0) and math.min(1, p.throw_timer / 0.25) or 0,
+                -- Wind-up back-swing: 0 = no windup, 1 = just committed.
+                windup = (p.windup_timer > 0) and (p.windup_timer / 0.15) or 0,
             })
         elseif not keeper_holds then
             -- Loose / dribbled ball. (A keeper-held ball is drawn in its hands by the
