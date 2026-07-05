@@ -51,15 +51,63 @@ t.describe("match screen contextual controls (tier 2)", function()
         t.is_true(not m._pass)
     end)
 
-    t.it("Space tackles only when not carrying", function()
+    t.it("Space hold = jockey, release = poke (off the ball)", function()
+        -- Drive polled inputs with a stubbed keyboard (same pattern as lob-latch test).
+        local saved = love.keyboard
+        local down = {}
+        love.keyboard = {
+            isDown = function(...)
+                for _, k in ipairs({ ... }) do
+                    if down[k] then
+                        return true
+                    end
+                end
+                return false
+            end,
+        }
+        -- Off the ball: holding Space produces jockey stance (jockey_timer > 0).
         local m = Match.new()
         m.state.owner = nil
-        m:event({ kind = "key", key = "space" })
-        t.is_true(m._dash, "Space is a tackle off the ball")
+        m.state.pickup_cd = 5 -- nobody picks the ball up during this test
+        local me = m.state.players[m.state.controlled]
+        down.space = true
+        m:update(1 / 60) -- hold one frame
+        t.is_true(me.jockey_timer > 0, "holding Space off the ball engages jockey stance")
+        -- _space_held_prev is set; release now → poke fires next update.
+        -- The poke manifests as tackle_timer > 0 on the controlled player.
+        me.tackle_cd = 0 -- ensure the poke isn't blocked by cooldown
+        me.slide_timer = 0
+        down.space = false
+        m:update(1 / 60) -- release
+        t.is_true(me.tackle_timer > 0, "releasing Space off the ball fires the poke")
+        love.keyboard = saved
+    end)
 
-        local m2 = Match.new()
-        m2:event({ kind = "key", key = "space" })
-        t.is_true(not m2._dash, "Space never tackles while carrying (it shoots via hold)")
+    t.it("Space never produces a poke while carrying (it charges the shot)", function()
+        local saved = love.keyboard
+        local down = {}
+        love.keyboard = {
+            isDown = function(...)
+                for _, k in ipairs({ ... }) do
+                    if down[k] then
+                        return true
+                    end
+                end
+                return false
+            end,
+        }
+        local m = Match.new() -- carrying at kickoff
+        down.space = true
+        m:update(1 / 60) -- hold while carrying
+        down.space = false
+        local me = m.state.players[m.state.controlled]
+        local tackle_before = me.tackle_timer
+        m:update(1 / 60) -- release while still carrying
+        t.is_true(
+            me.tackle_timer == tackle_before,
+            "Space release while carrying does not fire a poke"
+        )
+        love.keyboard = saved
     end)
 end)
 
