@@ -46,7 +46,12 @@ local function figure(bx, gy, r, color, v, opts)
     local bounce = run * math.abs(math.sin(ph)) * r * 0.16
     local breath = (1 - run) * math.sin(ph * 0.5 + bx) * r * 0.04
 
-    local cx = bx + lean * r * 0.5
+    -- Wind-up back-swing: lean the whole figure opposite the facing direction.
+    local wu = opts.windup or 0
+    local fx = opts.facing and opts.facing.x or 0
+    local windup_lean = -fx * wu * r * 0.6 -- leans back opposite facing
+
+    local cx = bx + lean * r * 0.5 + windup_lean
     local foot_y = gy
     local hip_y = gy - r * 1.35 - bounce - breath
     local sh_y = gy - r * 2.15 - bounce - breath
@@ -92,7 +97,6 @@ local function figure(bx, gy, r, color, v, opts)
     local hr = r * 0.62
     set(color, 1)
     love.graphics.circle("fill", cx, head_y, hr)
-    local fx = opts.facing and opts.facing.x or 0
     set(accent, 0.95)
     love.graphics.arc(
         "fill",
@@ -110,7 +114,7 @@ end
 ---@param r number   -- projected body radius (px)
 ---@param color number[]
 ---@param v PlayerView?  -- nil = idle fallback
----@param opts { facing: Vec2, is_keeper: boolean, controlled: boolean, dashing: boolean?, dive: number?, dive_dir: Vec2?, holding: boolean?, grab: number?, throw: number? }
+---@param opts { facing: Vec2, is_keeper: boolean, controlled: boolean, dashing: boolean?, dive: number?, dive_dir: Vec2?, holding: boolean?, grab: number?, throw: number?, windup: number? }
 function renderer.draw(sx, gy, r, color, v, opts)
     -- Ground shadow (kept here so it tracks the figure).
     love.graphics.setColor(0, 0, 0, 0.35)

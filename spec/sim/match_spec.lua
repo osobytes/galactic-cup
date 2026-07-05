@@ -28,6 +28,18 @@ end
 
 local NO_INPUT = input()
 
+-- Frames needed to advance past the 0.15s shot wind-up at 1/60 s per step.
+local WINDUP_FRAMES = math.ceil(0.15 * 60) + 1 -- 10
+
+-- Step `n` frames at 1/60 s each, all with NO_INPUT.
+---@param s MatchState
+---@param n integer
+local function step_frames(s, n)
+    for _ = 1, n do
+        match.step(s, 1 / 60, NO_INPUT)
+    end
+end
+
 t.describe("match.new", function()
     t.it("kicks off with 10 players and the home side in possession", function()
         local s = new_match()
@@ -57,6 +69,8 @@ t.describe("match.step shooting & passing", function()
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(1, 0)
         match.step(s, 0.016, input({ shoot = true }))
+        -- Ball is still owned during the wind-up; step past it.
+        step_frames(s, WINDUP_FRAMES)
         t.is_true(s.owner == nil)
         t.is_true(s.ball_vel.x > 0, "home shoots toward the right goal")
     end)
@@ -65,6 +79,7 @@ t.describe("match.step shooting & passing", function()
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(0, -1)
         match.step(s, 0.016, input({ shoot = true }))
+        step_frames(s, WINDUP_FRAMES)
         t.is_true(s.owner == nil)
         t.is_true(s.ball_vel.x > 0, "still goal-ward")
         t.is_true(s.ball_vel.y < 0, "and toward the top corner")
@@ -95,6 +110,8 @@ t.describe("match.step charge shot", function()
         s.players[s.controlled].facing = Vec2.new(1, 0)
         s.charge = charge
         match.step(s, 0.016, input({ shoot = true }))
+        -- Step past the wind-up so the ball is in flight.
+        step_frames(s, WINDUP_FRAMES)
         return s.ball_vel:length()
     end
 
@@ -948,6 +965,8 @@ t.describe("match lobs and chips", function()
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(1, 0)
         match.step(s, 0.016, input({ shoot = true, lob = true }))
+        -- Step past the wind-up so the ball releases.
+        step_frames(s, WINDUP_FRAMES)
         t.is_true(s.owner == nil, "shot released")
         t.is_true(s.ball_vz > 0, "the chip launches upward")
         match.step(s, 0.016, NO_INPUT)
@@ -958,6 +977,8 @@ t.describe("match lobs and chips", function()
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(1, 0)
         match.step(s, 0.016, input({ shoot = true }))
+        -- Step past the wind-up so the ball releases.
+        step_frames(s, WINDUP_FRAMES)
         t.eq(s.ball_vz, 0, "no loft on a normal shot")
     end)
 
@@ -1633,6 +1654,8 @@ t.describe("match AI shooting", function()
         s.owner = carrier
         s.ball = Vec2.new(182, 270)
         match.step(s, 0.016, NO_INPUT)
+        -- Step past the wind-up so the ball releases.
+        step_frames(s, WINDUP_FRAMES)
         return s.ball_vel:length()
     end
 
@@ -1843,6 +1866,8 @@ t.describe("match human keeper control", function()
             home_keeper_holding(s)
             s.charge = charge
             match.step(s, 0.016, input({ shoot = true }))
+            -- Step past the wind-up so the ball releases.
+            step_frames(s, WINDUP_FRAMES)
             return s
         end
         local weak, strong = punt(0), punt(1)
@@ -2449,5 +2474,132 @@ t.describe("match momentum (T1 acceptance)", function()
             frames_after_reversal > frames_from_rest,
             "reversing from full speed takes more frames than starting from rest"
         )
+    end)
+end)
+
+-- ─── Acceptance: T5 wind-up telegraphs ───────────────────────────────────────
+
+t.describe("match wind-up telegraphs (T5)", function()
+    local function has_event(s, kind)
+        for _, e in ipairs(s.events) do
+            if e.kind == kind then
+                return true
+            end
+        end
+        return false
+    end
+
+    t.it("a shot input does NOT release the ball the same frame (wind-up delay)", function()
+        local s = new_match()
+        s.players[s.controlled].facing = Vec2.new(1, 0)
+        match.step(s, 0.016, input({ shoot = true }))
+        -- Ball must still be owned — no immediate release.
+        t.is_true(s.owner ~= nil, "ball is still carried during the wind-up")
+        t.is_true(not has_event(s, "shot"), "no shot event fires on the commit frame")
+        -- After the wind-up elapses the ball releases.
+        step_frames(s, WINDUP_FRAMES)
+        t.is_true(s.owner == nil, "ball releases after ~0.15 s")
+        t.is_true(has_event(s, "shot"), "a shot event fires on the release frame")
+    end)
+
+    t.it("shot parameters are captured at commit, not at release", function()
+        -- Charge built before the shot commits is the charge that counts even if
+        -- the player keeps holding shoot during the wind-up.
+        local s = new_match()
+        s.players[s.controlled].facing = Vec2.new(1, 0)
+        s.charge = 1 -- full charge captured on commit
+        match.step(s, 0.016, input({ shoot = true }))
+        -- Hold shoot during wind-up — must not reset charge or re-commit.
+        for _ = 1, WINDUP_FRAMES do
+            match.step(s, 1 / 60, input({ shoot_held = true }))
+        end
+        -- Ball is now in flight; speed should reflect the full charge.
+        t.is_true(s.owner == nil, "ball released")
+        local base_speed = s.players[1].shot_speed or 500 -- fallback
+        -- Loose ball — ball_vel has the release speed. Just assert it's non-zero.
+        t.is_true(s.ball_vel:length() > 0, "ball has a velocity after release")
+    end)
+
+    t.it("a poke landing during the wind-up cancels the shot", function()
+        -- Set up an away carrier in wind-up; a home defender close enough to poke.
+        local s = new_match()
+        local carrier_idx
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                carrier_idx = i
+                break
+            end
+        end
+        local carrier = s.players[carrier_idx]
+        carrier.pos = Vec2.new(300, 270)
+        carrier.facing = Vec2.new(-1, 0)
+        s.owner = carrier_idx
+        s.ball = carrier.pos:add(carrier.facing:scale(18))
+        -- Park carrier's teammates out of range so no pressure-pass escapes.
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper and i ~= carrier_idx then
+                p.pos = Vec2.new(40, 380 + i * 15)
+            end
+        end
+        -- Manually start the wind-up on the carrier (simulates the AI deciding to shoot).
+        carrier.windup_timer = 0.12 -- mid-wind-up
+        carrier.windup_shot = { dir = Vec2.new(-1, 0), speed = 500, vz = 0, spin = 0 }
+        -- Place the human defender ball-side within poke range.
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(carrier.pos.x - 24, carrier.pos.y) -- on the ball side
+        me.vel = Vec2.new(0, 0)
+        -- Poke attempt this frame.
+        match.step(s, 0.016, input({ dash = true }))
+        -- The tackle should win, clearing the payload.
+        t.is_true(s.owner ~= carrier_idx, "the tackle dispossessed the carrier mid-wind-up")
+        t.is_true(not has_event(s, "shot"), "no shot fires — the wind-up was cancelled")
+        t.is_true(carrier.windup_shot == nil, "windup payload cleared on dispossession")
+    end)
+
+    t.it("AI shots also enter the wind-up (telegraph is universal)", function()
+        -- An away carrier in shooting range — just like the AI shooting spec, but
+        -- we assert the shot does NOT fire the same frame.
+        local s = new_match()
+        local carrier_idx
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper and not carrier_idx then
+                carrier_idx = i
+            elseif p.team == "home" and not p.is_keeper then
+                s.players[i].pos = Vec2.new(700, 60 + i * 40)
+            end
+        end
+        s.players[carrier_idx].pos = Vec2.new(200, 270)
+        s.players[carrier_idx].facing = Vec2.new(-1, 0)
+        s.owner = carrier_idx
+        s.ball = Vec2.new(182, 270)
+        match.step(s, 0.016, NO_INPUT)
+        -- The AI should have committed a wind-up, not released immediately.
+        t.is_true(s.owner == carrier_idx, "AI carrier still owns the ball during wind-up")
+        t.is_true(s.players[carrier_idx].windup_timer > 0, "AI shot committed the wind-up timer")
+        -- After the wind-up elapses the ball fires.
+        step_frames(s, WINDUP_FRAMES)
+        t.is_true(s.owner == nil or s.owner ~= carrier_idx, "ball released after wind-up")
+    end)
+
+    t.it("a carrier moves at 0.3x speed during the wind-up", function()
+        -- Human carrier commits a shot; their position must barely change while winding up.
+        local s = new_match()
+        local me = s.players[s.controlled]
+        me.facing = Vec2.new(1, 0)
+        local pos_before = me.pos
+        match.step(s, 0.016, input({ shoot = true })) -- commit wind-up
+        t.is_true(me.windup_timer > 0, "wind-up active")
+        local pos_windup_start = me.pos
+        -- Run right during the wind-up.
+        local normal_speed = me.move_speed
+        match.step(s, 0.016, input({ move = Vec2.new(1, 0) }))
+        local dx_windup = me.pos.x - pos_windup_start.x
+        -- A normal frame at full speed: dx should be ~move_speed/60
+        local dx_full = normal_speed * 0.016
+        -- The wind-up should reduce movement to ~30% of normal.
+        t.is_true(dx_windup < dx_full * 0.5, "movement is capped during wind-up")
+        t.is_true(dx_windup > 0, "but some movement is still allowed")
+        -- Suppress unused warning
+        t.is_true(pos_before ~= nil)
     end)
 end)

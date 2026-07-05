@@ -188,6 +188,9 @@ local MOVE_DECEL = 1500 -- px/s^2 when the desired velocity is zero (stopping)
 -- so a stationary player can still aim without snapping to zero.
 local RUN_VEL_FACE_MIN = 20
 
+local SHOT_WINDUP = 0.15 -- wind-up before a shot/punt releases (seconds)
+local WINDUP_MOVE = 0.3 -- movement multiplier during the wind-up plant phase
+
 local CHARGE_RATE = 1.5 -- charge per second while holding shoot (caps at 1)
 local CHARGE_POWER = 0.9 -- full charge adds this fraction to shot speed
 local CURVE_MAX = 520 -- lateral acceleration of a full-charge curved shot
@@ -241,6 +244,8 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field save_vx number  -- shot x-velocity at commit (sign flip = deflected, dive whiffs)
 ---@field settle_timer number  -- AI first-touch control window (no pressured pass until settled)
 ---@field header_cd number  -- cooldown between aerial (header/volley) attempts
+---@field windup_timer number  -- seconds until a pending shot/punt releases (0 = none)
+---@field windup_shot { dir: Vec2, speed: number, vz: number, spin: number }?  -- payload captured at commit
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
 
@@ -382,6 +387,8 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             save_vx = 0,
             settle_timer = 0,
             header_cd = 0,
+            windup_timer = 0,
+            windup_shot = nil,
         }
     end
     return list
@@ -443,6 +450,8 @@ local function place_kickoff(s, kicking)
         p.save_vx = 0
         p.settle_timer = 0
         p.header_cd = 0
+        p.windup_timer = 0
+        p.windup_shot = nil
     end
     -- Give the kicking team the ball at the centre spot.
     local kicker
@@ -1098,6 +1107,9 @@ local function attempt_steals(s)
             and p.pos:dist(s.ball) <= KEEPER_SMOTHER
         then
             s.events[#s.events + 1] = { kind = "claim", x = s.ball.x, y = s.ball.y, player = p.id }
+            -- Cancel any pending wind-up: the smother beats the shot.
+            owner.windup_timer = 0
+            owner.windup_shot = nil
             s.owner = i
             s.ball_vel = Vec2.new(0, 0)
             s.ball_spin = 0
@@ -1145,6 +1157,9 @@ local function attempt_steals(s)
                 end
                 s.events[#s.events + 1] =
                     { kind = "tackle", x = owner.pos.x, y = owner.pos.y, player = p.id }
+                -- Cancel any pending wind-up on the carrier: the tackle beats the shot.
+                owner.windup_timer = 0
+                owner.windup_shot = nil
                 s.owner = nil
                 s.ball_vel = dir:normalized():scale(TACKLE_POP_SPEED)
                 s.pickup_cd = 0.12
@@ -1574,6 +1589,10 @@ local function move_players(s, dt, input)
                 if p.sprinting then
                     mv = mv * SPRINT_MULT
                 end
+                -- Plant during wind-up: striker slows to 30% while winding up.
+                if p.windup_timer > 0 then
+                    mv = mv * WINDUP_MOVE
+                end
                 -- Stationary-aiming exception: when input is held but the player
                 -- hasn't built speed yet, facing should follow input, not run_vel.
                 -- apply_locomotion handles facing via run_vel; for the input case
@@ -1603,6 +1622,10 @@ local function move_players(s, dt, input)
                 local goal = (p.team == "home") and s.goal_away or s.goal_home
                 local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
                 local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
+                -- Plant during wind-up: AI striker slows to 30% while winding up.
+                if p.windup_timer > 0 then
+                    mv = mv * WINDUP_MOVE
+                end
                 -- Derive desired direction from ai.steer (which returns a clamped
                 -- position and a unit direction), then feed apply_locomotion.
                 local _, dir = ai.steer(p.pos, gc, mv * dt)
@@ -1793,7 +1816,7 @@ local function human_keeper_actions(s, dt, input, owner)
         s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
         fire_pass = fire_pass or s.pass_charge >= 1
     end
-    if fire_shot then
+    if fire_shot and owner.windup_timer == 0 then
         local dist = PUNT_MIN + s.charge * (PUNT_MAX - PUNT_MIN)
         local dir = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
@@ -1805,14 +1828,11 @@ local function human_keeper_actions(s, dt, input, owner)
             math.max(40, math.min(s.field.w - 40, tgt.x)),
             math.max(40, math.min(s.field.h - 40, tgt.y))
         )
-        s.events[#s.events + 1] = { kind = "shot", x = s.ball.x, y = s.ball.y, player = owner.id }
-        s.owner = nil
-        s.ball_z = 0
-        s.ball_spin = 0
-        s.pickup_cd = RELEASE_CD
-        s.ball_vel, s.ball_vz = lob_launch(owner.pos, tgt, 0.5, PUNT_CLEAR_H)
-        owner.throw_timer = KEEPER_THROW_POSE
+        -- Parameters captured at commit; ball releases after the wind-up.
+        local vel, vz = lob_launch(owner.pos, tgt, 0.5, PUNT_CLEAR_H)
         s.charge = 0
+        owner.windup_timer = SHOT_WINDUP
+        owner.windup_shot = { dir = vel:normalized(), speed = vel:length(), vz = vz, spin = 0 }
     elseif fire_pass then
         local range = PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN)
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
@@ -1820,7 +1840,7 @@ local function human_keeper_actions(s, dt, input, owner)
         keeper_throw(s, s.owner, range, aim)
         s.pass_charge = 0
     end
-    if s.owner and owner.hold_timer <= 0 then
+    if s.owner and owner.hold_timer <= 0 and owner.windup_timer == 0 then
         keeper_distribute(s, s.owner)
     end
 end
@@ -1959,12 +1979,137 @@ local function resolve_pending_save(s, dt)
     return nil
 end
 
+-- Human outfield controlled shot commit: build charge and, on fire, store a
+-- wind-up payload (parameters captured now, released after SHOT_WINDUP seconds).
+-- Pass/charge logic lives here too so it can be called as a single upvalue from
+-- update_ball (splitting the function keeps it under LuaJIT's 60-upvalue cap).
+---@param s MatchState
+---@param dt number
+---@param input MatchInput
+---@param owner MatchPlayer
+local function human_outfield_actions(s, dt, input, owner)
+    local fire_shot, fire_pass = input.shoot, input.pass
+    if input.shoot_held then
+        s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
+        fire_shot = fire_shot or s.charge >= 1
+    elseif input.pass_held then
+        s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
+        fire_pass = fire_pass or s.pass_charge >= 1
+    end
+    if fire_shot then
+        -- Aim at the goal; vertical of `facing` picks the corner. Charge
+        -- (held shoot) scales power; lateral input bends the shot.
+        -- Parameters are CAPTURED NOW and released after the wind-up.
+        local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
+        local speed = owner.shot_speed * (1 + s.charge * CHARGE_POWER)
+        local target = shot_target(s, owner, vbias)
+        local vz = 0
+        if input.lob then
+            -- Chip: same aim, but lofted so it crosses the line over the
+            -- keeper's reach yet under the bar. Pick vz from time-to-line.
+            local tline = math.max(0.05, owner.pos:dist(target) / speed)
+            vz = (CHIP_LINE_Z + 0.5 * GRAVITY * tline * tline) / tline
+        end
+        local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
+        local spin = (vz == 0) and side * s.charge * CURVE_MAX or 0
+        s.charge = 0
+        owner.windup_timer = SHOT_WINDUP
+        owner.windup_shot = { dir = target:sub(owner.pos), speed = speed, vz = vz, spin = spin }
+    elseif fire_pass then
+        local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
+        try_pass(s, s.owner, input.lob, aim)
+        s.pass_charge = 0
+    elseif not (input.shoot_held or input.pass_held) then
+        s.charge = 0
+    end
+end
+
+-- AI outfield owner decision: shoot (with wind-up), cross, or pass out of pressure.
+-- Extracted to keep update_ball under the LuaJIT 60-upvalue cap.
+---@param s MatchState
+---@param owner_idx integer
+---@param owner MatchPlayer
+local function ai_outfield_decision(s, owner_idx, owner)
+    local g = attack_goal(s, owner.team)
+    local gc = Vec2.new((owner.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
+    if owner.pos:dist(gc) < AI_SHOOT_RANGE then
+        -- Shoot to the corner away from the defending keeper, with power
+        -- scaled by the space the striker has been given (see constants).
+        local keeper = team_keeper(s, owner.team == "home" and "away" or "home")
+        local vbias = 0.85
+        if keeper then
+            vbias = (keeper.pos.y < gc.y) and 0.85 or -0.85
+        end
+        local space = math.huge
+        for _, q in ipairs(s.players) do
+            if q.team ~= owner.team and not q.is_keeper then
+                space = math.min(space, q.pos:dist(owner.pos))
+            end
+        end
+        -- Closed down with no power available: look for the square ball
+        -- to a better-placed teammate first; only shoot if nobody's on.
+        local passed = false
+        if space < AI_CHARGE_MIN_SPACE and owner.settle_timer <= 0 then
+            passed = ai_try_pass(s, owner_idx)
+        end
+        if not passed then
+            local frac =
+                math.max(0, math.min(1, (space - AI_CHARGE_MIN_SPACE) / AI_CHARGE_SPACE_RANGE))
+            local speed = owner.shot_speed * (1 + frac * CHARGE_POWER)
+            local sdir = shot_target(s, owner, vbias):sub(owner.pos)
+            owner.windup_timer = SHOT_WINDUP
+            owner.windup_shot = { dir = sdir, speed = speed, vz = 0, spin = 0 }
+        end
+    else
+        -- From wide in the attacking third, swing a CROSS to a teammate
+        -- in the box (who can meet it with a header).
+        local crossed = false
+        local third = (owner.team == "home") and (owner.pos.x > s.field.w * 0.62)
+            or (owner.team == "away" and owner.pos.x < s.field.w * 0.38)
+        local wide = math.abs(owner.pos.y - s.field.h / 2) > 130
+        if third and wide and owner.settle_timer <= 0 then
+            crossed = ai_try_cross(s, owner_idx)
+        end
+        if not crossed then
+            -- Out of range: pass out of pressure rather than dribble
+            -- into a challenge. If nobody is open, keep carrying.
+            local pressure = math.huge
+            for _, q in ipairs(s.players) do
+                if q.team ~= owner.team and not q.is_keeper then
+                    pressure = math.min(pressure, q.pos:dist(owner.pos))
+                end
+            end
+            if pressure <= AI_PASS_PRESSURE and owner.settle_timer <= 0 then
+                ai_try_pass(s, owner_idx)
+            end
+        end
+    end
+end
+
 ---@param s MatchState
 local function update_ball(s, dt, input)
     -- Only the controlled carrier accumulates charge; drop it otherwise.
     if not (s.owner and s.owner == s.controlled) then
         s.charge = 0
         s.pass_charge = 0
+    end
+
+    -- Wind-up resolution: a player whose timer just hit 0 and still owns the ball
+    -- fires the stored shot payload. If they lost possession during the wind-up
+    -- (tackle, smother) the payload was already cleared in attempt_steals.
+    if s.owner then
+        local wowner = s.players[s.owner]
+        if wowner.windup_timer == 0 and wowner.windup_shot then
+            local ws = assert(wowner.windup_shot)
+            wowner.windup_shot = nil
+            release_shot(s, wowner, ws.dir, ws.speed, ws.vz)
+            s.ball_spin = ws.spin
+            -- Keeper punt gets a throw pose; outfield shot doesn't (handled below).
+            if wowner.is_keeper then
+                wowner.throw_timer = KEEPER_THROW_POSE
+            end
+            return
+        end
     end
 
     if s.owner then
@@ -1995,94 +2140,15 @@ local function update_ball(s, dt, input)
         elseif s.owner == s.controlled then
             -- A full meter LETS FLY on its own (predictable, like the meter
             -- promises); release fires early at the current charge.
-            local fire_shot, fire_pass = input.shoot, input.pass
-            if input.shoot_held then
-                s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
-                fire_shot = fire_shot or s.charge >= 1
-            elseif input.pass_held then
-                s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
-                fire_pass = fire_pass or s.pass_charge >= 1
+            -- During wind-up: inputs are locked out (shot is committed, params
+            -- already captured), so skip all action logic this frame.
+            if owner.windup_timer == 0 then
+                human_outfield_actions(s, dt, input, owner)
             end
-            if fire_shot then
-                -- Aim at the goal; vertical of `facing` picks the corner. Charge
-                -- (held shoot) scales power; lateral input bends the shot.
-                local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
-                local speed = owner.shot_speed * (1 + s.charge * CHARGE_POWER)
-                local target = shot_target(s, owner, vbias)
-                local vz = 0
-                if input.lob then
-                    -- Chip: same aim, but lofted so it crosses the line over the
-                    -- keeper's reach yet under the bar. Pick vz from time-to-line.
-                    local tline = math.max(0.05, owner.pos:dist(target) / speed)
-                    vz = (CHIP_LINE_Z + 0.5 * GRAVITY * tline * tline) / tline
-                end
-                release_shot(s, owner, target:sub(owner.pos), speed, vz)
-                local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
-                s.ball_spin = (vz == 0) and side * s.charge * CURVE_MAX or 0
-                s.charge = 0
-            elseif fire_pass then
-                local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
-                    or nil
-                try_pass(s, s.owner, input.lob, aim)
-                s.pass_charge = 0
-            elseif not (input.shoot_held or input.pass_held) then
-                s.charge = 0
-            end
-        else
-            local g = attack_goal(s, owner.team)
-            local gc = Vec2.new((owner.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
-            if owner.pos:dist(gc) < AI_SHOOT_RANGE then
-                -- Shoot to the corner away from the defending keeper, with power
-                -- scaled by the space the striker has been given (see constants).
-                local keeper = team_keeper(s, owner.team == "home" and "away" or "home")
-                local vbias = 0.85
-                if keeper then
-                    vbias = (keeper.pos.y < gc.y) and 0.85 or -0.85
-                end
-                local space = math.huge
-                for _, q in ipairs(s.players) do
-                    if q.team ~= owner.team and not q.is_keeper then
-                        space = math.min(space, q.pos:dist(owner.pos))
-                    end
-                end
-                -- Closed down with no power available: look for the square ball
-                -- to a better-placed teammate first; only shoot if nobody's on.
-                local passed = false
-                if space < AI_CHARGE_MIN_SPACE and owner.settle_timer <= 0 then
-                    passed = ai_try_pass(s, s.owner)
-                end
-                if not passed then
-                    local frac = math.max(
-                        0,
-                        math.min(1, (space - AI_CHARGE_MIN_SPACE) / AI_CHARGE_SPACE_RANGE)
-                    )
-                    local speed = owner.shot_speed * (1 + frac * CHARGE_POWER)
-                    release_shot(s, owner, shot_target(s, owner, vbias):sub(owner.pos), speed)
-                end
-            else
-                -- From wide in the attacking third, swing a CROSS to a teammate
-                -- in the box (who can meet it with a header).
-                local crossed = false
-                local third = (owner.team == "home") and (owner.pos.x > s.field.w * 0.62)
-                    or (owner.team == "away" and owner.pos.x < s.field.w * 0.38)
-                local wide = math.abs(owner.pos.y - s.field.h / 2) > 130
-                if third and wide and owner.settle_timer <= 0 then
-                    crossed = ai_try_cross(s, s.owner)
-                end
-                if not crossed then
-                    -- Out of range: pass out of pressure rather than dribble
-                    -- into a challenge. If nobody is open, keep carrying.
-                    local pressure = math.huge
-                    for _, q in ipairs(s.players) do
-                        if q.team ~= owner.team and not q.is_keeper then
-                            pressure = math.min(pressure, q.pos:dist(owner.pos))
-                        end
-                    end
-                    if pressure <= AI_PASS_PRESSURE and owner.settle_timer <= 0 then
-                        ai_try_pass(s, s.owner)
-                    end
-                end
-            end
+        elseif owner.windup_timer == 0 then
+            -- AI owner: decide what to do (shoot/cross/pass/carry).
+            -- Guarded: while winding up, the shot is already committed; no re-decisions.
+            ai_outfield_decision(s, s.owner, owner)
         end
         return
     end
@@ -2451,6 +2517,9 @@ function match.step(s, dt, input)
         end
         if p.header_cd > 0 then
             p.header_cd = math.max(0, p.header_cd - dt)
+        end
+        if p.windup_timer > 0 then
+            p.windup_timer = math.max(0, p.windup_timer - dt)
         end
     end
 
