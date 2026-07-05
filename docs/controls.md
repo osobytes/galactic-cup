@@ -18,8 +18,11 @@ Two contextual action keys + sprint. The same key does the natural thing for the
 
 - **Shooting** (Space with the ball) aims at the goal; hold up/down to place it into a corner.
   Hold Space to **charge** a harder shot; holding left/right at release **curves** it.
-- **Tackling** (Space without the ball) has one rule: normally it's a quick **standing poke**;
-  while **sprinting** it's a committed **slide tackle** whose speed scales with your pace.
+- **Tackling** (Space without the ball) has two modes: **tap** (release quickly) fires a
+  standing poke; **hold** enters **jockey stance** — you slow to 75 % and your facing locks
+  toward the ball, shadowing the carrier. Releasing Space from jockey fires the poke with
+  a **+6 bonus reach** as the reward for containing first. While **sprinting** instead of
+  jockeying, the poke becomes a committed **slide tackle** whose speed scales with your pace.
   Slides reach further and knock the carrier off balance, but lock you in with a longer
   recovery — *sprint + Space* is the big play, and it can miss.
 - **Sprint** (hold Shift) burns a **stamina meter** (shown above the help text when not full);

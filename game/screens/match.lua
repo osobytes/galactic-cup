@@ -27,6 +27,7 @@ local FIELD_H = 540
 ---@field _switch boolean
 ---@field _dash boolean
 ---@field _dodge boolean
+---@field _space_held_prev boolean  -- tracks Space held off the ball for jockey stance
 local Match = {}
 Match.__index = Match
 
@@ -57,6 +58,7 @@ function Match:restart()
     self._shoot_held_prev = false
     self._pass_held_prev = false
     self._lob_latch = false
+    self._space_held_prev = false
     view_state.reset()
     effects.reset()
 end
@@ -74,14 +76,11 @@ function Match:event(evt)
         return
     end
     -- Contextual actions: the same key means the natural thing for the moment.
-    -- Space = shoot with the ball (polled: hold to charge) / tackle without it.
+    -- Space = shoot with the ball (polled: hold to charge) / jockey off the ball
+    --   (hold to contain; release fires the poke — mirroring shoot's hold/release).
     -- K = pass with the ball / switch player without it.
     local carrying = self.state.owner == self.state.controlled
-    if evt.key == "space" then
-        if not carrying then
-            self._dash = true
-        end
-    elseif evt.key == "k" then
+    if evt.key == "k" then
         -- Passing is polled while carrying (hold to charge the range, release
         -- to play it); off the ball K switches player on the press.
         if not carrying then
@@ -114,12 +113,17 @@ end
 
 ---@param dt number
 function Match:update(dt)
-    -- Space only reads as "shoot" while carrying; defending, it's the tackle
-    -- edge handled in event(). Winning the ball with Space already down starts
-    -- a charge — release fires, a natural first-time finish.
+    -- Space reads as "shoot" while carrying (hold to charge, release to fire);
+    -- off the ball it is "jockey" while held and fires the poke on release
+    -- — mirroring the on-ball hold/release pattern so muscle memory transfers.
     local carrying = self.state.owner == self.state.controlled
     local held = carrying and love.keyboard.isDown("space")
+    local space_down_offball = (not carrying) and love.keyboard.isDown("space")
     local k_held = carrying and love.keyboard.isDown("k")
+    -- Jockey release: Space was held last frame off the ball and is now up.
+    if self._space_held_prev and not space_down_offball and not carrying then
+        self._dash = true
+    end
     -- L is a modifier, and fingers naturally lift it a frame before the action
     -- key on release. LATCH it across the hold so "L + K/Space" always lofts,
     -- even when L comes up first.
@@ -143,9 +147,11 @@ function Match:update(dt)
         dodge = self._dodge,
         lob = lob,
         sprint = love.keyboard.isDown("lshift", "rshift"),
+        jockey = space_down_offball, -- hold Space off the ball: slow shadow stance
     }
     self._shoot_held_prev = held
     self._pass_held_prev = k_held
+    self._space_held_prev = space_down_offball
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     sim_match.step(self.state, dt, input)
     view_state.update(self.state.players, dt)

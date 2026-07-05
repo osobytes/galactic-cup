@@ -23,6 +23,7 @@ local function input(o)
         dodge = o.dodge or false,
         lob = o.lob or false,
         sprint = o.sprint or false,
+        jockey = o.jockey or false,
     }
 end
 
@@ -2312,6 +2313,111 @@ t.describe("match sprint", function()
             m.sprint_meter = 0
         end)
         t.near(drained, walked, 1e-6, "no sprint speed from an empty tank")
+    end)
+end)
+
+t.describe("match jockey stance", function()
+    -- Shared setup: controlled player off the ball in open space.
+    local function jockey_setup()
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 60 -- nobody collects during the test
+        s.ball = Vec2.new(480, 270) -- ball at midfield
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(400, 270)
+        me.tackle_cd = 0
+        me.stun_timer = 0
+        return s, me
+    end
+
+    -- Acceptance 1: displacement over 30 frames is ~0.75x the plain-run displacement.
+    t.it("jockeying slows the defender to ~0.75x and faces toward the ball", function()
+        local function run_frames(with_jockey)
+            local s, me = jockey_setup()
+            -- Park every other player far from the run corridor so collisions
+            -- cannot interfere with the controlled player's straight-line run.
+            local slot = 0
+            for i, p in ipairs(s.players) do
+                if i ~= s.controlled then
+                    p.pos = Vec2.new(60 + slot * 50, 40)
+                    slot = slot + 1
+                end
+            end
+            local start = me.pos
+            for _ = 1, 30 do
+                match.step(s, 1 / 60, input({ move = Vec2.new(1, 0), jockey = with_jockey }))
+            end
+            return me.pos:dist(start), me
+        end
+        local plain_dist = run_frames(false)
+        local jockey_dist, me = run_frames(true)
+        -- Displacement should be close to 75% of the plain run (within 10% tolerance).
+        t.is_true(
+            jockey_dist >= plain_dist * 0.65 and jockey_dist <= plain_dist * 0.85,
+            ("jockey displacement %.1f should be ~0.75x plain %.1f"):format(jockey_dist, plain_dist)
+        )
+        -- Facing should be toward the ball (roughly +x from pos 400 to ball 480).
+        t.is_true(me.facing.x > 0, "facing locked toward the ball")
+    end)
+
+    -- Acceptance 2: poke released from jockey wins from STAND_REACH + 6 (40px).
+    -- A plain poke at this range misses; a jockey poke connects.
+    t.it("a poke from jockey stance gains bonus reach", function()
+        -- STAND_REACH = 34; STAND_REACH + JOCKEY_REACH_BONUS = 40.
+        -- The carrier faces -x and dribbles the ball to its left (at -18px offset).
+        -- The human defender is placed at 40px from the ball on the BALL SIDE
+        -- (to the left of the carrier) — beyond STAND_REACH=34 but within
+        -- STAND_REACH+6=40. The human is also more than STEAL_DIST=26px from
+        -- the carrier's body so the body-contact shortcut doesn't apply.
+        --
+        --   defender @ 422          ball @ 462     carrier @ 480
+        --      [me] <---40px-------> [ball] <--18px--> [c]
+        --
+        local function poke_at_40(with_jockey)
+            local s = new_match()
+            local away_idx
+            for i, p in ipairs(s.players) do
+                if p.team == "away" and not p.is_keeper then
+                    away_idx = i
+                    break
+                end
+            end
+            -- Park ALL non-controlled home outfielders far from the challenge zone
+            -- so no AI poke interferes with the test.
+            for i, p in ipairs(s.players) do
+                if p.team == "home" and not p.is_keeper and i ~= s.controlled then
+                    p.pos = Vec2.new(100, 40 + i * 25)
+                    p.dash_cd = 1 -- cooldown so they can't challenge
+                end
+                -- Park away teammates out of pressure-pass range.
+                if p.team == "away" and not p.is_keeper and i ~= away_idx then
+                    p.pos = Vec2.new(40, 380 + i * 15)
+                end
+            end
+            local c = s.players[away_idx]
+            c.pos = Vec2.new(480, 270)
+            c.facing = Vec2.new(-1, 0)
+            s.owner = away_idx
+            s.ball = c.pos:add(c.facing:scale(18)) -- ball at 462, 270
+            -- Human defender 40px left of the ball, on the ball side: 422, 270.
+            -- Distance to carrier body (480): 58px > STEAL_DIST 26, so no shortcut.
+            local me = s.players[s.controlled]
+            me.pos = Vec2.new(422, 270) -- 40px from ball at 462, on its left
+            me.vel = Vec2.new(0, 0)
+            -- Prime jockey_timer so the bonus is active at poke time.
+            if with_jockey then
+                me.jockey_timer = 0.2
+            else
+                me.jockey_timer = 0
+            end
+            me.tackle_cd = 0
+            me.stun_timer = 0
+            -- Fire the poke toward the ball (dash + move right toward carrier).
+            match.step(s, 0.016, input({ dash = true, move = Vec2.new(1, 0) }))
+            return s.owner ~= away_idx
+        end
+        t.is_true(not poke_at_40(false), "plain poke misses at 40px (> STAND_REACH 34)")
+        t.is_true(poke_at_40(true), "jockey poke wins at 40px (STAND_REACH + 6)")
     end)
 end)
 

@@ -96,6 +96,12 @@ local STAND_CD = 0.4 -- recovery after a standing tackle
 local STUN_SLOW = 0.4 -- movement multiplier while stunned
 local STUN_TIME = 0.5 -- seconds a player is knocked off balance by a slide hit
 
+-- Jockey stance: hold Space off the ball to shadow the carrier at reduced speed, facing
+-- the ball (or loose ball). Releasing Space from jockey fires the poke with bonus reach.
+local JOCKEY_SLOW = 0.75 -- speed multiplier while in jockey stance
+local JOCKEY_REACH_BONUS = 6 -- extra poke reach when jockey_timer > 0 at tackle time
+local JOCKEY_HOLD = 0.2 -- seconds jockey_timer is set to each held frame (decays)
+
 -- Ball Z-axis (height). The ball keeps a 2D ground position (ball/ball_vel) plus a
 -- scalar height; height gates collection/goals so lobs fly over heads.
 local GRAVITY = 900 -- downward accel on ball_vz (px/s^2)
@@ -230,6 +236,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field save_vx number  -- shot x-velocity at commit (sign flip = deflected, dive whiffs)
 ---@field settle_timer number  -- AI first-touch control window (no pressured pass until settled)
 ---@field header_cd number  -- cooldown between aerial (header/volley) attempts
+---@field jockey_timer number  -- seconds of active jockey stance remaining (grants bonus poke reach)
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
 
@@ -244,6 +251,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field dodge boolean  -- sidestep juke with brief tackle immunity
 ---@field lob boolean  -- loft modifier: chip a shot / lob a pass over a defender
 ---@field sprint boolean  -- hold to sprint (drains the sprint meter)
+---@field jockey boolean  -- hold Space off the ball: slow shadow stance, bonus poke reach on release
 
 -- One-frame notifications of discrete actions, for the renderer's juice layer
 -- (flashes, trails). Produced by the sim, cleared at the top of every step, so
@@ -370,6 +378,7 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             save_vx = 0,
             settle_timer = 0,
             header_cd = 0,
+            jockey_timer = 0,
         }
     end
     return list
@@ -430,6 +439,7 @@ local function place_kickoff(s, kicking)
         p.save_vx = 0
         p.settle_timer = 0
         p.header_cd = 0
+        p.jockey_timer = 0
     end
     -- Give the kicking team the ball at the centre spot.
     local kicker
@@ -1110,7 +1120,10 @@ local function attempt_steals(s)
                 if p.slide_timer > 0 then
                     active, reach, sliding = true, SLIDE_REACH, true
                 elseif p.tackle_timer > 0 then
-                    active, reach = true, STAND_REACH
+                    -- A poke released from jockey stance gets bonus reach: the
+                    -- defender committed to the shadow and earned a clean strike.
+                    local jockey_bonus = (p.jockey_timer > 0) and JOCKEY_REACH_BONUS or 0
+                    active, reach = true, STAND_REACH + jockey_bonus
                 end
             elseif p.dash_cd <= 0 and d <= STEAL_ATTEMPT then
                 -- The AI pokes as soon as the ball looks reachable — and goes on
@@ -1508,10 +1521,17 @@ local function move_players(s, dt, input)
             else
                 local dir = input.move
                 local moving = dir.x ~= 0 or dir.y ~= 0
+                -- Jockey stance (Space held off the ball): shadow the carrier at
+                -- reduced speed, facing locked toward the ball. Mutually exclusive
+                -- with sprint (jockey wins). Grants bonus poke reach on release.
+                local jockeying = input.jockey and i ~= s.owner and p.stun_timer <= 0
+                if jockeying then
+                    p.jockey_timer = JOCKEY_HOLD
+                end
                 -- Sprint: needs a quarter tank to (re)engage, but once running it
                 -- burns to empty — so a drained meter doesn't flicker the boost
                 -- on and off at the refill rate.
-                local want = input.sprint and moving and p.stun_timer <= 0
+                local want = input.sprint and moving and p.stun_timer <= 0 and not jockeying
                 local can = p.sprint_meter > (p.sprinting and 0 or SPRINT_ENGAGE)
                 p.sprinting = (want and can) or false
                 if p.sprinting then
@@ -1522,11 +1542,30 @@ local function move_players(s, dt, input)
                 if moving then
                     local nd = dir:normalized()
                     local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
-                    if p.sprinting then
+                    if jockeying then
+                        mv = mv * JOCKEY_SLOW
+                    elseif p.sprinting then
                         mv = mv * SPRINT_MULT
                     end
                     p.pos = clamp_to_field(s, p.pos:add(nd:scale(mv * dt)))
-                    p.facing = nd
+                    if jockeying then
+                        -- Facing locked toward the ball (or the nearest player with
+                        -- possession) rather than the movement direction.
+                        local ball_off = s.ball:sub(p.pos)
+                        local bd = ball_off:length()
+                        if bd > 1 then
+                            p.facing = ball_off:normalized()
+                        end
+                    else
+                        p.facing = nd
+                    end
+                elseif jockeying then
+                    -- Even when standing still in jockey stance, face the ball.
+                    local ball_off = s.ball:sub(p.pos)
+                    local bd = ball_off:length()
+                    if bd > 1 then
+                        p.facing = ball_off:normalized()
+                    end
                 end
             end
             -- A keeper holding the ball may not carry it out of the penalty
@@ -2392,6 +2431,9 @@ function match.step(s, dt, input)
         end
         if p.header_cd > 0 then
             p.header_cd = math.max(0, p.header_cd - dt)
+        end
+        if p.jockey_timer > 0 then
+            p.jockey_timer = math.max(0, p.jockey_timer - dt)
         end
     end
 
