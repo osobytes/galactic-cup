@@ -1883,6 +1883,60 @@ t.describe("match human keeper control", function()
     end)
 end)
 
+t.describe("match charge auto-fire", function()
+    t.it("a full shot meter lets fly on its own", function()
+        local s = new_match() -- human carries at kickoff
+        for _ = 1, 60 do -- hold Space well past a full charge
+            match.step(s, 1 / 60, input({ shoot_held = true }))
+            if s.owner == nil then
+                break
+            end
+        end
+        t.is_true(s.owner == nil, "the shot auto-fired at full charge")
+    end)
+
+    t.it("a full pass meter releases the pass on its own", function()
+        local s = new_match()
+        for _ = 1, 60 do
+            match.step(s, 1 / 60, input({ pass_held = true }))
+            if s.owner == nil then
+                break
+            end
+        end
+        t.is_true(s.owner == nil, "the pass auto-fired at full charge")
+    end)
+end)
+
+t.describe("match keeper no-aim throw safety", function()
+    t.it("an aimless tap throw avoids the marked near man", function()
+        local s = new_match()
+        s.owner = 1
+        s.controlled = 1
+        s.players[1].pos = Vec2.new(40, 270)
+        s.players[1].facing = Vec2.new(0, 1) -- facing nobody: empty cone
+        s.players[1].hold_timer = 5
+        s.ball = Vec2.new(46, 270)
+        s.players[2].pos = Vec2.new(150, 270) -- nearest... and marked
+        s.players[3].pos = Vec2.new(260, 170) -- further but open
+        s.players[4].pos = Vec2.new(700, 60)
+        s.players[5].pos = Vec2.new(700, 480)
+        for i, p in ipairs(s.players) do
+            if p.team == "away" then
+                p.pos = Vec2.new(900, 40 + i * 40)
+            end
+        end
+        s.players[7].pos = Vec2.new(174, 270) -- their forward, on the near man
+        match.step(s, 0.016, input({ pass = true })) -- no direction held
+        local receiver
+        for i, pl in ipairs(s.players) do
+            if pl.receive_timer > 0 then
+                receiver = i
+            end
+        end
+        t.eq(receiver, 3, "the throw goes to the open man, not the marked nearest")
+    end)
+end)
+
 t.describe("match keeper carry limit", function()
     t.it("a keeper holding the ball cannot leave the penalty area", function()
         local s = new_match()

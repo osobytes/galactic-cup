@@ -777,9 +777,23 @@ local function try_pass(s, owner_idx, lofted, aim)
         end
     end
     if not rel then
-        -- No safe cone target: take the plain cone pick, then the nearest
-        -- teammate, so the button always does something (risk included).
-        rel = passing.target(owner.pos, aim, positions, range) or ai.closest(owner.pos, positions)
+        -- No safe cone target: take the plain cone pick; if nobody is in the
+        -- cone at all, prefer the OPEN nearby man over the blindly nearest one
+        -- (who is usually marked) — the button always does something.
+        rel = passing.target(owner.pos, aim, positions, range)
+        if not rel then
+            local best_fb
+            for k, pk in ipairs(positions) do
+                local open = math.huge
+                for _, qp in ipairs(opp_positions) do
+                    open = math.min(open, qp:dist(pk))
+                end
+                local score = math.min(open, 80) - owner.pos:dist(pk) * 0.15
+                if not best_fb or score > best_fb then
+                    best_fb, rel = score, k
+                end
+            end
+        end
         if not rel then
             return
         end
@@ -866,7 +880,28 @@ local function keeper_throw(s, keeper_idx, range, aim)
             end
         end
     end
-    rel = rel or ai.closest(keeper.pos, positions)
+    if not rel then
+        -- No aim held / nobody in the cone: pick the SAFEST outlet, never
+        -- blindly the nearest (that's usually the marked short man).
+        local best_fb
+        for k, pk in ipairs(positions) do
+            local d = keeper.pos:dist(pk)
+            local tf = math.min(
+                1,
+                math.max(math.sqrt(2 * THROW_CLEAR_H / (GRAVITY * 0.25)), d / MAX_LOB_VH)
+            )
+            local open = math.huge
+            for _, qp in ipairs(opp_positions) do
+                open = math.min(open, qp:dist(pk) - tf * 170)
+            end
+            -- Safety first, but stay near the charged range: a tap picks the
+            -- safe SHORT man, a full hold the safe LONG one.
+            local score = math.min(open, 100) - math.abs(d - range) * 0.2
+            if not best_fb or score > best_fb then
+                best_fb, rel = score, k
+            end
+        end
+    end
     if not rel then
         return
     end
@@ -1689,7 +1724,17 @@ end
 ---@param input MatchInput
 ---@param owner MatchPlayer
 local function human_keeper_actions(s, dt, input, owner)
-    if input.shoot then
+    -- A full meter releases on its own (predictable); early release fires at
+    -- the current charge.
+    local fire_shot, fire_pass = input.shoot, input.pass
+    if input.shoot_held then
+        s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
+        fire_shot = fire_shot or s.charge >= 1
+    elseif input.pass_held then
+        s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
+        fire_pass = fire_pass or s.pass_charge >= 1
+    end
+    if fire_shot then
         local dist = PUNT_MIN + s.charge * (PUNT_MAX - PUNT_MIN)
         local dir = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
@@ -1709,16 +1754,12 @@ local function human_keeper_actions(s, dt, input, owner)
         s.ball_vel, s.ball_vz = lob_launch(owner.pos, tgt, 0.5, PUNT_CLEAR_H)
         owner.throw_timer = KEEPER_THROW_POSE
         s.charge = 0
-    elseif input.shoot_held then
-        s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
-    elseif input.pass then
+    elseif fire_pass then
         local range = PASS_RANGE_MIN + s.pass_charge * (PASS_RANGE_MAX - PASS_RANGE_MIN)
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
         keeper_throw(s, s.owner, range, aim)
         s.pass_charge = 0
-    elseif input.pass_held then
-        s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
     end
     if s.owner and owner.hold_timer <= 0 then
         keeper_distribute(s, s.owner)
@@ -1893,7 +1934,17 @@ local function update_ball(s, dt, input)
                 keeper_distribute(s, s.owner)
             end
         elseif s.owner == s.controlled then
-            if input.shoot then
+            -- A full meter LETS FLY on its own (predictable, like the meter
+            -- promises); release fires early at the current charge.
+            local fire_shot, fire_pass = input.shoot, input.pass
+            if input.shoot_held then
+                s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
+                fire_shot = fire_shot or s.charge >= 1
+            elseif input.pass_held then
+                s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
+                fire_pass = fire_pass or s.pass_charge >= 1
+            end
+            if fire_shot then
                 -- Aim at the goal; vertical of `facing` picks the corner. Charge
                 -- (held shoot) scales power; lateral input bends the shot.
                 local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
@@ -1910,16 +1961,12 @@ local function update_ball(s, dt, input)
                 local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
                 s.ball_spin = (vz == 0) and side * s.charge * CURVE_MAX or 0
                 s.charge = 0
-            elseif input.shoot_held then
-                s.charge = math.min(1, s.charge + CHARGE_RATE * dt)
-            elseif input.pass then
+            elseif fire_pass then
                 local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
                     or nil
                 try_pass(s, s.owner, input.lob, aim)
-            elseif input.pass_held then
-                -- Holding K charges the pass RANGE (consumed by try_pass).
-                s.pass_charge = math.min(1, s.pass_charge + PASS_CHARGE_RATE * dt)
-            else
+                s.pass_charge = 0
+            elseif not (input.shoot_held or input.pass_held) then
                 s.charge = 0
             end
         else
