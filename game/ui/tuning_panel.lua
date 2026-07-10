@@ -3,6 +3,7 @@
 -- facing part. Persistence goes through love.filesystem when available.
 
 local tuning = require("sim.tuning")
+local presets = require("data.tuning_presets")
 
 local SAVE_FILE = "tuning.txt"
 
@@ -10,6 +11,7 @@ local panel = {
     open = false,
     cat = 1, -- index into tuning.categories()
     row = 1, -- index into the current category's knobs
+    preset = 1, -- index into data/tuning_presets (last applied; 1 = defaults)
     status = nil, ---@type string?  -- one-line feedback (saved/loaded/reset)
 }
 
@@ -78,6 +80,13 @@ function panel.key(key, big)
         if not panel.load() then
             panel.status = "no saved tuning"
         end
+    elseif key == "f4" then
+        -- Cycle balance presets (data/tuning_presets.lua): each applies its
+        -- blob on top of a full reset, so presets never stack.
+        panel.preset = panel.preset % #presets + 1
+        local p = presets[panel.preset]
+        tuning.deserialize(p.blob)
+        panel.status = "preset: " .. p.name
     elseif key == "f1" or key == "escape" then
         panel.open = false
     else
@@ -139,7 +148,7 @@ function panel.draw(vp)
         x0 + 12,
         y0 + h - 34
     )
-    love.graphics.print("F2 save   F3 load   F1/Esc close", x0 + 12, y0 + h - 18)
+    love.graphics.print("F2 save   F3 load   F4 preset   F1/Esc close", x0 + 12, y0 + h - 18)
     if panel.status then
         love.graphics.setColor(0.5, 1, 0.7)
         love.graphics.print(panel.status, x0 + 12, y0 + h + 6)

@@ -4,7 +4,8 @@ Galaticup is a 2D **intergalactic arcade soccer manager RPG**.
 
 It blends:
 
-- **Manager immersion** (squad, formation, tactics) — FIFA-ish, but tiny.
+- **Manager immersion** (squad, formation, tactics) — starts tiny, deepens toward a full
+  management sim over time (see `docs/design/manager-mode.md`).
 - **Arcade readability** (short, exaggerated, controllable matches) — Mario Strikers energy.
 - **RPG growth** (stats, traits, XP, level-ups, morale) — players are *characters*.
 - **Fictional universe** (alien species, planets, weird arenas) — freedom from licensing,

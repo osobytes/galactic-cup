@@ -17,7 +17,12 @@ function love.conf(t)
     t.identity = "galaticup"
     t.version = "11.5"
 
-    if has_flag("--test") then
+    local headless_flags = { "--test", "--sim", "--sweep", "--search", "--eval" }
+    local headless = false
+    for _, f in ipairs(headless_flags) do
+        headless = headless or has_flag(f)
+    end
+    if headless then
         -- Headless: no GL context, no display required.
         t.modules.window = false
         t.modules.graphics = false

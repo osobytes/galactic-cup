@@ -53,6 +53,9 @@ local STEAL_DIST = 26 -- challenge range to the BALL to dislodge it
 -- pick out a pressured pass — the defender's window to actually rob them.
 -- CARRIER_SETTLE: live-tunable — see sim/tuning.lua (F1 panel)
 local KICKOFF_CLEAR = 120 -- opponents keep this centre-circle distance at kickoff
+-- Defenders hold shape (no pressing) for this long after a restart, or until
+-- the kicking team's first pass/shot releases the ball — whichever comes first.
+local KICKOFF_HOLD = 2.5
 local TACKLE_POP_SPEED = 150 -- speed the ball pops out on a tackle
 -- AI_STEAL_CD: live-tunable — see sim/tuning.lua (F1 panel)
 local KEEPER_SMOTHER = 26 -- keeper takes the ball off a carrier's feet at this range (in its box)
@@ -174,6 +177,7 @@ local KEEPER_DIVE_DURATION = 0.32 -- dive lunge / animation window
 -- trajectory, no teleport): contact radius, plus a crossing/timeout backstop.
 local KEEPER_HANDS = 30 -- ball-contact radius that completes a committed save
 local SAVE_TIMEOUT_PAD = 0.25 -- backstop beyond the predicted crossing time
+local DEAD_SHOT_SPEED = 30 -- a pending save below this pace is a loose ball, not a shot
 local KEEPER_SAFE_DIST = 60 -- a distribution outlet must be this clear of opponents
 -- A floated throw needs the receiver a real step off its marker: body collision
 -- keeps players ~24px apart and the AI steal range is 26, so a receiver marked
@@ -237,6 +241,8 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field handling number  -- keeper clean-catch factor 0..1 (0 for outfield)
 ---@field dive_timer number  -- seconds of keeper dive lunge remaining
 ---@field dive_dir Vec2  -- unit direction of the active dive
+---@field dive_delay number  -- countdown until a queued dive launches (synced to ball arrival)
+---@field dive_target Vec2?  -- intercept point the dive converges on (movement stops there)
 ---@field hold_timer number  -- seconds a keeper holds the ball before distributing
 ---@field slide_timer number  -- seconds of an active slide tackle remaining
 ---@field slide_dir Vec2  -- locked travel direction of the slide
@@ -309,6 +315,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field ball_spin number  -- lateral curve applied to the loose ball
 ---@field rng integer  -- seeded PRNG state (core.rng): same seed = same match
 ---@field block_grace number  -- body-blocking re-enabled when this hits 0 (set on release)
+---@field kickoff_hold number  -- seconds left of post-restart defensive hold (0 = press resumes)
 ---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
 
 local match = {}
@@ -384,6 +391,8 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             handling = (pd.position == "keeper") and stats.keeper_handling(pd.stats) or 0,
             dive_timer = 0,
             dive_dir = Vec2.new(0, 0),
+            dive_delay = 0,
+            dive_target = nil,
             hold_timer = 0,
             slide_timer = 0,
             slide_dir = Vec2.new(0, 0),
@@ -449,6 +458,8 @@ local function place_kickoff(s, kicking)
         p.facing = Vec2.new(p.team == "home" and 1 or -1, 0)
         p.dive_timer = 0
         p.dive_dir = Vec2.new(0, 0)
+        p.dive_delay = 0
+        p.dive_target = nil
         p.hold_timer = 0
         p.slide_timer = 0
         p.slide_dir = Vec2.new(0, 0)
@@ -503,6 +514,7 @@ local function place_kickoff(s, kicking)
     s.block_grace = 0
     s.pass_target = nil
     s.ball_spin = 0
+    s.kickoff_hold = KICKOFF_HOLD
     -- Centre-circle rule: the non-kicking team keeps its distance from the
     -- ball at the restart — push any intruder straight back out.
     for _, p in ipairs(s.players) do
@@ -584,6 +596,7 @@ function match.new(opts)
         charge = 0,
         pass_charge = 0,
         block_grace = 0,
+        kickoff_hold = 0,
         pass_target = nil,
         ball_spin = 0,
         rng = rstate,
@@ -699,6 +712,7 @@ end
 local function release_shot(s, owner, dir, speed, vz)
     s.events[#s.events + 1] = { kind = "shot", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
+    s.kickoff_hold = 0
     s.ball_vel = dir:normalized():scale(speed or owner.shot_speed)
     s.ball_z = 0
     s.ball_vz = vz or 0
@@ -781,6 +795,7 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     target.receive_timer = RECEIVE_TIME
     s.events[#s.events + 1] = { kind = "pass", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
+    s.kickoff_hold = 0
     s.ball_z = 0
     s.ball_spin = 0
     s.pickup_cd = RELEASE_CD
@@ -1369,18 +1384,29 @@ local function offball_targets(s, pos)
                 return a < b
             end)
 
+            -- Kickoff law: the non-kicking team holds shape at a restart
+            -- instead of pressing, until the first pass/shot (or the hold
+            -- timer runs out as a failsafe).
+            local held = s.kickoff_hold > 0
             local presser, cover = order[1], order[2]
             if presser then
-                -- Press the BALL, not the man: against a carrier who stands
-                -- still or turns to shield, the presser works around the body
-                -- to the ball side (collision makes it circle) and keeps
-                -- poking. Half the standoff keeps the press goal-side honest.
-                local aim = ai.pursue(pos[presser], s.ball, carrier.vel, PURSUE_LEAD)
-                targets[presser] = aim:add(goal:sub(aim):normalized():scale(cfg.standoff * 0.5))
-                urgent[presser] = true
+                if held then
+                    targets[presser] =
+                        block_shift(s.players[presser].anchor, s.ball, cfg.compactness)
+                else
+                    -- Press the BALL, not the man: against a carrier who stands
+                    -- still or turns to shield, the presser works around the body
+                    -- to the ball side (collision makes it circle) and keeps
+                    -- poking. Half the standoff keeps the press goal-side honest.
+                    local aim = ai.pursue(pos[presser], s.ball, carrier.vel, PURSUE_LEAD)
+                    targets[presser] = aim:add(goal:sub(aim):normalized():scale(cfg.standoff * 0.5))
+                    urgent[presser] = true
+                end
             end
             if cover then
-                targets[cover] = ai.interpose(cpos, goal, COVER_FRAC)
+                targets[cover] = held
+                        and block_shift(s.players[cover].anchor, s.ball, cfg.compactness)
+                    or ai.interpose(cpos, goal, COVER_FRAC)
             end
 
             -- The rest: which defenders should man-mark, which hold zone.
@@ -1797,10 +1823,23 @@ local function move_players(s, dt, input)
         elseif p.is_keeper then
             local opp_owns = owner ~= nil and owner.team ~= p.team
             if p.dive_timer > 0 then
-                -- Diving: lunge hard toward the ball to extend the save. Dives
-                -- bypass locomotion (bespoke movement — keep as-is).
-                p.pos = clamp_to_field(s, p.pos:add(p.dive_dir:scale(p.move_speed * 1.6 * dt)))
-                p.facing = p.dive_dir
+                -- Diving: lunge hard toward the intercept point — and STOP
+                -- there. Unclamped, a near-straight shot (a 2px correction)
+                -- became a full-speed lunge PAST the ball: gloves closing on
+                -- empty air while the save resolved elsewhere. Dives bypass
+                -- locomotion (bespoke movement — keep as-is).
+                local step = p.move_speed * 1.6 * dt
+                local to_target = p.dive_target and p.dive_target:sub(p.pos)
+                if to_target and to_target:length() > 0.5 then
+                    local dir = to_target:normalized()
+                    p.pos =
+                        clamp_to_field(s, p.pos:add(dir:scale(math.min(step, to_target:length()))))
+                    p.facing = dir
+                elseif not p.dive_target then
+                    -- No known intercept (legacy path): the old straight lunge.
+                    p.pos = clamp_to_field(s, p.pos:add(p.dive_dir:scale(step)))
+                    p.facing = p.dive_dir
+                end
                 p.run_vel = Vec2.new(0, 0)
             elseif (s.owner == nil or opp_owns) and in_claim_zone(s, p) then
                 -- Come off the line to claim a loose ball in the box — or to close
@@ -1997,12 +2036,54 @@ local function human_keeper_actions(s, dt, input, owner)
     end
 end
 
+-- Seconds a ball decelerating under exponential friction `k` needs to travel
+-- `dist` at current `speed`. The naive dist/speed is badly wrong here: ground
+-- friction sheds most of a slow shot's pace mid-flight, and a ball can only
+-- ever roll speed/k px in total. Returns nil when it dies (or crawls) short —
+-- such a "shot" is a loose ball to claim, not one to dive at.
+---@param dist number
+---@param speed number
+---@param k number  -- FRICTION (grounded) or AIR_FRICTION (airborne)
+---@return number? seconds
+local function ball_travel_time(dist, speed, k)
+    if speed <= 0 then
+        return nil
+    end
+    local ratio = dist * k / speed
+    if ratio >= 0.95 then
+        return nil
+    end
+    return -math.log(1 - ratio) / k
+end
+
+-- Fire the actual dive lunge: aim at the freshest prediction of where the
+-- shot crosses the keeper's line. The movement clamps to dive_target (see
+-- move_players), so a near-straight shot is a small step, not a full-speed
+-- 100px lunge past the ball.
+---@param s MatchState
+---@param keeper MatchPlayer
+local function launch_dive(s, keeper)
+    local y_cross = s.ball.y
+    if s.ball_vel.x ~= 0 then
+        local t = (keeper.pos.x - s.ball.x) / s.ball_vel.x
+        if t > 0 then
+            y_cross = s.ball.y + s.ball_vel.y * t
+        end
+    end
+    keeper.dive_timer = KEEPER_DIVE_DURATION
+    keeper.dive_target = Vec2.new(keeper.pos.x, y_cross)
+    local to_cross = keeper.dive_target:sub(keeper.pos)
+    keeper.dive_dir = (to_cross:length() > 1) and to_cross:normalized() or Vec2.new(0, 0)
+end
+
 -- The keeper of the threatened goal COMMITS against an on-target shot: it picks
 -- its verdict now (catch / parry / beaten — pure and deterministic, a function
--- of reach, handling, pace and angle) and starts the dive, but the ball is NOT
--- touched: it keeps flying its real trajectory and the save completes on
--- contact in resolve_pending_save. So a shot always visibly travels from the
--- shooter's boot to the keeper's glove — no teleports.
+-- of reach, handling, pace and angle), but the ball is NOT touched: it keeps
+-- flying its real trajectory and the save completes on contact in
+-- resolve_pending_save. The dive itself is QUEUED (dive_delay) so the lunge
+-- lands when the ball does — committing early must not mean diving early. So a
+-- shot always visibly travels from the shooter's boot to the keeper's glove —
+-- no teleports, no gloves closing on empty air.
 ---@param s MatchState
 local function attempt_save(s)
     local speed = s.ball_vel:length()
@@ -2010,7 +2091,12 @@ local function attempt_save(s)
         return -- a dead or purely-vertical ball is not an on-target shot
     end
     for _, keeper in ipairs(s.players) do
-        if keeper.is_keeper and keeper.dive_timer <= 0 and not keeper.save_pending then
+        if
+            keeper.is_keeper
+            and keeper.dive_timer <= 0
+            and keeper.dive_delay <= 0
+            and not keeper.save_pending
+        then
             local goal = (keeper.team == "home") and s.goal_home or s.goal_away
             local toward = (keeper.team == "home") and (s.ball_vel.x < 0) or (s.ball_vel.x > 0)
             -- Time for the ball to reach the keeper's line. Must be ahead of the ball
@@ -2023,22 +2109,40 @@ local function attempt_save(s)
                 local y_goal = s.ball.y + s.ball_vel.y * tg -- where it crosses the goal plane
                 -- Height of the shot when it reaches the keeper's line. A ball over
                 -- the keeper's aerial reach (a chip) sails past it; over the bar isn't
-                -- a shot to save at all.
-                local z_cross = s.ball_z + s.ball_vz * t - 0.5 * GRAVITY * t * t
+                -- When the ball ACTUALLY arrives, friction included. dist/speed
+                -- lies for slow shots (they decelerate the whole way), and a
+                -- dying ball never arrives at all — that one is claimed off the
+                -- grass by the normal keeper logic, never dived at.
+                local dxa = math.abs(keeper.pos.x - s.ball.x)
+                local x_frac = speed / math.abs(s.ball_vel.x) -- path px per x px
+                local k_fric = (s.ball_z > 0.5) and AIR_FRICTION or FRICTION
+                local eta = ball_travel_time(dxa * x_frac, speed, k_fric)
+                -- The dive is timed to GLOVE CONTACT (hands' radius short of
+                -- the line), not the line itself — so the lunge window covers
+                -- the moment the save actually resolves.
+                local eta_contact =
+                    ball_travel_time(math.max(0, dxa - KEEPER_HANDS) * x_frac, speed, k_fric)
+                -- Height when it reaches the keeper's line, at the real arrival
+                -- time (the geometric t is fine for y — friction shrinks both
+                -- velocity components equally, so the path stays straight —
+                -- but gravity runs on the clock).
+                local tz = eta or t
+                local z_cross = s.ball_z + s.ball_vz * tz - 0.5 * GRAVITY * tz * tz
                 local on_target = y_goal >= goal.y - SAVE_PAD
                     and y_goal <= goal.y + goal.h + SAVE_PAD
                     and z_cross < CROSSBAR
                     and z_cross <= KEEPER_AIR_GRAB
                 -- How far the keeper has to dive along its line to reach the shot.
                 local dive_dist = math.abs(keeper.pos.y - y_cross)
-                if on_target and dive_dist <= keeper.reach then
-                    -- Dive along the line toward the crossing point, physically
-                    -- converging on where the shot will arrive. A straight shot
-                    -- needs no dive: the keeper sets itself.
-                    keeper.dive_timer = KEEPER_DIVE_DURATION
-                    local to_cross = Vec2.new(keeper.pos.x, y_cross):sub(keeper.pos)
-                    keeper.dive_dir = (to_cross:length() > 1) and to_cross:normalized()
-                        or Vec2.new(0, 0)
+                if on_target and dive_dist <= keeper.reach and eta then
+                    -- Queue the dive so the lunge window covers the arrival:
+                    -- a shot still half a second out gets a set keeper first,
+                    -- then a dive that meets the ball, not one that finished
+                    -- while the shot was still traveling.
+                    keeper.dive_delay = math.max(0, (eta_contact or eta) - KEEPER_DIVE_DURATION)
+                    if keeper.dive_delay == 0 then
+                        launch_dive(s, keeper)
+                    end
 
                     -- Closeness of the dive + handling, minus pace. A shot straight at
                     -- the keeper (dive_dist ~ 0) is gathered even when hard; only wide
@@ -2057,7 +2161,7 @@ local function attempt_save(s)
                         local sample
                         s.rng, sample = rng.roll(s.rng)
                         keeper.save_pending = (sample < p_catch) and "catch" or "parry"
-                        keeper.save_timer = t + SAVE_TIMEOUT_PAD
+                        keeper.save_timer = eta + SAVE_TIMEOUT_PAD
                         keeper.save_vx = s.ball_vel.x
                     end
                     -- Beaten: the dive is committed but the ball flies through.
@@ -2086,8 +2190,16 @@ local function resolve_pending_save(s, dt)
             local contact = keeper.pos:dist(s.ball) <= KEEPER_HANDS
             if reversed then
                 keeper.save_pending = nil -- the shot was deflected: the dive whiffs
+                keeper.dive_delay = 0 -- and a still-queued lunge stays holstered
+            elseif s.ball_vel:length() < DEAD_SHOT_SPEED and not contact then
+                -- The shot died short of the gloves: it is a loose ball now.
+                -- Drop the commitment so the normal claim logic gathers it —
+                -- never vacuum a stationary ball across open grass.
+                keeper.save_pending = nil
+                keeper.dive_delay = 0
             elseif contact or crossed or keeper.save_timer <= 0 then
                 keeper.save_pending = nil
+                keeper.dive_delay = 0
                 if pend == "catch" then
                     s.events[#s.events + 1] =
                         { kind = "catch", x = s.ball.x, y = s.ball.y, player = keeper.id }
@@ -2696,6 +2808,9 @@ function match.step(s, dt, input)
     if s.block_grace > 0 then
         s.block_grace = math.max(0, s.block_grace - dt)
     end
+    if s.kickoff_hold > 0 then
+        s.kickoff_hold = math.max(0, s.kickoff_hold - dt)
+    end
     for _, p in ipairs(s.players) do
         if p.dash_cd > 0 then
             p.dash_cd = math.max(0, p.dash_cd - dt)
@@ -2708,6 +2823,20 @@ function match.step(s, dt, input)
         end
         if p.dive_timer > 0 then
             p.dive_timer = math.max(0, p.dive_timer - dt)
+            if p.dive_timer == 0 then
+                p.dive_target = nil
+            end
+        end
+        if p.dive_delay > 0 then
+            p.dive_delay = math.max(0, p.dive_delay - dt)
+            if p.dive_delay == 0 then
+                -- The queued dive fires — unless the shot is no longer inbound
+                -- (deflected away mid-flight): then the keeper stays home.
+                local inbound = (p.team == "home") and (s.ball_vel.x < 0) or (s.ball_vel.x > 0)
+                if inbound then
+                    launch_dive(s, p)
+                end
+            end
         end
         if p.hold_timer > 0 then
             p.hold_timer = math.max(0, p.hold_timer - dt)

@@ -174,7 +174,9 @@ tuning.knobs = {
         label = "Save pace ref",
         cat = "Keeper",
         default = 1300,
-        min = 700,
+        -- min widened 700 -> 400: the balance search's optimum sat on the old
+        -- fence (docs/design/fun_metrics.md, phase 3).
+        min = 400,
         max = 2000,
         step = 50,
     },
@@ -222,7 +224,9 @@ tuning.knobs = {
         cat = "AI",
         default = 240,
         min = 160,
-        max = 340,
+        -- max widened 340 -> 480 (half pitch): the balance search's optimum
+        -- sat on the old fence (docs/design/fun_metrics.md, phase 3).
+        max = 480,
         step = 10,
     },
     {
@@ -231,7 +235,9 @@ tuning.knobs = {
         cat = "AI",
         default = 200,
         min = 120,
-        max = 300,
+        -- max widened 300 -> 420: the balance search's optimum sat on the old
+        -- fence (docs/design/fun_metrics.md, phase 3).
+        max = 420,
         step = 10,
     },
     {

@@ -569,6 +569,9 @@ t.describe("match.step off-ball AI", function()
                 p.pos = Vec2.new(p.anchor.x, p.anchor.y)
             end
         end
+        -- This models settled open-play defending, not a restart: clear the
+        -- kickoff hold that `new_match()` sets so pressing behaves normally.
+        s.kickoff_hold = 0
         return s
     end
 
@@ -583,6 +586,20 @@ t.describe("match.step off-ball AI", function()
             end
         end
         t.eq(near, 1, "exactly one defender presses; the rest hold shape")
+    end)
+
+    t.it("holds shape instead of pressing during the post-kickoff hold", function()
+        local s = defending_state()
+        s.kickoff_hold = 2.5 -- as set by place_kickoff on a restart
+        local targets = match._offball_targets(s, pos_of(s))
+        local carrier = s.players[AWAY_CARRIER].pos
+        local near = 0
+        for _, i in ipairs(home_targets(s, targets)) do
+            if targets[i]:dist(carrier) <= 24 + 25 then
+                near = near + 1
+            end
+        end
+        t.eq(near, 0, "no defender presses the carrier while the kickoff hold is active")
     end)
 
     t.it("positions the cover goal-side between carrier and own goal", function()
