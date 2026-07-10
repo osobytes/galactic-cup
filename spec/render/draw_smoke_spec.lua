@@ -7,6 +7,7 @@ local pitch = require("game.render.pitch")
 local ui_draw = require("game.ui.draw")
 local match_sim = require("sim.match")
 local teams = require("data.teams")
+local formations = require("data.formations")
 
 local function stub_graphics()
     local g = {}
@@ -109,6 +110,16 @@ t.describe("renderer smoke", function()
                     kind = "card",
                     text = "Card",
                     rect = { x = 0, y = 70, w = 200, h = 40 },
+                },
+                {
+                    id = "p",
+                    kind = "formation_preview",
+                    selected = true,
+                    rect = { x = 220, y = 70, w = 124, h = 52 },
+                    data = {
+                        keeper = formations["2-1-1"].keeper,
+                        outfield = formations["2-1-1"].outfield,
+                    },
                 },
             }
             ui_draw.layout(layout)

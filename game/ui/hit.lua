@@ -4,7 +4,7 @@
 ---@class Widget
 ---@field id string
 ---@field rect Rect
----@field kind string?  -- "button" | "label" | "card" | ...
+---@field kind string?  -- "button" | "label" | "card" | "formation_preview" | ...
 ---@field text string?
 ---@field selected boolean?
 ---@field data any?

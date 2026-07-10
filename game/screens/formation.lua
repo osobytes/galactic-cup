@@ -3,17 +3,43 @@
 local hit = require("game.ui.hit")
 local formations = require("data.formations")
 
-local ORDER = { "2-1-1", "1-2-1", "1-1-2" }
+---@class FormationScreenState
+---@field viewport { w: number, h: number }
+---@field selected string
+
+---@class FormationAction
+---@field go "tactic"
+---@field formation string
+
+local DEFAULT_FORMATION = "2-1-1"
+local OPTION_START_Y = 116
+local OPTION_HEIGHT = 52
+local OPTION_GAP = 12
+local BUTTON_WIDTH = 280
+local PREVIEW_WIDTH = 124
+local PREVIEW_GAP = 12
+local OPTION_WIDTH = BUTTON_WIDTH + PREVIEW_GAP + PREVIEW_WIDTH
 
 local M = {}
 
----@param viewport { w: number, h: number }
----@return table
-function M.new_state(viewport)
-    return { viewport = viewport, selected = "2-1-1" }
+---@return string[]
+local function sorted_formation_ids()
+    local ids = {}
+    for id in pairs(formations) do
+        ids[#ids + 1] = id
+    end
+    table.sort(ids)
+    return ids
 end
 
----@param state table
+---@param viewport { w: number, h: number }
+---@return FormationScreenState
+function M.new_state(viewport)
+    assert(formations[DEFAULT_FORMATION], "missing default formation: " .. DEFAULT_FORMATION)
+    return { viewport = viewport, selected = DEFAULT_FORMATION }
+end
+
+---@param state FormationScreenState
 ---@return Layout
 function M.layout(state)
     local vp = state.viewport
@@ -28,17 +54,33 @@ function M.layout(state)
         },
     }
 
-    local y = 140
-    for _, id in ipairs(ORDER) do
-        local f = formations[id]
+    local x = vp.w / 2 - OPTION_WIDTH / 2
+    local y = OPTION_START_Y
+    for _, id in ipairs(sorted_formation_ids()) do
+        local formation = formations[id]
         layout[#layout + 1] = {
             id = "formation_" .. id,
             kind = "button",
-            text = id .. "   " .. f.name,
+            text = id .. "   " .. formation.name,
             selected = state.selected == id,
-            rect = { x = vp.w / 2 - 150, y = y, w = 300, h = 52 },
+            rect = { x = x, y = y, w = BUTTON_WIDTH, h = OPTION_HEIGHT },
         }
-        y = y + 64
+        layout[#layout + 1] = {
+            id = "preview_" .. id,
+            kind = "formation_preview",
+            selected = state.selected == id,
+            rect = {
+                x = x + BUTTON_WIDTH + PREVIEW_GAP,
+                y = y,
+                w = PREVIEW_WIDTH,
+                h = OPTION_HEIGHT,
+            },
+            data = {
+                keeper = formation.keeper,
+                outfield = formation.outfield,
+            },
+        }
+        y = y + OPTION_HEIGHT + OPTION_GAP
     end
 
     layout[#layout + 1] = {
@@ -50,17 +92,16 @@ function M.layout(state)
     return layout
 end
 
----@param state table
+---@param state FormationScreenState
 ---@param event InputEvent
----@return table, table?
+---@return FormationScreenState, FormationAction?
 function M.update(state, event)
     if event.kind == "click" then
         local id = hit.at(M.layout(state), event.x, event.y)
         if id then
-            local fid = id:match("^formation_(.+)$")
-            if fid then
-                state.selected = fid
-                return state
+            local formation_id = id:match("^formation_(.+)$") or id:match("^preview_(.+)$")
+            if formation_id and formations[formation_id] then
+                return { viewport = state.viewport, selected = formation_id }
             elseif id == "next" then
                 return state, { go = "tactic", formation = state.selected }
             end
