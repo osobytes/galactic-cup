@@ -319,6 +319,38 @@ function pitch.draw(s, vp, opts)
         end
     end
 
+    -- Landing reticle: a lofted, loose ball projects where it will come down, so
+    -- a player can time a run to meet a cross. Only for a genuinely airborne ball
+    -- (a cross/lob), not a grounded pass. Ballistic solve to z = 0.
+    do
+        local bz = s.ball_z or 0
+        if not s.owner and bz > 20 then
+            local g = 900 -- matches the sim's GRAVITY
+            local vz = s.ball_vz or 0
+            local tland = (vz + math.sqrt(vz * vz + 2 * g * bz)) / g
+            local lx = s.ball.x + s.ball_vel.x * tland
+            local ly = s.ball.y + s.ball_vel.y * tland
+            if
+                tland > 0.05
+                and tland < 3
+                and lx > 0
+                and lx < field.w
+                and ly > 0
+                and ly < field.h
+            then
+                local sx, sy, scale = project(lx, ly)
+                local t_now = (love.timer and love.timer.getTime and love.timer.getTime()) or 0
+                local pulse = 0.6 + 0.4 * math.abs(math.sin(t_now * 6))
+                love.graphics.setLineWidth(math.max(1, 1.5 * scale))
+                love.graphics.setColor(1, 0.85, 0.35, 0.85 * pulse)
+                love.graphics.circle("line", sx, sy, 12 * scale * pulse)
+                love.graphics.setColor(1, 0.85, 0.35, 0.4)
+                love.graphics.circle("line", sx, sy, 7 * scale)
+                love.graphics.setLineWidth(1)
+            end
+        end
+    end
+
     -- Pass-target preview: a small pulsing double-ring at the intended receiver's
     -- feet while the pass button is held. Guards love.timer access so the smoke
     -- test (which stubs love.graphics but not love.timer) stays green.

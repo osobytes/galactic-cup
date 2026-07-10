@@ -1197,7 +1197,12 @@ t.describe("match.step keeper vs close-range shots", function()
         local k = s.players[1]
         k.pos = Vec2.new(24, 270)
         local before = k.pos:dist(s.ball)
-        match.step(s, 0.016, NO_INPUT)
+        -- Measure the rush over a few frames: the ball is a physical object now
+        -- (it rolls at the carrier's feet), so a single 16ms tick from rest is in
+        -- the noise — but the keeper visibly closes the gap as it accelerates.
+        for _ = 1, 6 do
+            match.step(s, 0.016, NO_INPUT)
+        end
         t.is_true(k.pos:dist(s.ball) < before, "the keeper closes down the carrier")
     end)
 end)

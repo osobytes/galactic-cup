@@ -66,6 +66,7 @@ function Match:restart()
     self._lob_latch = false
     self._space_held_prev = false
     self._last_score = 0
+    self._last_home = 0
     self._replay_state = nil
     replay.reset()
     view_state.reset()
@@ -205,14 +206,16 @@ function Match:update(dt)
     effects.update(self.state, dt) -- juice layer: event bursts + ball trail
     audio.update(self.state, dt) -- synthesized SFX from event queue
 
-    -- A goal just went in (score edge, match still live): roll the replay.
-    local total = self.state.score.home + self.state.score.away
-    if total > self._last_score and not self.state.finished then
-        if replay.start() then
+    -- A goal just went in (score edge, match still live): celebrate, then roll
+    -- the replay. Which side scored picks the celebrating team.
+    local sh, sa = self.state.score.home, self.state.score.away
+    if sh + sa > self._last_score and not self.state.finished then
+        local scoring_team = sh > self._last_home and "home" or "away"
+        if replay.start(scoring_team) then
             effects.reset() -- the scene jumps back in time; drop live particles
         end
     end
-    self._last_score = total
+    self._last_home, self._last_score = sh, sh + sa
 end
 
 ---@param s MatchState
@@ -245,7 +248,7 @@ function Match:draw_frame(s, vp)
         vp.h - 44
     )
     love.graphics.print(
-        "Hold Space/K to charge power & range    L: Lob/Cross    C: Juke    Space in air: Header    Esc: Quit",
+        "Hold Space/K to charge power & range    L: Lob/Cross    C: Juke    Hold Space under a cross: Head/Volley    Esc: Quit",
         16,
         vp.h - 26
     )
@@ -284,7 +287,10 @@ function Match:draw()
     local vp = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
     bloom.draw(function()
         self:draw_frame(s, vp)
-        if replay.active() then
+        if replay.celebrating() then
+            love.graphics.setColor(1, 0.85, 0.3)
+            love.graphics.printf("GOAL!", 0, 44, vp.w, "center")
+        elseif replay.active() then
             love.graphics.setColor(1, 0.45, 0.45)
             love.graphics.printf("● REPLAY", 0, 48, vp.w, "center")
             love.graphics.setColor(0.8, 0.85, 0.95)

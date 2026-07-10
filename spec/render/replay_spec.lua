@@ -29,8 +29,9 @@ t.describe("goal replay buffer", function()
             replay.record(s)
             match.step(s, 1 / 60, NO_INPUT)
         end
-        t.is_true(replay.start(), "enough footage to start")
+        t.is_true(replay.start("home"), "enough footage to start")
         t.is_true(replay.active())
+        t.is_true(replay.celebrating(), "opens on the celebration beat")
 
         local frames, last = 0, nil
         for _ = 1, 2000 do
@@ -59,7 +60,7 @@ t.describe("goal replay buffer", function()
             replay.record(s)
             match.step(s, 1 / 60, NO_INPUT)
         end
-        t.is_true(replay.start())
+        t.is_true(replay.start("home"))
         replay.stop()
         t.is_true(not replay.active())
         t.is_true(replay.step(1 / 60) == nil)
@@ -67,6 +68,30 @@ t.describe("goal replay buffer", function()
 
     t.it("refuses to start without enough footage", function()
         replay.reset()
-        t.is_true(not replay.start(), "no footage, no replay")
+        t.is_true(not replay.start("home"), "no footage, no replay")
+    end)
+
+    t.it("celebrates before cutting to the slow-motion replay", function()
+        tuning.reset()
+        replay.reset()
+        local s =
+            match.new({ home = teams.nebula, away = teams.orion, field = { w = 960, h = 540 } })
+        for _ = 1, 90 do
+            replay.record(s)
+            match.step(s, 1 / 60, NO_INPUT)
+        end
+        t.is_true(replay.start("home"))
+        -- The celebration runs first (real time), then playback takes over.
+        local celeb_frames = 0
+        for _ = 1, 2000 do
+            local st = replay.step(1 / 60)
+            if not st or not replay.celebrating() then
+                break
+            end
+            celeb_frames = celeb_frames + 1
+            t.is_true(#st.players == 10 and st.ball ~= nil, "drawable celebration frame")
+        end
+        t.is_true(celeb_frames > 30, "celebration lasts a beat: " .. celeb_frames)
+        t.is_true(replay.active() and not replay.celebrating(), "then it is the replay")
     end)
 end)

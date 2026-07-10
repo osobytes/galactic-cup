@@ -22,7 +22,16 @@ local species_pool = require("data.species")
 local PLAYER_RADIUS = 12
 local BALL_RADIUS = 6
 local FRICTION = 1.2 -- fraction of ball speed shed per second
-local STICK_AHEAD = PLAYER_RADIUS + BALL_RADIUS -- dribble offset
+local STICK_AHEAD = PLAYER_RADIUS + BALL_RADIUS -- ball's resting offset at the feet
+-- Touch-based dribble: an outfield carrier nudges a free-rolling ball ahead of
+-- their feet rather than gluing it in place. The touch point rides further
+-- ahead the faster they run (a heavier touch at pace); dribble skill pulls it
+-- back toward the feet and stiffens the touch. Stray past the control radius
+-- (skill-scaled) and possession is lost — a heavy touch gets robbed.
+-- DRIBBLE_LEAD / DRIBBLE_TOUCH / DRIBBLE_CONTROL are live-tunable (F1 panel).
+local DRIBBLE_LEAD_MIN = STICK_AHEAD -- ball rides at least this far ahead, at rest
+local DRIBBLE_SKILL_TIGHTEN = 0.55 -- top skill pulls the lead in by up to this fraction
+local DRIBBLE_CONTROL_SKILL = 26 -- extra control radius a top-skill carrier earns (px)
 local POSSESS_DIST = 22 -- outfield control radius
 local KEEPER_DIST = 18 -- keeper catch radius (small enough that corners stay open)
 local KEEPER_GUARD = 28 -- how far off-centre a keeper slides (< half the mouth)
@@ -136,10 +145,21 @@ local CEIL_BOUNCE = 0.55
 
 -- Aerial play: an airborne ball at head height can be met first-time. Above
 -- VOLLEY_MAX_Z it's a HEADER (safe, moderate); below, a VOLLEY (harder and
--- riskier: it can be skied into the cage ceiling).
-local HEADER_MAX_Z = 60 -- headable up to here
-local VOLLEY_MAX_Z = 34 -- at/below this an aerial strike is a volley
-local AERIAL_REACH = 24 -- horizontal reach to meet an airborne ball
+-- riskier: it can be skied into the cage ceiling). Bands are generous so a
+-- dropping cross is reliably meetable — a clean volley shouldn't take frame-
+-- perfect timing.
+local HEADER_MAX_Z = 74 -- headable up to here
+local VOLLEY_MAX_Z = 44 -- at/below this an aerial strike is a volley
+local AERIAL_REACH = 24 -- AI horizontal reach to meet an airborne ball
+-- AERIAL_ASSIST: live-tunable — extra reach a HUMAN going for it earns (aim
+-- assist), so "attack the ball" connects without pixel-perfect positioning.
+local AERIAL_ANTICIPATE = 84 -- the ball magnet engages within this of a dropping ball
+local VOLLEY_SKY_SKILL = 0.6 -- technique cuts the volley-sky chance by up to this
+-- Cross-finishing aid: hand control to the best-placed attacker when a lofted
+-- ball flies into the human's attacking third, so one strike finishes it.
+local CROSS_AID_Z = 30 -- only a genuinely lofted ball triggers the aid
+local CROSS_AID_THIRD = 0.6 -- ... once it is this far into the attacking half (x fraction)
+local CROSS_AID_RANGE = 150 -- ... and only if an attacker is this close to meet it
 local HEADER_CD = 0.5 -- per-player cooldown between aerial attempts
 -- HEADER_SPEED: live-tunable — see sim/tuning.lua (F1 panel)
 local CLEAR_HEADER_SPEED = 320 -- defensive header clearance pace
@@ -236,6 +256,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field owned_verb SimVerb
 ---@field move_speed number
 ---@field shot_speed number
+---@field dribble number  -- 0..1 ball control (higher = tighter touches, harder to nick)
 ---@field is_keeper boolean
 ---@field radius number
 ---@field dash_cd number  -- AI tackle cooldown (seconds until it can challenge again)
@@ -393,6 +414,13 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             owned_verb = species_data.verb,
             move_speed = stats.move_speed(effective_stats),
             shot_speed = stats.shot_speed(effective_stats),
+            dribble = math.max(
+                0,
+                math.min(
+                    1,
+                    stats.dribble(effective_stats) + species.dribble_protection(species_data.verb)
+                )
+            ),
             is_keeper = pd.position == "keeper",
             radius = PLAYER_RADIUS,
             dash_cd = 0,
@@ -1800,6 +1828,22 @@ local function move_players(s, dt, input)
                 -- we override after the call when run_vel is still tiny.
                 local desired = moving and dir:normalized():scale(mv) or Vec2.new(0, 0)
                 local had_input_facing = moving and p.run_vel:length() <= RUN_VEL_FACE_MIN
+                -- Aerial magnet: going up for a dropping ball nearby (holding the
+                -- aerial button off the ball) glides the player toward it, so a
+                -- cross is met without pixel-perfect positioning. It overrides
+                -- the jockey slowdown and steers even from a standstill.
+                local going_aerial = (input.jockey or input.dash) and i ~= s.owner
+                if going_aerial and s.ball_z > GROUND_GRAB_HEIGHT and s.ball_vz < 0 then
+                    local to_ball = s.ball:sub(p.pos)
+                    local d = to_ball:length()
+                    if d > 1 and d <= AERIAL_ANTICIPATE then
+                        desired = desired:add(to_ball:normalized():scale(TUNE.AERIAL_MAGNET))
+                        local cap = p.move_speed * 1.3
+                        if desired:length() > cap then
+                            desired = desired:normalized():scale(cap)
+                        end
+                    end
+                end
                 apply_locomotion(s, p, desired, dt)
                 if jockeying then
                     -- Jockey stance: face the ball regardless of movement.
@@ -2464,16 +2508,37 @@ local function update_ball(s, dt, input)
             q.save_pending = nil
         end
         local owner = s.players[s.owner]
-        -- A keeper holds the ball in its hands (at its body, clamped clear of its
-        -- own line); outfielders dribble it ahead at their feet.
         if owner.is_keeper then
+            -- A keeper holds the ball in its hands, clamped clear of its own line.
             s.ball = keeper_hold_pos(s, owner)
+            s.ball_vel = Vec2.new(0, 0)
+            s.ball_z = 0 -- an owned ball is grounded (at feet / in hands)
+            s.ball_vz = 0
         else
-            s.ball = owner.pos:add(owner.facing:scale(STICK_AHEAD))
+            -- Touch-based dribble: the ball rolls free and the carrier nudges it
+            -- toward a touch point that rides further ahead the faster they run
+            -- (a heavier touch at pace). Dribble skill pulls the touch in toward
+            -- the feet and closes the gap faster. Push it past the (skill-scaled)
+            -- control radius and possession breaks — a heavy touch, robbed.
+            local skill = owner.dribble
+            local speed = owner.run_vel:length()
+            local lead = (DRIBBLE_LEAD_MIN + speed * TUNE.DRIBBLE_LEAD)
+                * (1 - DRIBBLE_SKILL_TIGHTEN * skill)
+            local touch_pt = owner.pos:add(owner.facing:scale(lead))
+            -- The ball rolls ALONG with the carrier (inherits their run velocity)
+            -- plus a corrective touch toward the feet-ahead point, so at pace it
+            -- settles further ahead instead of being left behind. A cleaner
+            -- toucher (skill) corrects harder, keeping it tighter.
+            local correct = touch_pt:sub(s.ball):scale(TUNE.DRIBBLE_TOUCH * (0.5 + 0.5 * skill))
+            s.ball_vel = owner.run_vel:add(correct)
+            s.ball = s.ball:add(s.ball_vel:scale(dt))
+            s.ball_z = 0
+            s.ball_vz = 0
+            local control = TUNE.DRIBBLE_CONTROL + DRIBBLE_CONTROL_SKILL * skill
+            if owner.pos:dist(s.ball) > control then
+                s.owner = nil -- ran too far ahead of the feet: it's loose now
+            end
         end
-        s.ball_vel = Vec2.new(0, 0)
-        s.ball_z = 0 -- an owned ball is grounded (at feet / in hands)
-        s.ball_vz = 0
 
         if owner.is_keeper then
             if is_human_player(s, s.owner) then
@@ -2656,14 +2721,20 @@ local function update_ball(s, dt, input)
     then
         local striker
         for i, p in ipairs(s.players) do
-            local aerial_reach = AERIAL_REACH + species.jump_reach(p.owned_verb)
-            if not p.is_keeper and p.header_cd <= 0 and p.pos:dist(s.ball) <= aerial_reach then
+            if not p.is_keeper and p.header_cd <= 0 then
                 if is_human_player(s, i) then
-                    if input.dash then
+                    -- Going for it = pressing OR holding the aerial button as the
+                    -- ball drops in. A generous assist reach means "attack the
+                    -- ball" connects without frame-perfect positioning.
+                    local going = input.dash or input.jockey
+                    local reach = AERIAL_REACH
+                        + TUNE.AERIAL_ASSIST
+                        + species.jump_reach(p.owned_verb)
+                    if going and p.pos:dist(s.ball) <= reach then
                         striker = i
                         break
                     end
-                else
+                elseif p.pos:dist(s.ball) <= AERIAL_REACH + species.jump_reach(p.owned_verb) then
                     local g = attack_goal(s, p.team)
                     local gl = Vec2.new((p.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
                     local own_third = (p.team == "home") and (p.pos.x < s.field.w * 0.33)
@@ -2713,7 +2784,9 @@ local function update_ball(s, dt, input)
                         { kind = "volley", x = s.ball.x, y = s.ball.y, player = p.id }
                     local roll
                     s.rng, roll = rng.roll(s.rng)
-                    if roll < TUNE.VOLLEY_SKY_P then
+                    -- A cleaner striker (technique) skies the volley less often.
+                    local sky_p = TUNE.VOLLEY_SKY_P * (1 - VOLLEY_SKY_SKILL * p.dribble)
+                    if roll < sky_p then
                         -- Skied! Blasted over everything; the cage returns it.
                         s.ball_vel = target:sub(p.pos):normalized():scale(p.shot_speed * 0.5)
                         s.ball_vz = 520
@@ -2936,6 +3009,29 @@ function match.step(s, dt, input)
     local owner_team = s.owner and s.players[s.owner].team or nil
     if s.human_controlled and owner_team == "away" and prev_owner_team ~= "away" then
         s.controlled = best_defender(s)
+    end
+
+    -- Cross aid: when a lofted ball flies into the human's attacking third and
+    -- the human isn't already on it, hand control to the attacker best placed to
+    -- meet it — so a single strike (with the aerial magnet) finishes the cross.
+    if
+        s.human_controlled
+        and owner_team ~= "home"
+        and s.ball_z > CROSS_AID_Z
+        and s.ball.x > s.field.w * CROSS_AID_THIRD
+    then
+        local best, best_d
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper then
+                local d = p.pos:dist(s.ball)
+                if not best_d or d < best_d then
+                    best_d, best = d, i
+                end
+            end
+        end
+        if best and best_d <= CROSS_AID_RANGE then
+            s.controlled = best
+        end
     end
 
     -- Keeper control: the human takes over the HOME keeper while it holds the

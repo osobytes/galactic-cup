@@ -65,6 +65,55 @@ tuning.knobs = {
         step = 0.05,
     },
 
+    -- Dribble (touch-based ball control)
+    {
+        key = "DRIBBLE_LEAD",
+        label = "Touch lead /speed",
+        cat = "Dribble",
+        default = 0.11,
+        min = 0.0,
+        max = 0.3,
+        step = 0.01,
+    },
+    {
+        key = "DRIBBLE_TOUCH",
+        label = "Touch stiffness",
+        cat = "Dribble",
+        default = 14,
+        min = 4,
+        max = 30,
+        step = 1,
+    },
+    {
+        key = "DRIBBLE_CONTROL",
+        label = "Control radius",
+        cat = "Dribble",
+        default = 34,
+        min = 20,
+        max = 80,
+        step = 2,
+    },
+
+    -- Aerial (headers, volleys, finishing crosses)
+    {
+        key = "AERIAL_ASSIST",
+        label = "Strike reach aid",
+        cat = "Aerial",
+        default = 44,
+        min = 0,
+        max = 80,
+        step = 4,
+    },
+    {
+        key = "AERIAL_MAGNET",
+        label = "Ball magnet /s",
+        cat = "Aerial",
+        default = 260,
+        min = 0,
+        max = 600,
+        step = 20,
+    },
+
     -- Attacking
     {
         key = "CHARGE_RATE",

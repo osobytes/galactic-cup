@@ -23,6 +23,18 @@ function stats.shot_speed(s)
     return BASE_SHOT + s.strength * SHOT_PER_STRENGTH
 end
 
+-- Dribble control: how tightly a carrier keeps the ball at their feet as they
+-- move. Technique is touch quality — a higher-technique player takes cleaner,
+-- closer touches, so the ball rides less far ahead and is harder to nick.
+local BASE_DRIBBLE = 0.25 -- control factor (0..1) at technique 0
+local DRIBBLE_PER_TECH = 0.065 -- extra control per technique point
+
+---@param s StatBlock
+---@return number  -- 0..1 control factor (higher = ball stays tighter to the feet)
+function stats.dribble(s)
+    return math.min(1, BASE_DRIBBLE + s.technique * DRIBBLE_PER_TECH)
+end
+
 -- Sprint: the hold-to-run burst. Stamina sets how long a full tank lasts.
 local BASE_SPRINT = 2.2 -- seconds of sprint at stamina 0
 local SPRINT_PER_STAMINA = 0.25 -- extra seconds per stamina point
