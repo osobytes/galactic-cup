@@ -3,6 +3,7 @@
 --   love . --test             -> run the headless test suite and exit with status code
 --   love . --sim [n]          -> play n unattended matches, print fun-proxy metrics, exit
 --   love . --rate-validate [n] -> validate frozen squad ratings over n paired seeds, exit
+--   love . --levers [n]       -> paired liveness checks for built-in manager levers, exit
 --   love . --sweep [n]        -> per-knob min/max sensitivity sweep over n seeds, exit
 --   love . --search K1,K2 [n] [start] -> coordinate ascent over the named knobs
 --                                (warm-started from tuning blob file `start`), exit
@@ -58,6 +59,23 @@ if has_flag("--rate-validate") then
         local n = tonumber(n_arg) and math.floor(tonumber(n_arg) --[[@as number]]) or 20
         local validation = require("sim.rating_validation")
         print(validation.report(validation.run(n)))
+        os.exit(0)
+    end
+    return
+end
+
+if has_flag("--levers") then
+    function love.load()
+        local n_arg = args_after("--levers")
+        local n = tonumber(n_arg) and math.floor(tonumber(n_arg) --[[@as number]]) or 30
+        assert(n > 0, "--levers needs a positive seed count")
+        local lever_metrics = require("sim.lever_metrics")
+        local seeds = {}
+        for i = 1, n do
+            seeds[i] = i
+        end
+        local config_name, runs = lever_metrics.run_built_ins(seeds, print)
+        print(lever_metrics.report(config_name, runs))
         os.exit(0)
     end
     return

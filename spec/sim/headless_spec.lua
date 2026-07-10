@@ -31,18 +31,19 @@ t.describe("headless.run_match", function()
     t.it("plays a full short match and produces sane metrics", function()
         local r = headless.run_match({ seed = 5, duration = 30 })
         local m = r.metrics
+        t.eq(r.score.home, m.goals_home)
+        t.eq(r.score.away, m.goals_away)
+        if r.score.home == r.score.away then
+            t.is_true(r.winner == nil, "draws have no winner")
+        else
+            t.eq(r.winner, r.score.home > r.score.away and "home" or "away")
+        end
         t.is_true(m.duration >= 29, "the match ran (close to) its full length")
         t.is_true(m.goals_total >= 0)
         t.is_true(m.turnovers_per_min >= 0)
         t.is_true(m.fun ~= nil and m.fun >= 0 and m.fun <= 1, "fun score is 0..1")
         if m.possession_balance then
             t.is_true(m.possession_balance > 0 and m.possession_balance < 1)
-        end
-        t.eq(r.score.home + r.score.away, m.goals_total, "score is exposed with the result")
-        if r.score.home == r.score.away then
-            t.eq(r.winner, nil)
-        else
-            t.eq(r.winner, r.score.home > r.score.away and "home" or "away")
         end
     end)
 
