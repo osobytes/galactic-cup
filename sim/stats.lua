@@ -1,5 +1,7 @@
--- Derives concrete physical quantities from a player's stat block.
--- This is the M1 bridge: manager-facing stats -> on-pitch behavior.
+-- Derives concrete physical quantities from a player's effective stat block.
+-- `sim.species.apply` owns the first attribute-modifying readability layer and
+-- match construction calls it exactly once before these mappings. Arenas own
+-- the reserved second layer; this module must not stack either layer itself.
 
 local stats = {}
 

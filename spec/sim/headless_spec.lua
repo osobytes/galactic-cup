@@ -99,6 +99,7 @@ t.describe("headless.run_match", function()
                 name = "Harness Gax",
                 planet = keeper.planet,
                 position = keeper.position,
+                species = keeper.species,
                 stats = keeper.stats,
                 trait = keeper.trait,
             }

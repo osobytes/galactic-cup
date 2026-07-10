@@ -49,6 +49,7 @@ local NO_INPUT = {
 ---@field tactic TacticData?
 ---@field away_tactic TacticData?
 ---@field players_by_id table<string, PlayerData>?
+---@field species_by_id table<string, SpeciesData>?
 ---@field field { w: number, h: number }?
 ---@field bot HeadlessBot?  -- defaults to "home"; "none" is match AI vs match AI
 
@@ -101,6 +102,7 @@ function headless.run_match(opts)
         tactic = opts.tactic,
         away_tactic = opts.away_tactic,
         players_by_id = opts.players_by_id,
+        species_by_id = opts.species_by_id,
         human_controlled = bot_mode == "home",
         duration = duration,
         max_goals = opts.max_goals or DEFAULT_MAX_GOALS,
@@ -161,6 +163,7 @@ end
 ---@field tactic TacticData?
 ---@field away_tactic TacticData?
 ---@field players_by_id table<string, PlayerData>?
+---@field species_by_id table<string, SpeciesData>?
 ---@field field { w: number, h: number }?
 ---@field bot HeadlessBot?
 
@@ -195,6 +198,7 @@ function headless.run_batch(opts)
             tactic = opts.tactic,
             away_tactic = opts.away_tactic,
             players_by_id = opts.players_by_id,
+            species_by_id = opts.species_by_id,
             field = opts.field,
             bot = opts.bot,
         })

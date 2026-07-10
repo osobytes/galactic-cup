@@ -10,12 +10,14 @@ local Vec2 = require("core.vec2")
 local rng = require("core.rng")
 local TUNE = require("sim.tuning").values -- live-tunable knobs (F1 panel)
 local stats = require("sim.stats")
+local species = require("sim.species")
 local placement = require("sim.placement")
 local ai = require("sim.ai")
 local passing = require("sim.passing")
 local formations = require("data.formations")
 local tactics = require("data.tactics")
 local player_pool = require("data.players")
+local species_pool = require("data.species")
 
 local PLAYER_RADIUS = 12
 local BALL_RADIUS = 6
@@ -230,6 +232,8 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field run_vel Vec2  -- locomotion velocity (px/s); accel/decel toward desired each tick
 ---@field facing Vec2
 ---@field anchor Vec2
+---@field species_id string
+---@field owned_verb SimVerb
 ---@field move_speed number
 ---@field shot_speed number
 ---@field is_keeper boolean
@@ -335,10 +339,11 @@ end
 ---@param side "home"|"away"
 ---@param field { w: number, h: number }
 ---@param by_id table<string, PlayerData>
+---@param species_by_id table<string, SpeciesData>
 ---@param formation_id string?  -- override team.formation
 ---@param line_shift number  -- tactic depth bias (fraction of pitch, toward attack)
 ---@return MatchPlayer[]
-local function build_team(team, side, field, by_id, formation_id, line_shift)
+local function build_team(team, side, field, by_id, species_by_id, formation_id, line_shift)
     local formation = formations[formation_id or team.formation]
     assert(formation, "unknown formation: " .. tostring(formation_id or team.formation))
     local anchors = placement.anchors(formation, side, field)
@@ -365,6 +370,9 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
     local list = {}
     for i, id in ipairs(ordered) do
         local pd = by_id[id]
+        local species_data = species_by_id[pd.species]
+        assert(species_data, "unknown species: " .. tostring(pd.species))
+        local effective_stats = species.apply(pd.stats, species_data)
         local base = anchors[i]
         -- Outfield anchors shift with the tactic; the keeper (i == 1) stays home.
         local ax = base.x
@@ -381,16 +389,18 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             run_vel = Vec2.new(0, 0),
             facing = Vec2.new(side == "home" and 1 or -1, 0),
             anchor = anchor,
-            move_speed = stats.move_speed(pd.stats),
-            shot_speed = stats.shot_speed(pd.stats),
+            species_id = species_data.id,
+            owned_verb = species_data.verb,
+            move_speed = stats.move_speed(effective_stats),
+            shot_speed = stats.shot_speed(effective_stats),
             is_keeper = pd.position == "keeper",
             radius = PLAYER_RADIUS,
             dash_cd = 0,
             dodge_cd = 0,
             dodge_timer = 0,
             dodge_dir = Vec2.new(0, 0),
-            reach = (pd.position == "keeper") and stats.keeper_reach(pd.stats) or 0,
-            handling = (pd.position == "keeper") and stats.keeper_handling(pd.stats) or 0,
+            reach = (pd.position == "keeper") and stats.keeper_reach(effective_stats) or 0,
+            handling = (pd.position == "keeper") and stats.keeper_handling(effective_stats) or 0,
             dive_timer = 0,
             dive_dir = Vec2.new(0, 0),
             dive_delay = 0,
@@ -406,7 +416,7 @@ local function build_team(team, side, field, by_id, formation_id, line_shift)
             throw_timer = 0,
             receive_timer = 0,
             sprint_meter = 1,
-            sprint_dur = stats.sprint_duration(pd.stats),
+            sprint_dur = stats.sprint_duration(effective_stats),
             sprinting = false,
             save_pending = nil,
             save_timer = 0,
@@ -553,11 +563,12 @@ local function marking_of(tactic)
     return tactic.marking or DEFAULT_MARKING
 end
 
----@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, human_controlled: boolean? }
+---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, human_controlled: boolean? }
 ---@return MatchState
 function match.new(opts)
     local field = opts.field
     local by_id = opts.players_by_id or pool_by_id()
+    local species_by_id = opts.species_by_id or species_pool
     local home_tactic = opts.tactic or tactics.balanced
     local away_tactic = opts.away_tactic or tactics.balanced
 
@@ -568,9 +579,17 @@ function match.new(opts)
         rstate = rng.roll(rstate)
     end
 
-    local home =
-        build_team(opts.home, "home", field, by_id, opts.home_formation, home_tactic.line_shift)
-    local away = build_team(opts.away, "away", field, by_id, nil, away_tactic.line_shift)
+    local home = build_team(
+        opts.home,
+        "home",
+        field,
+        by_id,
+        species_by_id,
+        opts.home_formation,
+        home_tactic.line_shift
+    )
+    local away =
+        build_team(opts.away, "away", field, by_id, species_by_id, nil, away_tactic.line_shift)
     local players = {}
     for _, p in ipairs(home) do
         players[#players + 1] = p
@@ -814,7 +833,8 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
         s.ball_vel, s.ball_vz = lob_launch(owner.pos, target.pos, blocker_f, clear_h or LOB_CLEAR_H)
     else
         local d = owner.pos:dist(target.pos)
-        s.ball_vel = target.pos:sub(owner.pos):normalized():scale(pass_speed_for(d))
+        local pass_speed = pass_speed_for(d) * species.link_pass_speed(owner.owned_verb)
+        s.ball_vel = target.pos:sub(owner.pos):normalized():scale(pass_speed)
         s.ball_vz = 0
     end
 end
@@ -1225,11 +1245,13 @@ local function attempt_steals(s)
         if p.team ~= owner.team and not p.is_keeper and p.stun_timer <= 0 then
             local human = is_human_player(s, i)
             local d = p.pos:dist(s.ball) -- reach for the ball: shielding matters
+            local species_reach = species.collision_reach(p.owned_verb)
+                - species.dribble_protection(owner.owned_verb)
             -- The human's poke also works at body-contact range from ANY angle
             -- (a toe through the legs): chasing a carrier is the default
             -- defensive situation and must be winnable. AI challenges stay
             -- strictly ball-side, so the human's own shielding keeps working.
-            if human and p.pos:dist(owner.pos) <= STEAL_DIST then
+            if human and p.pos:dist(owner.pos) <= STEAL_DIST + species_reach then
                 d = math.min(d, STEAL_DIST)
             end
             local sliding = false
@@ -1256,7 +1278,7 @@ local function attempt_steals(s)
                     p.stun_timer = math.max(p.stun_timer, TUNE.WHIFF_STUMBLE)
                 end
             end
-            if active and d <= reach then
+            if active and d <= reach + species_reach then
                 local dir = p.pos:sub(owner.pos)
                 if dir.x == 0 and dir.y == 0 then
                     dir = p.facing
@@ -1609,7 +1631,11 @@ local function resolve_collisions(s)
             local pa, pb = pl[a], pl[b]
             local delta = pa.pos:sub(pb.pos)
             local d = delta:length()
-            local mind = pa.radius + pb.radius
+            local collision_reach = math.max(
+                species.collision_reach(pa.owned_verb),
+                species.collision_reach(pb.owned_verb)
+            )
+            local mind = pa.radius + pb.radius + collision_reach
             if d < mind then
                 local dir = (d > 0) and delta:normalized() or Vec2.new(1, 0)
                 local pen = mind - d
@@ -1762,7 +1788,7 @@ local function move_players(s, dt, input)
                 if jockeying then
                     mv = mv * TUNE.JOCKEY_SLOW
                 elseif p.sprinting then
-                    mv = mv * TUNE.SPRINT_MULT
+                    mv = mv * TUNE.SPRINT_MULT * species.burst_speed(p.owned_verb)
                 end
                 -- Plant during wind-up: striker slows to 30% while winding up.
                 if p.windup_timer > 0 then
@@ -2149,7 +2175,8 @@ local function attempt_save(s)
                     and z_cross <= KEEPER_AIR_GRAB
                 -- How far the keeper has to dive along its line to reach the shot.
                 local dive_dist = math.abs(keeper.pos.y - y_cross)
-                if on_target and dive_dist <= keeper.reach and eta then
+                local block_reach = species.block_reach(keeper.owned_verb)
+                if on_target and dive_dist <= keeper.reach + block_reach and eta then
                     -- Queue the dive so the lunge window covers the arrival:
                     -- a shot still half a second out gets a set keeper first,
                     -- then a dive that meets the ball, not one that finished
@@ -2581,7 +2608,7 @@ local function update_ball(s, dt, input)
                 if not p.is_keeper and p.receive_timer <= 0 then
                     local off = s.ball:sub(p.pos)
                     local d = off:length()
-                    local contact = p.radius + BALL_RADIUS
+                    local contact = p.radius + BALL_RADIUS + species.block_reach(p.owned_verb)
                     if d < contact then
                         local n = (d > 0) and off:normalized() or Vec2.new(1, 0)
                         local vn = s.ball_vel.x * n.x + s.ball_vel.y * n.y
@@ -2629,7 +2656,8 @@ local function update_ball(s, dt, input)
     then
         local striker
         for i, p in ipairs(s.players) do
-            if not p.is_keeper and p.header_cd <= 0 and p.pos:dist(s.ball) <= AERIAL_REACH then
+            local aerial_reach = AERIAL_REACH + species.jump_reach(p.owned_verb)
+            if not p.is_keeper and p.header_cd <= 0 and p.pos:dist(s.ball) <= aerial_reach then
                 if is_human_player(s, i) then
                     if input.dash then
                         striker = i
@@ -2720,7 +2748,7 @@ local function update_ball(s, dt, input)
                 and not p.save_pending -- a committed save resolves on contact instead
                 and in_claim_zone(s, p)
                 and s.ball_z <= KEEPER_AIR_GRAB
-                and p.pos:dist(s.ball) <= KEEPER_CLAIM_DIST
+                and p.pos:dist(s.ball) <= KEEPER_CLAIM_DIST + species.jump_reach(p.owned_verb)
             then
                 best = i
                 break
