@@ -1,9 +1,10 @@
 -- Pure 5v5 match simulation. No love, no drawing, no input gathering.
 --
--- Home attacks right (scores in the right goal); away attacks left. One home
--- player is `controlled` by the human; everyone else is AI. Possession is a
--- single `owner` index (nil = loose ball). All state lives in MatchState and
--- `step` advances it deterministically.
+-- Home attacks right (scores in the right goal); away attacks left. By default,
+-- one home player is `controlled` by the human and everyone else is AI. Fully
+-- simulated fixtures can set `human_controlled = false` so every player uses
+-- the match AI. Possession is a single `owner` index (nil = loose ball). All
+-- state lives in MatchState and `step` advances it deterministically.
 
 local Vec2 = require("core.vec2")
 local rng = require("core.rng")
@@ -300,7 +301,8 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field ball_z number  -- height above the pitch (0 = on the ground)
 ---@field ball_vz number  -- vertical velocity (+ = rising)
 ---@field owner integer?  -- index into players, nil if loose
----@field controlled integer  -- index of the human-controlled home player
+---@field controlled integer  -- selected home player; valid even when every player is AI
+---@field human_controlled boolean  -- whether `controlled` takes human-input branches
 ---@field score { home: integer, away: integer }
 ---@field time_left number
 ---@field max_goals integer
@@ -435,6 +437,13 @@ local function most_advanced_home(players)
     return best or 1
 end
 
+---@param s MatchState
+---@param player_idx integer
+---@return boolean
+local function is_human_player(s, player_idx)
+    return s.human_controlled and player_idx == s.controlled
+end
+
 -- Reset for a kickoff. `kicking` is the team restarting play (after conceding,
 -- per the laws of the game); the opening kickoff is the home side's.
 ---@param s MatchState
@@ -544,7 +553,7 @@ local function marking_of(tactic)
     return tactic.marking or DEFAULT_MARKING
 end
 
----@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>? }
+---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, human_controlled: boolean? }
 ---@return MatchState
 function match.new(opts)
     local field = opts.field
@@ -579,6 +588,7 @@ function match.new(opts)
         goal_home = { x = -GOAL_DEPTH, y = mouth_y, w = GOAL_DEPTH, h = GOAL_MOUTH },
         goal_away = { x = field.w, y = mouth_y, w = GOAL_DEPTH, h = GOAL_MOUTH },
         players = players,
+        human_controlled = opts.human_controlled ~= false,
         ball = Vec2.new(0, 0),
         ball_vel = Vec2.new(0, 0),
         ball_z = 0,
@@ -634,7 +644,7 @@ local function nearest_n(s, team, count)
         -- The controlled player is the human's business, not an AI resource:
         -- counting them here used to spend the whole chase allocation on the
         -- human, leaving every AI teammate statically watching a loose ball.
-        if p.team == team and not p.is_keeper and i ~= s.controlled then
+        if p.team == team and not p.is_keeper and not is_human_player(s, i) then
             cand[#cand + 1] = { idx = i, d = p.pos:dist(s.ball) }
         end
     end
@@ -769,7 +779,7 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     -- Control follows a HUMAN pass to its receiver (standard soccer-game
     -- behavior): you take over the man the ball is travelling to — attack the
     -- cross, time the first touch — while it is still in flight.
-    if owner_idx == s.controlled and target.team == "home" and not target.is_keeper then
+    if is_human_player(s, owner_idx) and target.team == "home" and not target.is_keeper then
         s.controlled = target_idx
     end
     -- A defender right on the release point eats a driven ball — and even a lob
@@ -1213,7 +1223,7 @@ local function attempt_steals(s)
     end
     for i, p in ipairs(s.players) do
         if p.team ~= owner.team and not p.is_keeper and p.stun_timer <= 0 then
-            local human = i == s.controlled
+            local human = is_human_player(s, i)
             local d = p.pos:dist(s.ball) -- reach for the ball: shielding matters
             -- The human's poke also works at body-contact range from ANY angle
             -- (a toe through the legs): chasing a carrier is the default
@@ -1341,7 +1351,12 @@ local function offball_targets(s, pos)
         -- This team's off-ball outfielders (exclude keeper, ball-owner, human).
         local mine = {}
         for i, p in ipairs(s.players) do
-            if p.team == team and not p.is_keeper and i ~= s.owner and i ~= s.controlled then
+            if
+                p.team == team
+                and not p.is_keeper
+                and i ~= s.owner
+                and not is_human_player(s, i)
+            then
                 mine[#mine + 1] = i
             end
         end
@@ -1672,7 +1687,7 @@ local function move_players(s, dt, input)
     local targets, urgent = offball_targets(s, prev)
 
     for i, p in ipairs(s.players) do
-        if i == s.controlled then
+        if is_human_player(s, i) then
             -- Tackle button: a committed slide while SPRINTING, else a standing
             -- poke — one legible rule (sprint + tackle = the big slide). Slide
             -- speed scales off current velocity (p.vel) so it feels relative.
@@ -2392,7 +2407,7 @@ end
 ---@param s MatchState
 local function update_ball(s, dt, input)
     -- Only the controlled carrier accumulates charge; drop it otherwise.
-    if not (s.owner and s.owner == s.controlled) then
+    if not (s.owner and is_human_player(s, s.owner)) then
         s.charge = 0
         s.pass_charge = 0
         s.pass_target = nil
@@ -2434,7 +2449,7 @@ local function update_ball(s, dt, input)
         s.ball_vz = 0
 
         if owner.is_keeper then
-            if s.owner == s.controlled then
+            if is_human_player(s, s.owner) then
                 -- Preview: while pass_held, show which teammate would receive.
                 if input.pass_held then
                     update_pass_target_keeper(s, input)
@@ -2450,7 +2465,7 @@ local function update_ball(s, dt, input)
                     keeper_distribute(s, s.owner)
                 end
             end
-        elseif s.owner == s.controlled then
+        elseif is_human_player(s, s.owner) then
             -- A full meter LETS FLY on its own (predictable, like the meter
             -- promises); release fires early at the current charge.
             -- During wind-up: inputs are locked out (shot is committed, params
@@ -2615,7 +2630,7 @@ local function update_ball(s, dt, input)
         local striker
         for i, p in ipairs(s.players) do
             if not p.is_keeper and p.header_cd <= 0 and p.pos:dist(s.ball) <= AERIAL_REACH then
-                if i == s.controlled then
+                if is_human_player(s, i) then
                     if input.dash then
                         striker = i
                         break
@@ -2637,7 +2652,7 @@ local function update_ball(s, dt, input)
             p.header_cd = HEADER_CD
             local own_third = (p.team == "home") and (p.pos.x < s.field.w * 0.33)
                 or (p.team == "away" and p.pos.x > s.field.w * 0.67)
-            if own_third and striker ~= s.controlled then
+            if own_third and not is_human_player(s, striker) then
                 -- Defensive header: clear it high upfield, away from the middle.
                 s.events[#s.events + 1] =
                     { kind = "header", x = s.ball.x, y = s.ball.y, player = p.id }
@@ -2654,7 +2669,7 @@ local function update_ball(s, dt, input)
                 -- human holding a direction strikes THAT way instead (a
                 -- directed header/flick — pass it down, nod it wide, anything).
                 local target
-                if striker == s.controlled and (input.move.x ~= 0 or input.move.y ~= 0) then
+                if is_human_player(s, striker) and (input.move.x ~= 0 or input.move.y ~= 0) then
                     target = p.pos:add(input.move:normalized():scale(240))
                 else
                     local keeper = team_keeper(s, p.team == "home" and "away" or "home")
@@ -2749,7 +2764,7 @@ local function update_ball(s, dt, input)
             s.ball_spin = 0
             -- Auto-switch: the human takes over whichever home outfielder wins the
             -- ball (like FIFA / Mario Strikers). Keepers stay AI.
-            if bp.team == "home" and not bp.is_keeper then
+            if s.human_controlled and bp.team == "home" and not bp.is_keeper then
                 s.controlled = best
             end
         end
@@ -2876,7 +2891,7 @@ function match.step(s, dt, input)
         end
     end
 
-    if input.switch then
+    if s.human_controlled and input.switch then
         s.controlled = next_home_outfield(s, s.controlled)
     end
 
@@ -2891,20 +2906,22 @@ function match.step(s, dt, input)
     -- control to the home outfielder best placed to defend (nearest the ball)
     -- — mirroring the existing auto-switch when a home player wins it.
     local owner_team = s.owner and s.players[s.owner].team or nil
-    if owner_team == "away" and prev_owner_team ~= "away" then
+    if s.human_controlled and owner_team == "away" and prev_owner_team ~= "away" then
         s.controlled = best_defender(s)
     end
 
     -- Keeper control: the human takes over the HOME keeper while it holds the
     -- ball (to pick the distribution), and control returns to an outfielder
     -- the moment the keeper no longer has it.
-    if s.owner and s.players[s.owner].team == "home" and s.players[s.owner].is_keeper then
-        if s.owner ~= prev_owner then
-            s.controlled = s.owner
-            s.players[s.owner].hold_timer = TUNE.KEEPER_HOLD_HUMAN
+    if s.human_controlled then
+        if s.owner and s.players[s.owner].team == "home" and s.players[s.owner].is_keeper then
+            if s.owner ~= prev_owner then
+                s.controlled = s.owner
+                s.players[s.owner].hold_timer = TUNE.KEEPER_HOLD_HUMAN
+            end
+        elseif s.players[s.controlled].is_keeper then
+            s.controlled = best_defender(s)
         end
-    elseif s.players[s.controlled].is_keeper then
-        s.controlled = best_defender(s)
     end
 
     local scorer = check_goal(s, prev_ball_x)

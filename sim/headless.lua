@@ -1,8 +1,10 @@
--- Headless match batches: play unattended seeded matches with the human-proxy
--- bot on the controlled slot and fold each into fun-proxy metrics
--- (sim/metrics.lua). Pure — no love, no I/O; `report` returns a string and the
--- caller decides where it goes. Entry point: `love . --sim [n]` in main.lua.
+-- Headless match batches: play unattended seeded matches with either the
+-- human-proxy bot on the controlled slot or the match AI on both teams, then
+-- fold each into fun-proxy metrics (sim/metrics.lua). Pure — no love, no I/O;
+-- `report` returns a string and the caller decides where it goes. Entry point:
+-- `love . --sim [n]` in main.lua.
 
+local Vec2 = require("core.vec2")
 local match = require("sim.match")
 local bot = require("sim.bot")
 local metrics = require("sim.metrics")
@@ -17,17 +19,62 @@ local DEFAULT_DURATION = 120
 local DEFAULT_MAX_GOALS = 3
 local MAX_STEPS_SLACK = 600 -- overtime guard: a stuck sim must not hang the batch
 
+---@type MatchInput
+local NO_INPUT = {
+    move = Vec2.new(0, 0),
+    shoot = false,
+    shoot_held = false,
+    pass = false,
+    pass_held = false,
+    switch = false,
+    dash = false,
+    dodge = false,
+    lob = false,
+    sprint = false,
+    jockey = false,
+}
+
+---@alias HeadlessBot "home"|"none"
+
 ---@class HeadlessOpts
 ---@field seed number
 ---@field duration number?
 ---@field max_goals integer?
 ---@field reaction number?  -- bot latency override
 ---@field tuning_blob string?  -- knob overrides in sim/tuning serialize format
+---@field home TeamData?
+---@field away TeamData?
+---@field home_formation string?
+---@field away_formation string?
+---@field tactic TacticData?
+---@field away_tactic TacticData?
+---@field players_by_id table<string, PlayerData>?
+---@field field { w: number, h: number }?
+---@field bot HeadlessBot?  -- defaults to "home"; "none" is match AI vs match AI
 
 ---@class MatchResult
 ---@field seed number
 ---@field metrics MatchMetrics  -- includes `fun` (the composite score)
 ---@field desirability table<string, number>  -- per-banded-metric 0..1
+
+-- `match.new` currently has no away-formation override. Keep that match-layer
+-- API unchanged by making a per-run TeamData view; canonical team data remains
+-- immutable and the existing team.formation path still builds the away side.
+---@param team TeamData
+---@param formation string?
+---@return TeamData
+local function with_formation(team, formation)
+    if not formation then
+        return team
+    end
+    return {
+        id = team.id,
+        name = team.name,
+        color = team.color,
+        formation = formation,
+        roster = team.roster,
+    }
+end
 
 -- Play one full match and measure it. Applies `tuning_blob` on top of the
 -- defaults for the run and restores the previous knob values afterwards, so
@@ -40,23 +87,39 @@ function headless.run_match(opts)
         tuning.deserialize(opts.tuning_blob)
     end
 
+    local bot_mode = opts.bot or "home"
+    assert(bot_mode == "home" or bot_mode == "none", "unknown headless bot mode: " .. bot_mode)
+    local field = opts.field or FIELD
+    local duration = opts.duration or DEFAULT_DURATION
     local s = match.new({
-        home = teams.nebula,
-        away = teams.orion,
-        field = { w = FIELD.w, h = FIELD.h },
-        duration = opts.duration or DEFAULT_DURATION,
+        home = opts.home or teams.nebula,
+        away = with_formation(opts.away or teams.orion, opts.away_formation),
+        field = { w = field.w, h = field.h },
+        home_formation = opts.home_formation,
+        tactic = opts.tactic,
+        away_tactic = opts.away_tactic,
+        players_by_id = opts.players_by_id,
+        human_controlled = bot_mode == "home",
+        duration = duration,
         max_goals = opts.max_goals or DEFAULT_MAX_GOALS,
         seed = opts.seed,
     })
-    local b = bot.new({ seed = opts.seed, reaction = opts.reaction })
+    ---@type BotState?
+    local b = nil
+    if bot_mode == "home" then
+        b = bot.new({ seed = opts.seed, reaction = opts.reaction })
+    end
+    -- Metrics only fold MatchState/events; they never read bot or controlled-side
+    -- state, so the same collector is valid for home-proxy and all-AI fixtures.
     local c = metrics.new(s)
 
-    local max_steps = math.ceil((opts.duration or DEFAULT_DURATION) / DT) + MAX_STEPS_SLACK
+    local max_steps = math.ceil(duration / DT) + MAX_STEPS_SLACK
     for _ = 1, max_steps do
         if s.finished then
             break
         end
-        match.step(s, DT, bot.input(b, s, DT))
+        local input = b and bot.input(b, s, DT) or NO_INPUT
+        match.step(s, DT, input)
         metrics.observe(c, s, DT)
     end
 
@@ -77,6 +140,15 @@ end
 ---@field max_goals integer?
 ---@field reaction number?
 ---@field tuning_blob string?
+---@field home TeamData?
+---@field away TeamData?
+---@field home_formation string?
+---@field away_formation string?
+---@field tactic TacticData?
+---@field away_tactic TacticData?
+---@field players_by_id table<string, PlayerData>?
+---@field field { w: number, h: number }?
+---@field bot HeadlessBot?
 
 ---@class BatchResult
 ---@field matches MatchResult[]
@@ -102,6 +174,15 @@ function headless.run_batch(opts)
             max_goals = opts.max_goals,
             reaction = opts.reaction,
             tuning_blob = opts.tuning_blob,
+            home = opts.home,
+            away = opts.away,
+            home_formation = opts.home_formation,
+            away_formation = opts.away_formation,
+            tactic = opts.tactic,
+            away_tactic = opts.away_tactic,
+            players_by_id = opts.players_by_id,
+            field = opts.field,
+            bot = opts.bot,
         })
         matches[#matches + 1] = r
         all[#all + 1] = r.metrics

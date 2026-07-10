@@ -51,6 +51,34 @@ t.describe("match.new", function()
         t.is_true(s.players[s.controlled].team == "home")
         t.is_true(not s.players[s.controlled].is_keeper)
     end)
+
+    t.it("lets match AI drive both teams when no player is human-controlled", function()
+        ---@param owner_idx integer
+        ---@param direction number
+        local function assert_ai_owner_moves(owner_idx, direction)
+            local s = match.new({
+                home = teams.nebula,
+                away = teams.orion,
+                field = { w = 960, h = 540 },
+                human_controlled = false,
+            })
+            local owner = s.players[owner_idx]
+            s.owner = owner_idx
+            s.ball = owner.pos
+            local before_x = owner.pos.x
+
+            match.step(s, 1 / 60, NO_INPUT)
+
+            t.is_true(
+                (owner.pos.x - before_x) * direction > 0,
+                owner.team .. " owner should dribble toward the opposing goal"
+            )
+        end
+
+        local opening_owner = new_match().controlled
+        assert_ai_owner_moves(opening_owner, 1)
+        assert_ai_owner_moves(7, -1)
+    end)
 end)
 
 t.describe("match.step timer", function()
