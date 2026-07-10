@@ -11,6 +11,7 @@ local function player(id, position, value)
         name = id,
         planet = "Test",
         position = position,
+        species = "neutral",
         stats = {
             pace = value,
             strength = value,
