@@ -38,6 +38,12 @@ t.describe("headless.run_match", function()
         if m.possession_balance then
             t.is_true(m.possession_balance > 0 and m.possession_balance < 1)
         end
+        t.eq(r.score.home + r.score.away, m.goals_total, "score is exposed with the result")
+        if r.score.home == r.score.away then
+            t.eq(r.winner, nil)
+        else
+            t.eq(r.winner, r.score.home > r.score.away and "home" or "away")
+        end
     end)
 
     t.it("is deterministic: same seed, identical metrics", function()

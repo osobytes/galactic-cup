@@ -2,6 +2,7 @@
 --   love .                    -> run the game (screen stack)
 --   love . --test             -> run the headless test suite and exit with status code
 --   love . --sim [n]          -> play n unattended matches, print fun-proxy metrics, exit
+--   love . --rate-validate [n] -> validate frozen squad ratings over n paired seeds, exit
 --   love . --sweep [n]        -> per-knob min/max sensitivity sweep over n seeds, exit
 --   love . --search K1,K2 [n] [start] -> coordinate ascent over the named knobs
 --                                (warm-started from tuning blob file `start`), exit
@@ -46,6 +47,17 @@ if has_flag("--sim") then
         local n = tonumber(n_arg) and math.floor(tonumber(n_arg) --[[@as number]]) or 20
         local headless = require("sim.headless")
         print(headless.report(headless.run_batch({ n = n })))
+        os.exit(0)
+    end
+    return
+end
+
+if has_flag("--rate-validate") then
+    function love.load()
+        local n_arg = args_after("--rate-validate")
+        local n = tonumber(n_arg) and math.floor(tonumber(n_arg) --[[@as number]]) or 20
+        local validation = require("sim.rating_validation")
+        print(validation.report(validation.run(n)))
         os.exit(0)
     end
     return

@@ -56,6 +56,8 @@ local NO_INPUT = {
 ---@field seed number
 ---@field metrics MatchMetrics  -- includes `fun` (the composite score)
 ---@field desirability table<string, number>  -- per-banded-metric 0..1
+---@field score { home: integer, away: integer }
+---@field winner "home"|"away"?
 
 -- `match.new` currently has no away-formation override. Keep that match-layer
 -- API unchanged by making a per-run TeamData view; canonical team data remains
@@ -130,7 +132,19 @@ function headless.run_match(opts)
     local m = metrics.finish(c, s)
     local fun, per = metrics.fun_score(m)
     m.fun = fun
-    return { seed = opts.seed, metrics = m, desirability = per }
+    local winner = nil
+    if s.score.home > s.score.away then
+        winner = "home"
+    elseif s.score.away > s.score.home then
+        winner = "away"
+    end
+    return {
+        seed = opts.seed,
+        metrics = m,
+        desirability = per,
+        score = { home = s.score.home, away = s.score.away },
+        winner = winner,
+    }
 end
 
 ---@class BatchOpts
