@@ -46,13 +46,14 @@ function M.layout(state)
         layout[#layout + 1] = {
             id = "player_" .. i,
             kind = "card",
-            text = ("%s   (%s)\nSPD %d   POW %d   TEC %d   DEF %d"):format(
+            text = ("%s   (%s)\nPAC %d   STR %d   TEC %d   STA %d   MEN %d"):format(
                 p.name,
                 p.position,
-                p.stats.speed,
-                p.stats.power,
+                p.stats.pace,
+                p.stats.strength,
                 p.stats.technique,
-                p.stats.defense
+                p.stats.stamina,
+                p.stats.mental
             ),
             rect = { x = vp.w / 2 - 260, y = y, w = 520, h = 54 },
         }

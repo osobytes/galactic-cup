@@ -3,11 +3,11 @@
 ---@alias Position "keeper"|"defender"|"midfielder"|"forward"
 
 ---@class StatBlock
----@field speed integer
----@field power integer
+---@field pace integer
+---@field strength integer
 ---@field technique integer
----@field defense integer
 ---@field stamina integer
+---@field mental integer
 
 ---@class PlayerData
 ---@field id string
@@ -24,7 +24,7 @@ return {
         name = "Zyro Vex",
         planet = "Kairon-9",
         position = "forward",
-        stats = { speed = 8, power = 6, technique = 7, defense = 2, stamina = 5 },
+        stats = { pace = 8, strength = 6, technique = 7, stamina = 5, mental = 2 },
         trait = "comet_first_touch",
     },
     {
@@ -32,7 +32,7 @@ return {
         name = "Mika Olu",
         planet = "Vega Prime",
         position = "forward",
-        stats = { speed = 7, power = 5, technique = 8, defense = 3, stamina = 6 },
+        stats = { pace = 7, strength = 5, technique = 8, stamina = 6, mental = 3 },
         trait = "nebula_vision",
     },
     {
@@ -40,7 +40,7 @@ return {
         name = "Rok Tann",
         planet = "Titan Reach",
         position = "midfielder",
-        stats = { speed = 5, power = 7, technique = 6, defense = 5, stamina = 7 },
+        stats = { pace = 5, strength = 7, technique = 6, stamina = 7, mental = 5 },
         trait = "quantum_pass",
     },
     {
@@ -48,7 +48,7 @@ return {
         name = "Sela Dwin",
         planet = "Andromeda Fringe",
         position = "midfielder",
-        stats = { speed = 6, power = 4, technique = 7, defense = 6, stamina = 6 },
+        stats = { pace = 6, strength = 4, technique = 7, stamina = 6, mental = 6 },
         trait = "solar_flare_sprint",
     },
     {
@@ -56,7 +56,7 @@ return {
         name = "Brakka",
         planet = "Orion Belt",
         position = "defender",
-        stats = { speed = 4, power = 8, technique = 3, defense = 8, stamina = 7 },
+        stats = { pace = 4, strength = 8, technique = 3, stamina = 7, mental = 8 },
         trait = "meteor_tackle",
     },
     {
@@ -64,7 +64,7 @@ return {
         name = "Veil Nyx",
         planet = "Europa Deep",
         position = "defender",
-        stats = { speed = 5, power = 6, technique = 4, defense = 7, stamina = 6 },
+        stats = { pace = 5, strength = 6, technique = 4, stamina = 6, mental = 7 },
         trait = "gravity_anchor",
     },
     {
@@ -72,7 +72,7 @@ return {
         name = "Ozzo",
         planet = "Kairon-9",
         position = "keeper",
-        stats = { speed = 4, power = 5, technique = 4, defense = 8, stamina = 8 },
+        stats = { pace = 4, strength = 5, technique = 4, stamina = 8, mental = 8 },
         trait = "zero_g_reflex",
     },
     {
@@ -80,17 +80,17 @@ return {
         name = "Tib Quell",
         planet = "Mars Colony",
         position = "midfielder",
-        stats = { speed = 6, power = 6, technique = 6, defense = 5, stamina = 5 },
+        stats = { pace = 6, strength = 6, technique = 6, stamina = 5, mental = 5 },
         trait = "comet_first_touch",
     },
 
-    -- Orion Miners: a physical asteroid-colony team (low technique, high power/defense).
+    -- Orion Miners: a physical asteroid-colony team (low technique, high strength/mental).
     {
         id = "gax_oru",
         name = "Gax Oru",
         planet = "Orion Belt",
         position = "keeper",
-        stats = { speed = 4, power = 6, technique = 3, defense = 8, stamina = 8 },
+        stats = { pace = 4, strength = 6, technique = 3, stamina = 8, mental = 8 },
         trait = "gravity_anchor",
     },
     {
@@ -98,7 +98,7 @@ return {
         name = "Drell",
         planet = "Orion Belt",
         position = "defender",
-        stats = { speed = 4, power = 9, technique = 2, defense = 8, stamina = 7 },
+        stats = { pace = 4, strength = 9, technique = 2, stamina = 7, mental = 8 },
         trait = "meteor_tackle",
     },
     {
@@ -106,7 +106,7 @@ return {
         name = "Morv",
         planet = "Ceres Outpost",
         position = "midfielder",
-        stats = { speed = 5, power = 7, technique = 4, defense = 6, stamina = 7 },
+        stats = { pace = 5, strength = 7, technique = 4, stamina = 7, mental = 6 },
         trait = "meteor_tackle",
     },
     {
@@ -114,7 +114,7 @@ return {
         name = "Krag",
         planet = "Orion Belt",
         position = "forward",
-        stats = { speed = 6, power = 8, technique = 4, defense = 3, stamina = 6 },
+        stats = { pace = 6, strength = 8, technique = 4, stamina = 6, mental = 3 },
         trait = "comet_first_touch",
     },
     {
@@ -122,7 +122,7 @@ return {
         name = "Tox Vren",
         planet = "Ceres Outpost",
         position = "forward",
-        stats = { speed = 7, power = 7, technique = 5, defense = 3, stamina = 5 },
+        stats = { pace = 7, strength = 7, technique = 5, stamina = 5, mental = 3 },
         trait = "solar_flare_sprint",
     },
 }

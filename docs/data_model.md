@@ -11,11 +11,11 @@ declarations live next to their data; this file is the human-readable overview.
 ---@alias Position "keeper"|"defender"|"midfielder"|"forward"
 
 ---@class StatBlock
----@field speed integer      -- movement speed on the pitch
----@field power integer      -- shot speed / physical duels
+---@field pace integer       -- movement speed on the pitch
+---@field strength integer   -- shot speed / physical duels
 ---@field technique integer  -- ball control, passing (M4)
----@field defense integer    -- tackling, interceptions (M4)
 ---@field stamina integer    -- fatigue resistance (M4)
+---@field mental integer     -- composure / positioning; defensive ability is derived
 
 ---@class PlayerData
 ---@field id string          -- stable unique key
@@ -28,8 +28,10 @@ declarations live next to their data; this file is the human-readable overview.
 
 ### Derived quantities (`sim/stats.lua`)
 
-- `move_speed(stats)` = `BASE_MOVE + speed * MOVE_PER_SPEED` (px/s)
-- `shot_speed(stats)` = `BASE_SHOT + power * SHOT_PER_POWER` (px/s)
+- `move_speed(stats)` = `BASE_MOVE + pace * MOVE_PER_PACE` (px/s)
+- `shot_speed(stats)` = `BASE_SHOT + strength * SHOT_PER_STRENGTH` (px/s)
+- `keeper_reach(stats)` derives defensive reach from `mental` + `pace`; defensive
+  ability is not a sixth authored attribute.
 
 These are the M1 bridge from manager stats to pitch behavior. Tune constants here.
 
