@@ -258,6 +258,8 @@ assert(s2.selected == "1-2-1")
   `spec/screens/formation_spec.lua`). Run them headless with `love . --test`.
 - Small, focused commits. Conventional-ish messages: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`.
 - One change = one concern. Don't mix a refactor with a feature.
+- **Never add a `Co-Authored-By` trailer (or any co-author / "Generated with" line)
+  to commit messages.** Commits are authored as the repo owner, full stop.
 
 ---
 
