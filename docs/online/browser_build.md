@@ -6,9 +6,17 @@ repository or committed as generated output. The generated `player.js` is a
 small project-owned loader that fetches the package and runtime assets directly;
 the upstream IndexedDB-backed loader is retained as
 `third_party/lovejs-player.js` for provenance but is not the boot path.
-The OMP-0 proof uses an in-memory filesystem so startup does not depend on
-browser storage availability; persistence can be restored as part of the later
-compatibility baseline.
+The project loader keeps the runtime's IDBFS mount at LÖVE's save root. It
+waits for the runtime's populate synchronization before the game starts and
+serializes a flush after each writable save-file close, so the existing
+`love.filesystem` settings path persists without a browser-specific Lua path.
+
+IndexedDB failure is recoverable. The loader records
+`window.__GALACTIC_CUP__.storage.state = "unavailable"` and emits a
+`GC_BROWSER|storage_error` warning with `recoverable=true`, then continues on
+the mounted in-memory filesystem. The issue #16 browser runner also loads
+`?storage=unavailable` as a deterministic failure probe and requires that page
+to reach Title and accept an in-memory settings change.
 
 ## Build and serve
 
@@ -33,9 +41,10 @@ policy for that deployment.
 
 ## Packaging smoke check
 
-The non-interactive smoke check builds the artifact twice, compares the
-deterministic `.love` packages, checks the required runtime files, validates
-the ZIP entries, and verifies the pinned runtime manifest:
+The non-interactive smoke check exercises save, populate/reload, and
+storage-unavailable host semantics; builds the artifact twice; compares the
+deterministic `.love` packages; checks the required runtime files; validates
+the ZIP entries; and verifies the pinned runtime manifest:
 
 ```sh
 ./scripts/web_smoke.sh
