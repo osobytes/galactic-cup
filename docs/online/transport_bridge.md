@@ -42,7 +42,9 @@ Both adapters expose the same operations:
 
 `disconnect(reason?)` is available on both adapters for tests and host-level
 disconnect reporting. It emits a `disconnected` state event followed by a
-`disconnected` error event. A disconnect does not turn into a successful
+`disconnected` error event. Both adapters discard queued inbound/outbound
+messages and increment the corresponding dropped counters, so stale traffic
+cannot survive a reconnect. A disconnect does not turn into a successful
 reconnect implicitly; call `initialize()` again when the next transport layer
 is ready.
 

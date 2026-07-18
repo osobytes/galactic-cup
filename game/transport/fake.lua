@@ -203,6 +203,10 @@ function FakeTransport:disconnect(reason)
     if self._state ~= "connected" then
         return nil, "transport is not connected", "not_connected"
     end
+    self._dropped_outbound = self._dropped_outbound + #self._outbound
+    self._dropped_inbound = self._dropped_inbound + #self._inbound
+    self._outbound = {}
+    self._inbound = {}
     self:_set_state("disconnected")
     self:_record_error("disconnected", reason or "fake transport disconnected")
     return true

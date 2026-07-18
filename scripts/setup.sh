@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Bootstraps the dev environment with NO sudo. Idempotent — safe to re-run.
-# Installs into ~/.local (bin on PATH). Targets: LÖVE 11.5, StyLua, LuaLS, type defs.
+# Installs into ~/.local (bin on PATH). Targets: LÖVE 11.5, StyLua, and LuaLS.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BIN="$HOME/.local/bin"
 LIB="$HOME/.local/lib"
-mkdir -p "$BIN" "$LIB" types
+mkdir -p "$BIN" "$LIB"
 
 LOVE_VERSION="11.5"
 
@@ -17,13 +17,6 @@ if ! command -v love >/dev/null 2>&1; then
     chmod +x "$BIN/love"
 fi
 love --version || echo "   ! love installed but failed to run (FUSE? try: love --appimage-extract-and-run)"
-
-echo "==> LÖVE type definitions (LuaCATS)"
-if [ ! -d types/love2d ]; then
-    git clone --depth 1 -q https://github.com/LuaCATS/love2d types/love2d
-    rm -rf types/love2d/.git
-fi
-echo "   $(find types/love2d -name '*.lua' | wc -l) definition files"
 
 echo "==> StyLua"
 if ! command -v stylua >/dev/null 2>&1; then

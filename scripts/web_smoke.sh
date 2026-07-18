@@ -9,6 +9,7 @@ first="$smoke_root/first"
 second="$smoke_root/second"
 "$project_root/scripts/web_build.sh" "$first"
 "$project_root/scripts/web_build.sh" "$second"
+node "$project_root/scripts/transport_bridge_smoke.js" "$first/player.js"
 
 cmp "$first/galactic-cup.love" "$second/galactic-cup.love"
 
