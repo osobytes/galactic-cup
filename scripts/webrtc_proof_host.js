@@ -83,12 +83,23 @@
     return values.length === 0 ? null : Math.max.apply(null, values);
   }
 
+  function seededRandom(seed) {
+    var state = Number(seed) || 1;
+    return function () {
+      state = (state * 1664525 + 1013904223) % 4294967296;
+      return state / 4294967296;
+    };
+  }
+
   function Proof(options) {
     options = options || {};
     this.role = options.role || "guest";
     this.protocol_version = options.protocol_version || VERSION;
     this.build_id = options.build_id || buildId();
     this.queue_limit = options.queue_limit || MAX_QUEUE_DEPTH;
+    this.network_profile = options.network_profile || "baseline";
+    this.one_way_delay_ms = Math.max(0, Number(options.one_way_delay_ms) || 0);
+    this.input_loss_percent = Math.max(0, Math.min(100, Number(options.input_loss_percent) || 0));
     this.state = "new";
     this.peer_role = null;
     this.handshake_complete = false;
@@ -111,6 +122,9 @@
     this.sequence_gaps = 0;
     this.out_of_order = 0;
     this.dropped = 0;
+    this.shaper_dropped = 0;
+    this.shaper_pending = 0;
+    this.max_shaper_pending = 0;
     this.last_received_seq = null;
     this.last_received_tick = null;
     this.seen_ticks = Object.create(null);
@@ -121,6 +135,7 @@
     this.last_error = null;
     this._handshake_sent = false;
     this._last_rtt = null;
+    this._random = seededRandom(options.loss_seed);
   }
 
   Proof.prototype.record = function (kind, fields) {
@@ -288,12 +303,34 @@
     if (!this.control || this.control.readyState !== "open") {
       return false;
     }
-    if (this.control.bufferedAmount > this.queue_limit * 256) {
+    if (this.control.bufferedAmount > this.queue_limit * 256 || this.shaper_pending >= this.queue_limit) {
       this.dropped += 1;
       this.record("queue_overflow", { channel: "control" });
       return false;
     }
-    this.control.send(wire("event", this.control_seq++, null, JSON.stringify(message)));
+    this.sendShaped(this.control, wire("event", this.control_seq++, null, JSON.stringify(message)), false);
+    return true;
+  };
+
+  Proof.prototype.sendShaped = function (channel, value, lossy) {
+    if (lossy && this.input_loss_percent > 0 && this._random() * 100 < this.input_loss_percent) {
+      this.shaper_dropped += 1;
+      return false;
+    }
+    if (this.one_way_delay_ms <= 0) {
+      channel.send(value);
+      return true;
+    }
+    this.shaper_pending += 1;
+    this.max_shaper_pending = Math.max(this.max_shaper_pending, this.shaper_pending);
+    window.setTimeout(function () {
+      this.shaper_pending = Math.max(0, this.shaper_pending - 1);
+      if (channel.readyState === "open") {
+        channel.send(value);
+      } else {
+        this.dropped += 1;
+      }
+    }.bind(this), this.one_way_delay_ms);
     return true;
   };
 
@@ -444,15 +481,25 @@
     }
     this.stopInput();
     var period = 1000 / hz;
-    this.input_timer = window.setInterval(function () {
+    var next_tick_at = now() + period;
+    var schedule_next = function () {
+      next_tick_at += period;
+      this.input_timer = window.setTimeout(
+        send_tick,
+        Math.max(0, next_tick_at - now())
+      );
+    }.bind(this);
+    var send_tick = function () {
       if (!this.input || this.input.readyState !== "open") {
+        this.input_timer = null;
         return;
       }
-      var queue_depth = Math.ceil(this.input.bufferedAmount / INPUT_SIZE_ESTIMATE);
+      var queue_depth = Math.ceil(this.input.bufferedAmount / INPUT_SIZE_ESTIMATE) + this.shaper_pending;
       this.max_queue_depth = Math.max(this.max_queue_depth, queue_depth);
       if (queue_depth >= this.queue_limit || queue_depth >= MAX_QUEUE_DEPTH) {
         this.dropped += 1;
         this.record("queue_overflow", { channel: "input", depth: queue_depth });
+        schedule_next();
         return;
       }
       this.tick += 1;
@@ -461,15 +508,22 @@
       if (byteLength(payload) > MAX_INPUT_BYTES) {
         this.dropped += 1;
         this.record("input_rejected", { reason: "input_too_large" });
+        schedule_next();
         return;
       }
-      this.input.send(wire("input", this.input_seq++, this.tick, payload));
+      this.sendShaped(
+        this.input,
+        wire("input", this.input_seq++, this.tick, payload),
+        true
+      );
       this.sent += 1;
       this.history.push(this.tick);
       if (this.history.length > MAX_HISTORY) {
         this.history.shift();
       }
-    }.bind(this), period);
+      schedule_next();
+    }.bind(this);
+    this.input_timer = window.setTimeout(send_tick, period);
     this.record("input_started", { hz: hz, duration_ms: duration });
     if (duration > 0) {
       window.setTimeout(function () { this.stopInput(); }.bind(this), duration);
@@ -479,7 +533,7 @@
 
   Proof.prototype.stopInput = function () {
     if (this.input_timer) {
-      window.clearInterval(this.input_timer);
+      window.clearTimeout(this.input_timer);
       this.input_timer = null;
       this.record("input_stopped", {});
     }
@@ -506,13 +560,18 @@
 
   Proof.prototype.diagnostics = function () {
     var elapsed = Math.max((now() - this.started_at) / 1000, 0.001);
-    var queue_depth = this.input ? Math.ceil(this.input.bufferedAmount / INPUT_SIZE_ESTIMATE) : 0;
+    var queue_depth = this.input
+      ? Math.ceil(this.input.bufferedAmount / INPUT_SIZE_ESTIMATE) + this.shaper_pending
+      : this.shaper_pending;
     return {
       state: this.state,
       role: this.role,
       peer_role: this.peer_role,
       protocol_version: this.protocol_version,
       build_id: this.build_id,
+      network_profile: this.network_profile,
+      one_way_delay_ms: this.one_way_delay_ms,
+      input_loss_percent: this.input_loss_percent,
       handshake_complete: this.handshake_complete,
       duration_s: elapsed,
       send_rate: this.sent / elapsed,
@@ -524,6 +583,9 @@
       sequence_gaps: this.sequence_gaps,
       out_of_order: this.out_of_order,
       dropped: this.dropped,
+      shaper_dropped: this.shaper_dropped,
+      shaper_pending: this.shaper_pending,
+      max_shaper_pending: this.max_shaper_pending,
       queue_depth: queue_depth,
       max_queue_depth: Math.max(this.max_queue_depth, queue_depth),
       rtt_p50_ms: percentile(this.rtt_samples, 0.50),

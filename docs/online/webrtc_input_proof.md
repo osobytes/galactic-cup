@@ -38,6 +38,46 @@ limits, mismatch codes, and diagnostic counters for headless tests. The
 browser-only implementation lives in `scripts/webrtc_proof_host.js` and is
 embedded into `player.js` by `scripts/web_build.py`.
 
+## Browser proof page
+
+The generated artifact includes `webrtc-proof.html`, a browser-visible control
+surface that does not require DevTools console mutation. Open a host and guest
+tab with the same profile:
+
+```text
+http://127.0.0.1:8000/webrtc-proof.html?role=host&profile=baseline&duration_ms=600000
+http://127.0.0.1:8000/webrtc-proof.html?role=guest&profile=baseline&duration_ms=600000
+```
+
+1. Select **Create offer** in the host tab and copy its local signal into the
+   guest tab's remote signal field.
+2. Select **Accept offer** in the guest tab and copy its local signal into the
+   host tab's remote signal field.
+3. Select **Accept answer** in the host tab. Wait for both statuses to show
+   `handshake-complete`.
+4. Select **Start 60 Hz traffic** in both tabs. The status changes to
+   `complete` after the requested duration.
+5. Save the diagnostics JSON from both tabs, refresh both tabs, and repeat.
+
+For the second OMP-0 profile, replace `profile=baseline` with
+`profile=shaped`. The proof-level shaper applies a deterministic 50 ms
+one-way delay to both channels and 1% loss to input messages only, producing
+the required 100 ms round-trip/1% loss traffic profile while preserving the
+reliable ordered control channel. Diagnostics include the configured profile,
+delay, loss, shaper drops, and pending shaped messages. This is a repeatable
+spike impairment, not a production quality-of-service guarantee.
+
+The suite page runs both profiles concurrently in four separate nested browser
+contexts and includes a build-mismatch pair:
+
+```text
+http://127.0.0.1:8000/webrtc-proof-suite.html?duration_ms=600000&run_id=first
+```
+
+Select **Connect and run all profiles**, wait for `complete`, and save the suite
+diagnostics JSON. Refresh the page, change `run_id=first` to `run_id=refresh`,
+and repeat. The individual host/guest pages remain the manual fallback.
+
 ## Manual two-context runbook
 
 Open the same served artifact in two clean browser contexts. Keep the console
@@ -86,9 +126,9 @@ variables; reload both contexts before a repeat.
 
 The expected report includes handshake/build identity, role, send and receive
 rates, unique ticks, history retransmits, sequence gaps, out-of-order samples,
-drops, current and maximum queue depth, RTT p50/p95/max, jitter p50/p95/max,
-and disconnect reason. `GC_WEBRTC|...` console markers provide a line-oriented
-capture alongside the JSON diagnostics.
+drops, shaper drops, current and maximum queue depth, RTT p50/p95/max, jitter
+p50/p95/max, and disconnect reason. `GC_WEBRTC|...` console markers provide a
+line-oriented capture alongside the JSON diagnostics.
 
 ## Mismatch proof
 
@@ -104,9 +144,9 @@ expected failures; do not continue to input traffic after rejection.
 
 ## Evidence status
 
-The repository contains the executable proof host, pure contract tests, build
-smoke assertions, and this runbook. The current development environment does
-not provide two independent browser contexts plus the required 10-minute local
-and 100 ms / 1% loss runs, so no WebRTC pass is claimed here. Record browser
-versions, artifact `manifest.json`, both JSON summaries, console exports, and
-the clean-refresh repeat on issue #5 when the run is executed.
+The repository contains the executable proof host, browser control page, pure
+contract tests, build smoke assertions, and this runbook. A WebRTC pass is
+claimed only after separate browser contexts complete the required 10-minute
+baseline and shaped runs plus the clean-refresh repeat. Record browser version,
+artifact `manifest.json`, both JSON summaries, console exports, and the
+clean-refresh repeat on issue #5 when the run is executed.
