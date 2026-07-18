@@ -16,6 +16,18 @@ and can fail a run that does not contain the complete route:
 scripts/web_report.py browser-console.json --require-flow
 ```
 
+For repeatable environment and viewport runs, pass the browser-only flow
+argument through the generated loader:
+
+```text
+http://127.0.0.1:8000/?arg=%5B%22--compat-flow%22%5D
+```
+
+The driver clicks the existing Play, setup, and kickoff widgets through
+`App:event`; it does not bypass screen state or accelerate the real match. It
+records each scripted click as input telemetry and stops at Result. Keyboard
+and gamepad checks remain separate manual acceptance rows.
+
 Run date: 2026-07-18. Source revision and game-package hash are recorded in
 `build/web/manifest.json` for the local artifact; generated `build/` output is
 not committed.
