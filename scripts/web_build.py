@@ -52,6 +52,7 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
     var MESSAGE_TYPES = { input: true, event: true, state: true };
     var state = "new";
     var queueLimit = DEFAULT_QUEUE_LIMIT;
+    var eventLimit = Math.max(2, queueLimit);
     var outbound = [];
     var inbound = [];
     var events = [];
@@ -90,7 +91,7 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
     }
 
     function pushEvent(event) {
-      if (events.length >= queueLimit) {
+      if (events.length >= eventLimit) {
         events.shift();
         overflow += 1;
         lastError = "event_queue_full";
@@ -187,6 +188,7 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
           return recordError("malformed", "queue limit is invalid");
         }
         queueLimit = limit;
+        eventLimit = Math.max(2, queueLimit);
         if (state === "connected") {
           return "state|connected";
         }

@@ -6,6 +6,7 @@ local contract = require("game.transport.contract")
 ---@class FakeTransport: TransportAdapter
 ---@field _state TransportState
 ---@field _queue_limit integer
+---@field _event_limit integer
 ---@field _outbound TransportMessage[]
 ---@field _inbound TransportMessage[]
 ---@field _events TransportEvent[]
@@ -34,6 +35,7 @@ function FakeTransport.new(options)
     return setmetatable({
         _state = "new",
         _queue_limit = queue_limit,
+        _event_limit = math.max(2, queue_limit),
         _outbound = {},
         _inbound = {},
         _events = {},
@@ -50,7 +52,7 @@ end
 
 ---@param event TransportEvent
 function FakeTransport:_push_event(event)
-    if #self._events >= self._queue_limit then
+    if #self._events >= self._event_limit then
         table.remove(self._events, 1)
         self._overflow = self._overflow + 1
         self._last_error = "fake transport event queue is full"
@@ -201,6 +203,10 @@ function FakeTransport:disconnect(reason)
     if self._state ~= "connected" then
         return nil, "transport is not connected", "not_connected"
     end
+    self._dropped_outbound = self._dropped_outbound + #self._outbound
+    self._dropped_inbound = self._dropped_inbound + #self._inbound
+    self._outbound = {}
+    self._inbound = {}
     self:_set_state("disconnected")
     self:_record_error("disconnected", reason or "fake transport disconnected")
     return true

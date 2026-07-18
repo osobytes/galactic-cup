@@ -16,6 +16,18 @@ and can fail a run that does not contain the complete route:
 scripts/web_report.py browser-console.json --require-flow
 ```
 
+For repeatable environment and viewport runs, pass the browser-only flow
+argument through the generated loader:
+
+```text
+http://127.0.0.1:8000/?arg=%5B%22--compat-flow%22%5D
+```
+
+The driver clicks the existing Play, setup, and kickoff widgets through
+`App:event`; it does not bypass screen state or accelerate the real match. It
+records each scripted click as input telemetry and stops at Result. Keyboard
+and gamepad checks remain separate manual acceptance rows.
+
 Run date: 2026-07-18. Source revision and game-package hash are recorded in
 `build/web/manifest.json` for the local artifact; generated `build/` output is
 not committed.
@@ -79,16 +91,7 @@ and reviewed before public deployment.
 | Clean Result transition | Match was live in the captured run; result transition pending | Missing |
 | 10-minute stability and memory | No task-manager/heap capture in this worker | Unavailable |
 
-No follow-up issue is proposed from this worker: the missing rows are
-environment/evidence acquisition blockers rather than a reproducible browser
-compatibility defect. The parent decision should keep them inconclusive per the
-fixed acceptance rules.
-
-## Shared-file rebase note for issue #4
-
-Issue #3 changes only the authored `BROWSER_LOADER` string in
-`scripts/web_build.py` (the `browser_compat` object, `mark` helper, loader
-asset/runtime/error markers) and the corresponding marker/package assertions
-in `scripts/web_smoke.sh`. The transport bridge should be rebased by replaying
-its own hunks around those sections; no transport code or filesystem behavior
-was changed here.
+Required stable-browser, Windows, lifecycle, gamepad, and memory evidence is
+tracked in issue #16. Those missing rows are environment/evidence acquisition
+blockers rather than reproducible browser compatibility defects. The parent
+decision remains inconclusive until #16 satisfies the fixed acceptance rules.
