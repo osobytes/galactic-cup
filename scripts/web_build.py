@@ -55,6 +55,8 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
 (function () {
   "use strict";
 
+  /*__GALACTIC_CUP_BROWSER_STORAGE__*/
+
   /*
    * OMP-0 transport host. Lua calls this bounded queue API through the
    * pinned runtime's love.js.eval hook. Delivery is scheduled as a microtask
@@ -302,6 +304,7 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
     build_id: "__GALACTIC_CUP_BUILD_ID__",
     console_entries: [],
     events: [],
+    storage: { state: "pending" },
     status: "loading",
     started_at_ms: performance.now()
   };
@@ -328,14 +331,20 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
     };
   });
 
-  function mark(name, detail) {
+  function mark(name, detail, level) {
     var event = { name: name, at_ms: performance.now() - browser_compat.started_at_ms };
     if (detail) {
       event.detail = detail;
     }
     browser_compat.events.push(event);
-    console.info("GC_BROWSER|" + name + "|at_ms=" + event.at_ms.toFixed(3) +
+    console[level || "info"]("GC_BROWSER|" + name + "|at_ms=" + event.at_ms.toFixed(3) +
       (detail ? "|detail=" + detail : ""));
+  }
+
+  function storage_detail(fields) {
+    return Object.keys(fields).sort().map(function (key) {
+      return key + "=" + encodeURIComponent(String(fields[key]));
+    }).join("|");
   }
 
   mark("loader_start");
@@ -401,13 +410,19 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
         Module.args = [uri.substring(uri.lastIndexOf("/") + 1)].concat(args);
         Module.cache = cache;
         Module.prerun = function () {
-          if (Module.FS) {
-            // Keep the OMP-0 proof independent of browser storage availability.
-            // Persistence can be restored as part of the compatibility baseline.
-            Module.FS.syncfs = function (_populate, callback) {
-              callback(null);
-            };
-          }
+          var storage_host = window.GalacticCupBrowserStorage.create({
+            fs: Module.FS,
+            persistent_root: Module.env.HOME + "/love",
+            force_unavailable: page_query.get("storage") === "unavailable",
+            on_event: function (name, fields, level) {
+              mark(name, storage_detail(fields), level);
+            },
+            on_state: function (state) {
+              browser_compat.storage = state;
+            },
+            schedule: window.setTimeout.bind(window)
+          });
+          storage_host.attach();
           Module.FS.mkdirTree("/usr/local/share/lua/5.1");
           for (var path in cache) {
             var filename = path.split("/").pop();
@@ -706,8 +721,15 @@ def write_browser_style(output: Path) -> None:
 
 
 def write_browser_loader(output: Path) -> None:
+    storage_host = (ROOT / "scripts" / "browser_storage_host.js").read_text(
+        encoding="utf-8"
+    )
     proof_host = (ROOT / "scripts" / "webrtc_proof_host.js").read_text(encoding="utf-8")
-    loader = BROWSER_LOADER.replace("  /*__GALACTIC_CUP_WEBRTC_PROOF__*/", proof_host)
+    loader = BROWSER_LOADER.replace(
+        "  /*__GALACTIC_CUP_BROWSER_STORAGE__*/",
+        storage_host,
+    )
+    loader = loader.replace("  /*__GALACTIC_CUP_WEBRTC_PROOF__*/", proof_host)
     loader = loader.replace("__GALACTIC_CUP_BUILD_ID__", source_revision())
     (output / "player.js").write_text(loader, encoding="utf-8")
 
