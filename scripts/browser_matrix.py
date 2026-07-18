@@ -39,6 +39,7 @@ HARD_RUNTIME_PATTERN = re.compile(
     r"webassembly.*(?:trap|error)|wasm.*trap)",
     re.IGNORECASE,
 )
+HEAP_CROSSCHECK_TOLERANCE_PERCENT = 5
 
 
 def utc_now() -> str:
@@ -438,24 +439,44 @@ def browser_console(driver: Any, phase: str) -> list[dict[str, Any]]:
     return result
 
 
-def webdriver_console(driver: Any, phase: str) -> list[dict[str, Any]]:
+def webdriver_console(
+    driver: Any,
+    phase: str,
+    include_markers: bool = False,
+) -> list[dict[str, Any]]:
     if driver.capabilities.get("browserName") != "chrome":
         return []
     result = []
     for entry in driver.get_log("browser"):
-        message = str(entry.get("message", ""))
-        if marker_message(message):
+        raw_message = str(entry.get("message", ""))
+        marker = marker_message(raw_message)
+        if marker and not include_markers:
             continue
         level = str(entry.get("level", "INFO")).lower()
         result.append(
             {
                 "level": "error" if level == "severe" else level,
-                "message": message,
+                "message": marker or raw_message,
                 "phase": phase,
                 "timestamp": entry.get("timestamp"),
             }
         )
     return result
+
+
+def flow_console(
+    driver: Any,
+    browser_name: str,
+    phase: str,
+    chrome_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if browser_name == "chrome":
+        # ChromeDriver already receives every compatibility marker. Keep the
+        # long stability loop out of the page isolate so its own polling does
+        # not inflate the post-GC JavaScript heap under measurement.
+        chrome_entries.extend(webdriver_console(driver, phase, include_markers=True))
+        return chrome_entries
+    return browser_console(driver, phase)
 
 
 def service_console(path: Path, runtime_bytes: int | None = None) -> list[dict[str, Any]]:
@@ -575,6 +596,25 @@ def click_canvas_gesture(driver: Any) -> None:
     ).click().perform()
 
 
+def performance_metric(metrics: dict[str, Any] | None, name: str) -> int | float | None:
+    if not metrics:
+        return None
+    for metric in metrics.get("metrics", []):
+        if metric.get("name") == name:
+            return metric.get("value")
+    return None
+
+
+def values_within_percent(
+    first: int | float | None,
+    second: int | float | None,
+    tolerance_percent: int | float,
+) -> bool:
+    if first is None or second is None or first <= 0 or second <= 0:
+        return False
+    return abs(first - second) * 100 / max(first, second) <= tolerance_percent
+
+
 def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str) -> dict[str, Any]:
     driver.execute_script(
         "console.info('GC_BROWSER|memory_probe|phase=start|label=' + arguments[0]);",
@@ -597,26 +637,48 @@ def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str)
     time.sleep(0.25)
     state = page_state(driver)
     performance_metrics = None
+    runtime_heap_usage = None
     if browser_name == "chrome":
         try:
             performance_metrics = driver.execute_cdp_cmd("Performance.getMetrics", {})
         except Exception:
             performance_metrics = None
+        try:
+            runtime_heap_usage = driver.execute_cdp_cmd("Runtime.getHeapUsage", {})
+        except Exception:
+            runtime_heap_usage = None
     page_js_heap = state.get("js_heap_bytes")
-    js_heap = page_js_heap
-    if performance_metrics:
-        for metric in performance_metrics.get("metrics", []):
-            if metric.get("name") == "JSHeapUsedSize":
-                js_heap = metric.get("value")
-                break
+    performance_js_heap = performance_metric(performance_metrics, "JSHeapUsedSize")
+    runtime_js_heap = (
+        runtime_heap_usage.get("usedSize") if isinstance(runtime_heap_usage, dict) else None
+    )
+    js_heap = performance_js_heap if performance_js_heap is not None else page_js_heap
     result = {
         "captured_at": utc_now(),
         "forced_gc": gc_method,
+        "heap_crosscheck": {
+            "pass": (
+                values_within_percent(
+                    performance_js_heap,
+                    runtime_js_heap,
+                    HEAP_CROSSCHECK_TOLERANCE_PERCENT,
+                )
+                if browser_name == "chrome"
+                else None
+            ),
+            "tolerance_percent": HEAP_CROSSCHECK_TOLERANCE_PERCENT,
+        },
         "js_heap_bytes": js_heap,
+        "js_heap_source": (
+            "cdp Performance.getMetrics.JSHeapUsedSize"
+            if performance_js_heap is not None
+            else "page performance.memory.usedJSHeapSize"
+        ),
         "label": label,
         "page_js_heap_bytes": page_js_heap,
         "performance_metrics": performance_metrics,
         "process_tree": process_tree_rss(service_pid),
+        "runtime_heap_usage": runtime_heap_usage,
     }
     driver.execute_script(
         "console.info('GC_BROWSER|memory_probe|phase=end|label=' + arguments[0]);",
@@ -779,8 +841,23 @@ def evidence_checks(
         gamepad.get("connected") and gamepad.get("mapping") == "standard"
         for gamepad in final_state.get("gamepads", [])
     )
+    post_gc_samples = len(memories) == 3 and all(
+        memory.get("forced_gc") != "unavailable" for memory in memories
+    )
+    heap_crosschecks = [
+        memory.get("heap_crosscheck", {}).get("pass") for memory in memories
+    ]
+    heap_crosscheck_pass = (
+        all(value is True for value in heap_crosschecks)
+        if any(value is not None for value in heap_crosschecks)
+        else None
+    )
     memory_available = (
-        len(memories) == 3 and rss_growth is not None and heap_growth is not None
+        len(memories) == 3
+        and rss_growth is not None
+        and heap_growth is not None
+        and post_gc_samples
+        and heap_crosscheck_pass is not False
     )
     stability_performance = (
         sample_gate(entries, flow_only=False) if stability_seconds else None
@@ -858,7 +935,9 @@ def evidence_checks(
         ),
         "memory": {
             "available": memory_available,
+            "heap_crosscheck_pass": heap_crosscheck_pass,
             "heap_growth_percent": heap_growth,
+            "heap_source": first_memory.get("js_heap_source"),
             "pass": (
                 None
                 if not memory_available
@@ -867,6 +946,7 @@ def evidence_checks(
                     and heap_growth <= 25
                 )
             ),
+            "post_gc_samples": post_gc_samples,
             "rss_growth_percent": rss_growth,
             "samples": len(memories),
         },
@@ -1081,7 +1161,6 @@ def run_flow(
         if stability_seconds
         else started + flow_timeout
     )
-    next_driver_log = started
     trace_at = started + 70 if trace_enabled else None
     keyboard_probe_at = started + 11
     liveness_probe_at = end_at - 20 if stability_seconds else None
@@ -1096,7 +1175,7 @@ def run_flow(
     )
     memory_index = 0
     memories = []
-    webdriver_entries = []
+    chrome_entries: list[dict[str, Any]] = []
     performance_entries = []
     flow_completed = False
     match_focus_recovery = False
@@ -1105,10 +1184,18 @@ def run_flow(
 
     while time.monotonic() <= end_at + 5:
         now = time.monotonic()
-        state = page_state(driver)
-        if state.get("status") != "running":
-            raise RuntimeError(f"browser runtime changed to {state.get('status')}")
-        current_entries = browser_console(driver, "flow")
+        if browser_name != "chrome":
+            state = page_state(driver)
+            if state.get("status") != "running":
+                raise RuntimeError(f"browser runtime changed to {state.get('status')}")
+        current_entries = flow_console(driver, browser_name, "flow", chrome_entries)
+        runtime_errors = [
+            record
+            for record in records(current_entries)
+            if record.get("source") == "GC_BROWSER" and record.get("kind") == "error"
+        ]
+        if runtime_errors:
+            raise RuntimeError(f"browser runtime reported an error: {runtime_errors[-1]}")
         routes = route_sequence(current_entries)
         if not match_focus_attempted and normalized_routes(routes)[-1:] == ["match"]:
             match_focus_attempted = True
@@ -1121,7 +1208,9 @@ def run_flow(
             driver.switch_to.window(current)
 
             def recovered_match() -> bool:
-                new_routes = route_sequence(browser_console(driver, "match_focus"))
+                new_routes = route_sequence(
+                    flow_console(driver, browser_name, "match_focus", chrome_entries)
+                )
                 tail = new_routes[route_count:]
                 return "pause" in tail and normalized_routes(tail)[-1:] == ["match"]
 
@@ -1152,17 +1241,14 @@ def run_flow(
                 )
             )
             memory_index += 1
-        if now >= next_driver_log:
-            webdriver_entries.extend(webdriver_console(driver, "flow"))
-            next_driver_log = now + 30
         if trace_at and now >= trace_at:
             performance_entries.extend(driver.get_log("performance"))
             trace_at = None
         time.sleep(1)
 
-    entries = browser_console(driver, "flow")
-    entries.extend(webdriver_entries)
-    entries.extend(webdriver_console(driver, "flow"))
+    entries = flow_console(driver, browser_name, "flow", chrome_entries)
+    if browser_name != "chrome":
+        entries.extend(webdriver_console(driver, "flow"))
     if trace_at:
         performance_entries.extend(driver.get_log("performance"))
     final_state = page_state(driver)
@@ -1444,6 +1530,31 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
 
 
 def self_test() -> int:
+    class FakeChromeDriver:
+        capabilities = {"browserName": "chrome"}
+
+        def __init__(self) -> None:
+            self.log_batches = [
+                [
+                    {
+                        "level": "INFO",
+                        "message": (
+                            'http://example/player.js 1:1 "'
+                            'GC_METRICS|route|route=title"'
+                        ),
+                        "timestamp": 1,
+                    }
+                ],
+                [],
+            ]
+
+        def execute_script(self, _script: str) -> Any:
+            raise AssertionError("Chrome flow polling must not inject page scripts")
+
+        def get_log(self, log_type: str) -> list[dict[str, Any]]:
+            assert log_type == "browser"
+            return self.log_batches.pop(0)
+
     assert parse_viewport("960x540") == (960, 540)
     assert with_query("http://127.0.0.1:8000/?arg=flow", {"storage": "unavailable"}) == (
         "http://127.0.0.1:8000/?arg=flow&storage=unavailable"
@@ -1462,6 +1573,20 @@ def self_test() -> int:
         "event_kind": "key_return",
         "sequence": "1",
     }
+    fake_driver = FakeChromeDriver()
+    chrome_entries: list[dict[str, Any]] = []
+    assert route_sequence(flow_console(fake_driver, "chrome", "flow", chrome_entries)) == [
+        "title"
+    ]
+    assert route_sequence(flow_console(fake_driver, "chrome", "flow", chrome_entries)) == [
+        "title"
+    ]
+    assert performance_metric(
+        {"metrics": [{"name": "JSHeapUsedSize", "value": 100}]},
+        "JSHeapUsedSize",
+    ) == 100
+    assert values_within_percent(100, 104, HEAP_CROSSCHECK_TOLERANCE_PERCENT) is True
+    assert values_within_percent(100, 106, HEAP_CROSSCHECK_TOLERANCE_PERCENT) is False
     assert growth_percent(100, 125) == 25
     synthetic = [
         {
