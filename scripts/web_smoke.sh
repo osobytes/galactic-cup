@@ -46,6 +46,8 @@ if "Promise.all(paths.map(fetch_binary))" not in loader:
 for marker in ("window.__GALACTIC_CUP__", "GC_BROWSER|", "runtime_postrun"):
     if marker not in loader:
         raise SystemExit(f"browser loader is missing compatibility marker: {marker}")
+if "GalacticCupTransportBridge" not in loader:
+    raise SystemExit("browser loader does not include the transport bridge host")
 
 with zipfile.ZipFile(artifact / "galactic-cup.love") as package:
     if package.testzip() is not None:
@@ -56,6 +58,7 @@ with zipfile.ZipFile(artifact / "galactic-cup.love") as package:
         "main.lua",
         "game/app.lua",
         "game/compatibility_metrics.lua",
+        "game/transport.lua",
         "sim/match.lua",
     ):
         if path not in names:

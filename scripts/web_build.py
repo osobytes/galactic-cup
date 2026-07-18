@@ -37,6 +37,235 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
 (function () {
   "use strict";
 
+  /*
+   * OMP-0 transport host. Lua calls this bounded queue API through the
+   * pinned runtime's love.js.eval hook. Delivery is scheduled as a microtask
+   * (or a timer fallback), so no browser/network operation runs in the LÖVE
+   * update call. This is a loopback only; WebRTC belongs to issue #5.
+   */
+  window.GalacticCupTransportBridge = window.GalacticCupTransportBridge || (function () {
+    var VERSION = 1;
+    var DEFAULT_QUEUE_LIMIT = 64;
+    var MAX_QUEUE_LIMIT = 256;
+    var MAX_PAYLOAD_BYTES = 1024;
+    var MESSAGE_TYPES = { input: true, event: true, state: true };
+    var state = "new";
+    var queueLimit = DEFAULT_QUEUE_LIMIT;
+    var outbound = [];
+    var inbound = [];
+    var events = [];
+    var deliveryScheduled = false;
+    var droppedOutbound = 0;
+    var droppedInbound = 0;
+    var malformed = 0;
+    var unsupportedVersion = 0;
+    var overflow = 0;
+    var sent = 0;
+    var received = 0;
+    var lastError = "";
+
+    function byteLength(value) {
+      if (window.TextEncoder) {
+        return new window.TextEncoder().encode(value).length;
+      }
+      return unescape(encodeURIComponent(value)).length;
+    }
+
+    function encodeField(value) {
+      return encodeURIComponent(String(value));
+    }
+
+    function decodeField(value) {
+      try {
+        return decodeURIComponent(value);
+      } catch (error) {
+        return null;
+      }
+    }
+
+    function recordState(nextState) {
+      state = nextState;
+      pushEvent("state|" + nextState);
+    }
+
+    function pushEvent(event) {
+      if (events.length >= queueLimit) {
+        events.shift();
+        overflow += 1;
+        lastError = "event_queue_full";
+      }
+      events.push(event);
+    }
+
+    function recordError(code, detail) {
+      if (code === "malformed" || code === "payload_too_large") {
+        malformed += 1;
+      } else if (code === "unsupported_version") {
+        unsupportedVersion += 1;
+      } else if (code === "overflow") {
+        overflow += 1;
+      }
+      lastError = code;
+      pushEvent("error|" + encodeField(code));
+      return "error|" + code + "|" + (detail || code);
+    }
+
+    function invalid(code, detail) {
+      return { error: code, detail: detail || code };
+    }
+
+    function parseWire(wire) {
+      if (typeof wire !== "string") {
+        return invalid("malformed", "wire is not a string");
+      }
+      var fields = wire.split("|");
+      if (fields.length !== 5) {
+        return invalid("malformed", "wire has invalid fields");
+      }
+      if (!/^(0|[1-9][0-9]*)$/.test(fields[0])) {
+        return invalid("malformed", "wire version is invalid");
+      }
+      var version = Number(fields[0]);
+      if (version !== VERSION) {
+        return invalid("unsupported_version", "wire version is unsupported");
+      }
+      var type = decodeField(fields[1]);
+      if (!type || !MESSAGE_TYPES[type]) {
+        return invalid("malformed", "wire type is invalid");
+      }
+      if (!/^(0|[1-9][0-9]*)$/.test(fields[2])) {
+        return invalid("malformed", "wire sequence is invalid");
+      }
+      var tick = null;
+      if (fields[3] !== "") {
+        if (!/^(0|[1-9][0-9]*)$/.test(fields[3])) {
+          return invalid("malformed", "wire tick is invalid");
+        }
+        tick = Number(fields[3]);
+      }
+      if (type === "input" && tick === null) {
+        return invalid("malformed", "input wire is missing its tick");
+      }
+      var payload = decodeField(fields[4]);
+      if (payload === null) {
+        return invalid("malformed", "wire payload escape is invalid");
+      }
+      if (byteLength(payload) > MAX_PAYLOAD_BYTES) {
+        return invalid("payload_too_large", "wire payload exceeds the byte limit");
+      }
+      return { version: version, type: type, seq: Number(fields[2]), tick: tick, payload: payload };
+    }
+
+    function deliverOne() {
+      deliveryScheduled = false;
+      if (state !== "connected" || outbound.length === 0 || inbound.length >= queueLimit) {
+        return;
+      }
+      inbound.push(outbound.shift());
+      if (outbound.length > 0) {
+        scheduleDelivery();
+      }
+    }
+
+    function scheduleDelivery() {
+      if (deliveryScheduled || state !== "connected" || outbound.length === 0) {
+        return;
+      }
+      deliveryScheduled = true;
+      if (window.queueMicrotask) {
+        window.queueMicrotask(deliverOne);
+      } else {
+        window.setTimeout(deliverOne, 0);
+      }
+    }
+
+    return {
+      initialize: function (requestedLimit) {
+        var limit = requestedLimit === undefined ? DEFAULT_QUEUE_LIMIT : Number(requestedLimit);
+        if (!/^[0-9]+$/.test(String(limit)) || limit < 1 || limit > MAX_QUEUE_LIMIT) {
+          return recordError("malformed", "queue limit is invalid");
+        }
+        queueLimit = limit;
+        if (state === "connected") {
+          return "state|connected";
+        }
+        outbound = [];
+        inbound = [];
+        recordState("connected");
+        return "state|connected";
+      },
+
+      shutdown: function () {
+        droppedOutbound += outbound.length;
+        droppedInbound += inbound.length;
+        outbound = [];
+        inbound = [];
+        recordState("closed");
+        return "state|closed";
+      },
+
+      enqueue: function (wire) {
+        if (state !== "connected") {
+          return recordError("not_connected", "transport is not connected");
+        }
+        var parsed = parseWire(wire);
+        if (parsed.error) {
+          return recordError(parsed.error, parsed.detail);
+        }
+        if (outbound.length >= queueLimit) {
+          droppedOutbound += 1;
+          return recordError("overflow", "outbound queue is full");
+        }
+        outbound.push(wire);
+        sent += 1;
+        scheduleDelivery();
+        return "ok";
+      },
+
+      poll: function () {
+        if (state !== "connected" || inbound.length === 0) {
+          return "";
+        }
+        var wire = inbound.shift();
+        received += 1;
+        scheduleDelivery();
+        return wire;
+      },
+
+      poll_event: function () {
+        return events.length === 0 ? "" : events.shift();
+      },
+
+      disconnect: function () {
+        droppedOutbound += outbound.length;
+        droppedInbound += inbound.length;
+        outbound = [];
+        inbound = [];
+        recordState("disconnected");
+        recordError("disconnected", "transport disconnected");
+        return "state|disconnected";
+      },
+
+      diagnostics: function () {
+        return [
+          state,
+          queueLimit,
+          outbound.length,
+          inbound.length,
+          events.length,
+          droppedOutbound,
+          droppedInbound,
+          malformed,
+          unsupportedVersion,
+          overflow,
+          sent,
+          received,
+          lastError
+        ].join("|");
+      }
+    };
+  })();
+
   var script = document.currentScript;
   var canvas = document.getElementById("canvas");
   var spinner = document.getElementById("spinner");
