@@ -25,7 +25,7 @@ t.describe("compatibility metrics", function()
         t.eq(#metrics.draw_samples, 1)
     end)
 
-    t.it("records browser-observable settings state", function()
+    t.it("records browser-observable runtime state", function()
         local metrics = compatibility_metrics.new(0)
         local value = {
             master_volume = 1,
@@ -38,6 +38,7 @@ t.describe("compatibility metrics", function()
         }
 
         metrics:settings(0.5, value)
+        metrics:audio(0.6, 1, 1)
 
         t.eq(metrics.sample_number, 0)
     end)

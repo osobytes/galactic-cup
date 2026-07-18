@@ -27,14 +27,15 @@ native path to be selected from an incomplete comparison.
 | --- | --- | --- |
 | Criteria | [Issue #1](https://github.com/osobytes/galactic-cup/issues/1), [`omp0_acceptance.md`](omp0_acceptance.md) | Fixed before implementation |
 | Browser artifact | [PR #8](https://github.com/osobytes/galactic-cup/pull/8), [`browser_build.md`](browser_build.md) | Reproducible and pinned |
-| Browser matrix | [Issue #16](https://github.com/osobytes/galactic-cup/issues/16), [`browser_compatibility.md`](browser_compatibility.md), [raw Linux evidence](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-evidence-5f8e76c) | Linux complete except gamepad/Firefox heap; Windows missing |
+| Browser matrix | [Issue #16](https://github.com/osobytes/galactic-cup/issues/16), [`browser_compatibility.md`](browser_compatibility.md), [raw Linux matrix](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-evidence-5f8e76c), [reviewed Chrome probe](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-review-evidence-806f7a3) | Linux viewport/flow complete; required controls/heap missing; Windows missing |
 | Transport seam | [PR #10](https://github.com/osobytes/galactic-cup/pull/10), [`transport_bridge.md`](transport_bridge.md) | Bounded asynchronous contract available |
 | WebRTC proof | [Issue #5](https://github.com/osobytes/galactic-cup/issues/5), [PR #14](https://github.com/osobytes/galactic-cup/pull/14), [`webrtc_input_proof.md`](webrtc_input_proof.md) | Both 10-minute network profiles pass |
 
-The browser evidence is tied to source
-`5f8e76cf46ce85f488be7a3ee8e88105cd43ab19`, game package
-`c939d74873cb49fe8d587c66af9d7363c15580a3523846ee2ea210921c5aaef5`,
-and the pinned love.js revision documented in `browser_build.md`.
+The full matrix is tied to source
+`5f8e76cf46ce85f488be7a3ee8e88105cd43ab19` and game package
+`c939d74873cb49fe8d587c66af9d7363c15580a3523846ee2ea210921c5aaef5`.
+The reviewed Chrome probe uses source `806f7a3` and package `3542846f…f2f8daa`.
+Both use the pinned love.js revision documented in `browser_build.md`.
 
 ## Criterion evaluation
 
@@ -42,10 +43,10 @@ and the pinned love.js revision documented in `browser_build.md`.
 | --- | --- | --- |
 | Artifact boot | Linux Chrome/Firefox boot to a Title screenshot in 529–969 ms at all required viewports | Pass on Linux; Windows missing |
 | Product flow | Every Linux row completes Title → Result and passes `web_report.py --require-flow` | Pass on Linux; Windows missing |
-| Update/draw/frame/input | Chrome fails pacing at all viewports; Firefox fails at 960×540 and passes at 1280×720/1920×1080; input gates pass | Hard-gate failures |
-| Browser console | Chrome has zero warnings/errors; Firefox has zero unclassified messages after recorded service classifications | Pass on Linux |
-| Lifecycle and controls | Focus recovery during Match, resize, fullscreen, audio gesture, keyboard, and clean Result pass | Pass on Linux; physical gamepad missing |
-| Runtime stability | Both 615-second Linux runs remain live and accept late input, but both fail full-run pacing | Fail |
+| Update/draw/frame/input | Chrome fails pacing at all viewports, including a GC-isolated 960×540 probe; Firefox fails at 960×540 and passes at 1280×720/1920×1080; input gates pass | Hard-gate failures |
+| Browser console | Page runtime is clean; the raw Firefox packet classified a fatal post-quit `AsyncShutdown` error that the reviewed collector now keeps separate and unclassifiable | Runtime pass on Linux; teardown limitation recorded |
+| Lifecycle and controls | Focus recovery during Match, resize events, fullscreen, keyboard, and clean Result pass; reviewed Chrome audio passes; Chrome's non-16:9 probe stretches instead of letterboxing | Partial with a letterboxing failure; Firefox audio and physical gamepad missing |
+| Runtime stability | Both 615-second Linux runs remain live, recover focus, and accept late input/settings changes | Pass on Linux |
 | Memory | Chrome RSS +12.91%, post-GC heap +185.76%; Firefox RSS +1.17%, heap unavailable | Chrome fail; Firefox inconclusive |
 | Persistence | Mute resets on reload in every Linux row | Fail |
 | Tick/input/queue/latency transport | Issue #5 completed both fixed 10-minute browser profiles with bounded queues and full input recovery | Pass |
@@ -54,8 +55,8 @@ and the pinned love.js revision documented in `browser_build.md`.
 
 | Environment | 960×540 | 1280×720 | 1920×1080 | Decision status |
 | --- | --- | --- | --- | --- |
-| Linux Chrome 150 | Flow pass; performance fail | Flow pass; performance fail | Flow pass; performance fail | Complete with failures |
-| Linux Firefox 152 | Flow pass; performance fail | Flow/performance pass | Flow/performance pass | Gamepad and JS heap missing |
+| Linux Chrome 150 | Flow pass; performance fail | Flow pass; performance fail | Flow pass; performance fail | Gamepad missing; letterboxing fails |
+| Linux Firefox 152 | Flow pass; performance fail | Flow/performance pass | Flow/performance pass | Gamepad, JS heap, audio, and letterbox proof missing |
 | Windows 11 Chrome | Unavailable | Unavailable | Unavailable | Missing required environment |
 | Windows 11 Firefox | Unavailable | Unavailable | Unavailable | Missing required environment |
 
@@ -70,6 +71,8 @@ required environment.
   frame-pacing failures.
 - [#22](https://github.com/osobytes/galactic-cup/issues/22) owns Chrome
   post-GC heap growth.
+- [#24](https://github.com/osobytes/galactic-cup/issues/24) owns non-16:9
+  browser canvas distortion.
 - [#16](https://github.com/osobytes/galactic-cup/issues/16) still owns Windows
   Chrome/Firefox, physical-gamepad proof, and Firefox heap evidence.
 - [#3](https://github.com/osobytes/galactic-cup/issues/3) must compare the

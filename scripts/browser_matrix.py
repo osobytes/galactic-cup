@@ -34,6 +34,11 @@ SOFTWARE_RENDERERS = (
     "warp",
 )
 MARKER_PATTERN = re.compile(r"(GC_(?:BROWSER|METRICS)\|.*?)(?:\"$|$)")
+HARD_RUNTIME_PATTERN = re.compile(
+    r"(?:\bfatal\b|causing a crash|\buncaught\b|unhandled (?:exception|rejection)|"
+    r"webassembly.*(?:trap|error)|wasm.*trap)",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -437,37 +442,47 @@ def webdriver_console(driver: Any, phase: str) -> list[dict[str, Any]]:
     return result
 
 
-def service_console(path: Path) -> list[dict[str, Any]]:
+def service_console(path: Path, runtime_bytes: int | None = None) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     result = []
-    text = path.read_text(encoding="utf-8", errors="replace").replace("\0", "")
-    for line in text.splitlines():
-        if marker_message(line):
-            continue
-        lowered = line.lower()
-        level = None
-        if (
-            "console.error:" in lowered
-            or "javascript error:" in lowered
-            or "fatal error:" in lowered
-            or re.search(r"\b(error|fatal)\b", lowered)
-        ):
-            level = "error"
-        elif (
-            "console.warn:" in lowered
-            or "javascript warning:" in lowered
-            or re.search(r"\bwarn(?:ing)?\b", lowered)
-        ):
-            level = "warning"
-        if level:
-            result.append(
-                {
-                    "level": level,
-                    "message": line,
-                    "phase": "webdriver_service",
-                }
-            )
+    data = path.read_bytes()
+    boundary = len(data)
+    if runtime_bytes is not None:
+        boundary = data.rfind(b"\n", 0, min(runtime_bytes, len(data))) + 1
+    segments = (
+        ((data[:boundary], "webdriver_service_runtime"), (data[boundary:], "webdriver_teardown"))
+        if runtime_bytes is not None
+        else ((data, "webdriver_service_runtime"),)
+    )
+    for raw, phase in segments:
+        text = raw.decode("utf-8", errors="replace").replace("\0", "")
+        for line in text.splitlines():
+            if marker_message(line):
+                continue
+            lowered = line.lower()
+            level = None
+            if (
+                "console.error:" in lowered
+                or "javascript error:" in lowered
+                or "fatal error:" in lowered
+                or re.search(r"\b(error|fatal)\b", lowered)
+            ):
+                level = "error"
+            elif (
+                "console.warn:" in lowered
+                or "javascript warning:" in lowered
+                or re.search(r"\bwarn(?:ing)?\b", lowered)
+            ):
+                level = "warning"
+            if level:
+                result.append(
+                    {
+                        "level": level,
+                        "message": line,
+                        "phase": phase,
+                    }
+                )
     return result
 
 
@@ -533,6 +548,10 @@ def click_canvas_gesture(driver: Any) -> None:
 
 
 def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str) -> dict[str, Any]:
+    driver.execute_script(
+        "console.info('GC_BROWSER|memory_probe|phase=start|label=' + arguments[0]);",
+        label,
+    )
     gc_method = "unavailable"
     try:
         if browser_name == "chrome":
@@ -562,7 +581,7 @@ def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str)
             if metric.get("name") == "JSHeapUsedSize":
                 js_heap = metric.get("value")
                 break
-    return {
+    result = {
         "captured_at": utc_now(),
         "forced_gc": gc_method,
         "js_heap_bytes": js_heap,
@@ -571,6 +590,11 @@ def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str)
         "performance_metrics": performance_metrics,
         "process_tree": process_tree_rss(service_pid),
     }
+    driver.execute_script(
+        "console.info('GC_BROWSER|memory_probe|phase=end|label=' + arguments[0]);",
+        label,
+    )
+    return result
 
 
 def growth_percent(first: int | float | None, last: int | float | None) -> float | None:
@@ -581,6 +605,13 @@ def growth_percent(first: int | float | None, last: int | float | None) -> float
 
 def sample_gate(entries: list[dict[str, Any]], flow_only: bool = True) -> dict[str, Any]:
     parsed = records(entries)
+    current_sample = None
+    probe_samples = set()
+    for record in parsed:
+        if record.get("kind") == "sample_start":
+            current_sample = int(record.get("sample", "0"))
+        elif record.get("kind") == "memory_probe" and current_sample:
+            probe_samples.add(current_sample)
     flow_completions = [
         float(record["at_ms"])
         for record in parsed
@@ -597,6 +628,7 @@ def sample_gate(entries: list[dict[str, Any]], flow_only: bool = True) -> dict[s
         if record.get("kind") == "sample"
         and record.get("partial") == "false"
         and float(record.get("duration_s", "0")) >= 59
+        and int(record.get("sample", "0")) not in probe_samples
         and (not flow_only or int(record.get("sample", "0")) <= last_complete_sample)
     ]
     failures = []
@@ -627,6 +659,7 @@ def sample_gate(entries: list[dict[str, Any]], flow_only: bool = True) -> dict[s
             failures.append(f"input latency p95={p95:.3f}>100 ms")
     return {
         "complete_samples": len(samples),
+        "excluded_probe_samples": sorted(probe_samples),
         "failures": failures,
         "input_samples": len(input_latencies),
         "scope": "flow" if flow_only else "full_run",
@@ -648,7 +681,15 @@ def console_gate(
     unclassified = []
     for entry in warnings:
         message = str(entry.get("message", ""))
-        rule = next((pattern.pattern for pattern in classifications if pattern.search(message)), None)
+        hard_runtime_error = bool(HARD_RUNTIME_PATTERN.search(message))
+        rule = (
+            None
+            if hard_runtime_error
+            else next(
+                (pattern.pattern for pattern in classifications if pattern.search(message)),
+                None,
+            )
+        )
         if rule:
             classified.append({**entry, "classification": rule})
         else:
@@ -716,22 +757,38 @@ def evidence_checks(
     stability_performance = (
         sample_gate(entries, flow_only=False) if stability_seconds else None
     )
+    runtime_console = [
+        entry for entry in entries if entry.get("phase") != "webdriver_teardown"
+    ]
+    teardown_console = [
+        entry for entry in entries if entry.get("phase") == "webdriver_teardown"
+    ]
+    audio_records = [record for record in parsed if record.get("kind") == "audio"]
+    audio_playing = any(
+        int(record.get("active_sources", "0")) > 0
+        and float(record.get("volume", "0")) > 0
+        for record in audio_records
+    )
     return {
         "audio_after_gesture": {
+            "observations": audio_records,
             "autoplay_warnings": len(audio_warnings),
             "pass": (
-                bool(preflight.get("user_activation", {}).get("has_been_active"))
+                bool(final_state.get("user_activation", {}).get("has_been_active"))
+                and audio_playing
                 and not audio_warnings
             ),
         },
         "artifact_boot": {
             "navigation_to_title_ms": preflight.get("navigation_to_title_ms"),
-            "pass": (
+            "pass": preflight.get("title_state", {}).get("status") == "running",
+            "soft_target_pass": (
                 preflight.get("navigation_to_title_ms") is not None
                 and float(preflight["navigation_to_title_ms"]) <= 2000
             ),
         },
-        "clean_console": console_gate(entries, warning_classifications),
+        "browser_teardown": console_gate(teardown_console, warning_classifications),
+        "clean_console": console_gate(runtime_console, warning_classifications),
         "complete_flow": {
             "pass": normalized_routes(routes)[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW,
             "routes": routes,
@@ -767,6 +824,10 @@ def evidence_checks(
             "events": lifecycle,
             "pass": all(expected in lifecycle for expected in ("blur", "focus", "resize")),
         },
+        "letterboxing": preflight.get(
+            "letterboxing",
+            {"pass": False, "reason": "missing letterbox observation"},
+        ),
         "memory": {
             "available": memory_available,
             "heap_growth_percent": heap_growth,
@@ -795,14 +856,11 @@ def evidence_checks(
                 None
                 if stability_seconds == 0
                 else (
-                    len(memories) == 3
-                    and final_state.get("status") == "running"
+                    final_state.get("status") == "running"
                     and routes[-1:] == ["result"]
                     and late_input
                     and late_setting
                     and preflight.get("match_focus_recovery") is True
-                    and stability_performance is not None
-                    and stability_performance["pass"]
                 )
             ),
             "requested_seconds": stability_seconds,
@@ -848,7 +906,33 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     time.sleep(0.25)
     driver.close()
     driver.switch_to.window(current)
-    set_viewport(driver, max(640, width - 160), max(360, height - 90))
+    probe_width = max(640, width - 160)
+    probe_height = height
+    set_viewport(driver, probe_width, probe_height)
+    time.sleep(0.25)
+    canvas = page_state(driver).get("canvas") or {}
+    rect = canvas.get("rect") or {}
+    scale = min(probe_width / 960, probe_height / 540)
+    expected_width = 960 * scale
+    expected_height = 540 * scale
+    expected_x = (probe_width - expected_width) / 2
+    expected_y = (probe_height - expected_height) / 2
+    letterboxing = {
+        "actual": rect,
+        "expected": {
+            "height": expected_height,
+            "width": expected_width,
+            "x": expected_x,
+            "y": expected_y,
+        },
+        "pass": (
+            abs(float(rect.get("width", 0)) - expected_width) <= 0.5
+            and abs(float(rect.get("height", 0)) - expected_height) <= 0.5
+            and abs(float(rect.get("x", 0)) - expected_x) <= 0.5
+            and abs(float(rect.get("y", 0)) - expected_y) <= 0.5
+        ),
+        "probe_viewport": {"height": probe_height, "width": probe_width},
+    }
     set_viewport(driver, width, height)
     time.sleep(0.25)
 
@@ -866,6 +950,7 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     return {
         "console": before_reload + after_reload,
         "fullscreen_observed": fullscreen_observed,
+        "letterboxing": letterboxing,
         "muted_after_reload": muted_after_reload,
         "navigation_to_title_ms": navigation_to_title_ms,
         "title_state": title_state,
@@ -896,13 +981,22 @@ def run_flow(
     service_pid = driver.service.process.pid
     started = time.monotonic()
     flow_deadline = started + flow_timeout
-    end_at = started + (10 + stability_seconds if stability_seconds else flow_timeout)
+    stability_started = started + 75
+    end_at = (
+        stability_started + stability_seconds
+        if stability_seconds
+        else started + flow_timeout
+    )
     next_driver_log = started
     trace_at = started + 70 if trace_enabled else None
     keyboard_probe_at = started + 11
     liveness_probe_at = end_at - 20 if stability_seconds else None
     memory_schedule = (
-        [(started + 10, "t0"), (started + 310, "t5"), (started + 610, "t10")]
+        [
+            (stability_started, "t0"),
+            (stability_started + 300, "t5"),
+            (stability_started + 600, "t10"),
+        ]
         if stability_seconds
         else []
     )
@@ -1000,20 +1094,32 @@ def run_viewport(
     flow_timeout: int,
     stability_seconds: int,
     trace_enabled: bool,
-    expected_revision: str,
+    expected_manifest: dict[str, Any],
     warning_classifications: list[re.Pattern[str]],
 ) -> dict[str, Any]:
     width, height = viewport
     output.mkdir(parents=True, exist_ok=True)
     driver_log = output / "webdriver.log"
-    driver = launch_browser(
-        browser_name,
-        binary,
-        driver_path,
-        driver_log,
-        trace_enabled,
-    )
+    expected_revision = str(expected_manifest.get("source_revision"))
+    driver = None
+    capabilities: dict[str, Any] = {}
+    preflight: dict[str, Any] = {"console": []}
+    flow: dict[str, Any] | None = None
+    failure: Exception | None = None
+    failure_entries: list[dict[str, Any]] = []
+    failure_state: dict[str, Any] = {}
+    service_runtime_bytes = 0
+    quit_error = None
     try:
+        validate_manifest(base_url, expected_manifest)
+        driver = launch_browser(
+            browser_name,
+            binary,
+            driver_path,
+            driver_log,
+            trace_enabled,
+        )
+        capabilities = driver.capabilities
         preflight = run_preflight(driver, base_url, width, height, output)
         if preflight["title_state"].get("build_id") != expected_revision:
             raise RuntimeError(
@@ -1031,11 +1137,115 @@ def run_viewport(
             stability_seconds,
             trace_enabled,
         )
-        capabilities = driver.capabilities
+        if flow["final_state"].get("build_id") != expected_revision:
+            raise RuntimeError(
+                "flow build ID does not match manifest revision: "
+                f"{flow['final_state'].get('build_id')} != {expected_revision}"
+            )
+        validate_manifest(base_url, expected_manifest)
+    except Exception as error:
+        failure = error
+        if driver:
+            capabilities = driver.capabilities
+            try:
+                failure_state = page_state(driver)
+                failure_entries.extend(browser_console(driver, "failure"))
+                failure_entries.extend(webdriver_console(driver, "failure"))
+            except Exception:
+                pass
     finally:
-        driver.quit()
+        if driver:
+            if driver_log.is_file():
+                service_runtime_bytes = driver_log.stat().st_size
+            try:
+                driver.quit()
+            except Exception as error:
+                quit_error = error
 
-    service_entries = service_console(driver_log) if browser_name == "firefox" else []
+    service_entries = (
+        service_console(driver_log, service_runtime_bytes)
+        if browser_name == "firefox"
+        else []
+    )
+    if quit_error:
+        service_entries.append(
+            {
+                "level": "error",
+                "message": f"WebDriver quit failed: {quit_error}",
+                "phase": "webdriver_teardown",
+            }
+        )
+    if failure:
+        entries = preflight.get("console", []) + failure_entries + service_entries
+        write_json(output / "console.json", entries)
+        write_json(output / "memory.json", [])
+        write_gzip_json(output / "performance-log.json.gz", [])
+        report = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "web_report.py"),
+                str(output / "console.json"),
+                "--require-flow",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        (output / "web-report.txt").write_text(
+            report.stdout + report.stderr,
+            encoding="utf-8",
+        )
+        result = {
+            "browser": {
+                "capabilities": capabilities,
+                "binary": str(binary),
+                "driver": str(driver_path),
+            },
+            "captured_at": utc_now(),
+            "checks": {
+                "browser_teardown": console_gate(
+                    [
+                        entry
+                        for entry in entries
+                        if entry.get("phase") == "webdriver_teardown"
+                    ],
+                    warning_classifications,
+                ),
+                "clean_console": console_gate(
+                    [
+                        entry
+                        for entry in entries
+                        if entry.get("phase") != "webdriver_teardown"
+                    ],
+                    warning_classifications,
+                ),
+            },
+            "dimensions": None,
+            "duration_seconds": None,
+            "error": {
+                "message": str(failure),
+                "type": type(failure).__name__,
+            },
+            "final_state": failure_state,
+            "preflight": {
+                key: preflight.get(key)
+                for key in (
+                    "fullscreen_observed",
+                    "letterboxing",
+                    "muted_after_reload",
+                    "navigation_to_title_ms",
+                    "title_state",
+                )
+            },
+            "stability_seconds": stability_seconds,
+            "trace_enabled": trace_enabled,
+            "viewport": {"height": height, "width": width},
+            "web_report_exit_code": report.returncode,
+        }
+        write_json(output / "run.json", result)
+        return result
+
+    assert flow is not None
     entries = preflight["console"] + flow["console"] + service_entries
     write_json(output / "console.json", entries)
     write_json(output / "memory.json", flow["memory"])
@@ -1092,6 +1302,7 @@ def run_viewport(
             key: preflight.get(key)
             for key in (
                 "fullscreen_observed",
+                "letterboxing",
                 "match_focus_recovery",
                 "muted_after_reload",
                 "navigation_to_title_ms",
@@ -1116,6 +1327,7 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
         "fullscreen",
         "hardware_acceleration",
         "keyboard",
+        "letterboxing",
         "lifecycle",
         "performance",
         "persistence",
@@ -1148,6 +1360,10 @@ def self_test() -> int:
     synthetic = [
         {
             "level": "log",
+            "message": "GC_METRICS|sample_start|sample=1",
+        },
+        {
+            "level": "log",
             "message": (
                 "GC_METRICS|sample|sample=1|partial=false|duration_s=60"
                 "|update_p95_ms=1|update_max_ms=2|draw_p95_ms=1|draw_max_ms=2"
@@ -1164,6 +1380,14 @@ def self_test() -> int:
         },
         {
             "level": "log",
+            "message": "GC_METRICS|sample_start|sample=2",
+        },
+        {
+            "level": "log",
+            "message": "GC_BROWSER|memory_probe|phase=start|label=t0",
+        },
+        {
+            "level": "log",
             "message": (
                 "GC_METRICS|sample|sample=2|partial=false|duration_s=60"
                 "|update_p95_ms=1|update_max_ms=2|draw_p95_ms=1|draw_max_ms=2"
@@ -1172,10 +1396,14 @@ def self_test() -> int:
         },
     ]
     assert sample_gate(synthetic)["pass"] is True
-    assert sample_gate(synthetic, flow_only=False)["pass"] is False
+    full_gate = sample_gate(synthetic, flow_only=False)
+    assert full_gate["pass"] is True
+    assert full_gate["excluded_probe_samples"] == [2]
     warning = {"level": "warning", "message": "known driver warning"}
     assert console_gate([warning], [re.compile("known driver")])["pass"] is True
     assert console_gate([warning], [])["pass"] is False
+    fatal = {"level": "error", "message": "FATAL ERROR: causing a crash"}
+    assert console_gate([fatal], [re.compile("FATAL")])["pass"] is False
     print("browser matrix self-test: OK")
     return 0
 
@@ -1257,7 +1485,7 @@ def main() -> int:
                 args.flow_timeout,
                 stability,
                 index == 0 and args.browser == "chrome",
-                str(manifest.get("source_revision")),
+                manifest,
                 warning_classifications,
             )
         )

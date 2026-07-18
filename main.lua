@@ -227,6 +227,13 @@ local function apply_settings(settings)
     metrics:settings(clock(), settings)
 end
 
+---@param now number
+local function record_audio(now)
+    if love.audio and love.audio.getActiveSourceCount and love.audio.getVolume then
+        metrics:audio(now, love.audio.getActiveSourceCount(), love.audio.getVolume())
+    end
+end
+
 function love.load()
     metrics = compatibility_metrics.new(clock())
     local width, height = love.graphics.getDimensions()
@@ -258,7 +265,9 @@ function love.update(dt)
     if route ~= last_route then
         metrics:route(now, route)
         last_route = route
-        if route == "result" then
+        if route == "match" then
+            record_audio(now)
+        elseif route == "result" then
             metrics:flow_complete(now, route)
         end
     end
