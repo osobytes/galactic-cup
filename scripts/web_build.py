@@ -103,6 +103,13 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
         Module.args = [uri.substring(uri.lastIndexOf("/") + 1)].concat(args);
         Module.cache = cache;
         Module.prerun = function () {
+          if (Module.FS) {
+            // Keep the OMP-0 proof independent of browser storage availability.
+            // Persistence can be restored as part of the compatibility baseline.
+            Module.FS.syncfs = function (_populate, callback) {
+              callback(null);
+            };
+          }
           Module.FS.mkdirTree("/usr/local/share/lua/5.1");
           for (var path in cache) {
             var filename = path.split("/").pop();

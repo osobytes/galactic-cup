@@ -6,6 +6,9 @@ repository or committed as generated output. The generated `player.js` is a
 small project-owned loader that fetches the package and runtime assets directly;
 the upstream IndexedDB-backed loader is retained as
 `third_party/lovejs-player.js` for provenance but is not the boot path.
+The OMP-0 proof uses an in-memory filesystem so startup does not depend on
+browser storage availability; persistence can be restored as part of the later
+compatibility baseline.
 
 ## Build and serve
 
