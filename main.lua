@@ -197,12 +197,29 @@ if has_flag("--eval") then
 end
 
 local bootstrap = require("game.bootstrap")
+local compatibility_metrics = require("game.compatibility_metrics")
 local runtime_settings = require("game.runtime_settings")
 
 ---@type App
 local app
+---@type CompatibilityMetrics
+local metrics
+local last_route
+
+---@return number
+local function clock()
+    return love.timer.getTime()
+end
+
+---@param kind string
+local function record_input(kind)
+    if metrics then
+        metrics:input(clock(), kind)
+    end
+end
 
 function love.load()
+    metrics = compatibility_metrics.new(clock())
     local width, height = love.graphics.getDimensions()
     app = bootstrap.new(width, height, {
         apply_settings = runtime_settings.apply,
@@ -212,19 +229,41 @@ function love.load()
     })
     runtime_settings.apply(app.settings)
     app:resize(love.graphics.getDimensions())
+    last_route = app:current_route()
+    metrics:route(clock(), last_route)
 end
 
 ---@param dt number
 function love.update(dt)
+    metrics:begin_update(clock())
     app:update(dt)
+    local now = clock()
+    metrics:finish_update(now)
+    local route = app:current_route()
+    if route ~= last_route then
+        metrics:route(now, route)
+        last_route = route
+        if route == "result" then
+            metrics:flow_complete(now, route)
+        end
+    end
 end
 
 function love.draw()
+    metrics:begin_draw(clock())
     app:draw()
+    metrics:finish_draw(clock())
+end
+
+function love.quit()
+    if metrics then
+        metrics:finish(clock())
+    end
 end
 
 ---@param key string
 function love.keypressed(key)
+    record_input("key_" .. key)
     app:event({ kind = "key", key = key })
 end
 
@@ -232,6 +271,7 @@ end
 ---@param y number
 ---@param button number
 function love.mousepressed(x, y, button)
+    record_input("mouse_" .. button)
     app:event({ kind = "click", x = x, y = y, button = button })
 end
 
@@ -239,22 +279,26 @@ end
 ---@param button love.GamepadButton
 function love.gamepadpressed(joystick, button)
     local _ = joystick
+    record_input("gamepad_" .. button)
     app:event({ kind = "gamepad", button = button })
 end
 
 ---@param width number
 ---@param height number
 function love.resize(width, height)
+    metrics:lifecycle(clock(), "resize")
     app:resize(width, height)
 end
 
 ---@param focused boolean
 function love.focus(focused)
+    metrics:lifecycle(clock(), focused and "focus" or "blur")
     app:focus(focused)
 end
 
 ---@param joystick love.Joystick
 function love.joystickremoved(joystick)
     local _ = joystick
+    metrics:lifecycle(clock(), "joystick_removed")
     app:pause_match()
 end

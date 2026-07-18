@@ -40,14 +40,24 @@ if missing:
 index = (artifact / "index.html").read_text(encoding="utf-8")
 if 'player.js?g=galactic-cup.love&amp;v=11.5' not in index:
     raise SystemExit("index.html does not point at the packaged game and LÖVE 11.5")
-if "Promise.all(paths.map(fetch_binary))" not in (artifact / "player.js").read_text(encoding="utf-8"):
+loader = (artifact / "player.js").read_text(encoding="utf-8")
+if "Promise.all(paths.map(fetch_binary))" not in loader:
     raise SystemExit("browser loader does not use direct deterministic asset loading")
+for marker in ("window.__GALACTIC_CUP__", "GC_BROWSER|", "runtime_postrun"):
+    if marker not in loader:
+        raise SystemExit(f"browser loader is missing compatibility marker: {marker}")
 
 with zipfile.ZipFile(artifact / "galactic-cup.love") as package:
     if package.testzip() is not None:
         raise SystemExit("game package contains a corrupt entry")
     names = set(package.namelist())
-    for path in ("conf.lua", "main.lua", "game/app.lua", "sim/match.lua"):
+    for path in (
+        "conf.lua",
+        "main.lua",
+        "game/app.lua",
+        "game/compatibility_metrics.lua",
+        "sim/match.lua",
+    ):
         if path not in names:
             raise SystemExit(f"game package is missing {path}")
 
