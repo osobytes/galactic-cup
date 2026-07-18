@@ -41,7 +41,8 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
    * OMP-0 transport host. Lua calls this bounded queue API through the
    * pinned runtime's love.js.eval hook. Delivery is scheduled as a microtask
    * (or a timer fallback), so no browser/network operation runs in the LÖVE
-   * update call. This is a loopback only; WebRTC belongs to issue #5.
+   * update call. The WebRTC proof host is embedded separately below and uses
+   * the same envelope shape.
    */
   window.GalacticCupTransportBridge = window.GalacticCupTransportBridge || (function () {
     var VERSION = 1;
@@ -266,6 +267,8 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
     };
   })();
 
+  /*__GALACTIC_CUP_WEBRTC_PROOF__*/
+
   var script = document.currentScript;
   var canvas = document.getElementById("canvas");
   var spinner = document.getElementById("spinner");
@@ -275,6 +278,7 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
   var args = [];
   var browser_compat = window.__GALACTIC_CUP__ = {
     artifact: "galactic-cup-web",
+    build_id: "__GALACTIC_CUP_BUILD_ID__",
     events: [],
     status: "loading",
     started_at_ms: performance.now()
@@ -532,7 +536,10 @@ def copy_runtime(runtime_root: Path, output: Path) -> None:
 
 
 def write_browser_loader(output: Path) -> None:
-    (output / "player.js").write_text(BROWSER_LOADER, encoding="utf-8")
+    proof_host = (ROOT / "scripts" / "webrtc_proof_host.js").read_text(encoding="utf-8")
+    loader = BROWSER_LOADER.replace("  /*__GALACTIC_CUP_WEBRTC_PROOF__*/", proof_host)
+    loader = loader.replace("__GALACTIC_CUP_BUILD_ID__", source_revision())
+    (output / "player.js").write_text(loader, encoding="utf-8")
 
 
 def write_manifest(output: Path, package_hash: str) -> None:
