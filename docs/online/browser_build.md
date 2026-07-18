@@ -31,11 +31,16 @@ The CSP is intentionally narrow to same-origin scripts but includes
 copy these headers into a public deployment without reviewing the security
 policy for that deployment.
 
+The generated host keeps the 960×540 logical canvas at 16:9. Non-16:9
+windowed viewports center the largest fitting canvas rectangle over black
+bars; the runtime maps pointer input through the resulting scale and offset.
+
 ## Packaging smoke check
 
 The non-interactive smoke check builds the artifact twice, compares the
 deterministic `.love` packages, checks the required runtime files, validates
-the ZIP entries, and verifies the pinned runtime manifest:
+the ZIP entries, verifies the pinned runtime manifest, and self-tests the
+expected 800×540 tall, 1280×540 wide, and required 16:9 canvas geometry:
 
 ```sh
 ./scripts/web_smoke.sh

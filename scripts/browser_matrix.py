@@ -22,7 +22,19 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CANVAS_WIDTH = 960
+CANVAS_HEIGHT = 540
+GEOMETRY_TOLERANCE = 0.5
 DEFAULT_VIEWPORTS = [(960, 540), (1280, 720), (1920, 1080)]
+LETTERBOX_PROBES = {
+    "tall": (800, 540),
+    "wide": (1280, 540),
+}
+POINTER_TARGET = {
+    "route": "credits",
+    "x": 360,
+    "y": 390,
+}
 EXPECTED_FLOW = ["title", "squad", "formation", "tactic", "match", "result"]
 SOFTWARE_RENDERERS = (
     "lavapipe",
@@ -62,6 +74,39 @@ def parse_viewport(value: str) -> tuple[int, int]:
     if not match:
         raise argparse.ArgumentTypeError("viewport must look like 960x540")
     return int(match.group(1)), int(match.group(2))
+
+
+def expected_canvas_rect(width: int, height: int) -> dict[str, float]:
+    scale = min(width / CANVAS_WIDTH, height / CANVAS_HEIGHT)
+    canvas_width = CANVAS_WIDTH * scale
+    canvas_height = CANVAS_HEIGHT * scale
+    return {
+        "height": canvas_height,
+        "width": canvas_width,
+        "x": (width - canvas_width) / 2,
+        "y": (height - canvas_height) / 2,
+    }
+
+
+def rect_matches(
+    actual: dict[str, Any],
+    expected: dict[str, float],
+    tolerance: float = GEOMETRY_TOLERANCE,
+) -> bool:
+    try:
+        return all(
+            abs(float(actual.get(key, 0)) - expected[key]) <= tolerance
+            for key in ("height", "width", "x", "y")
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def logical_to_client(rect: dict[str, Any], x: float, y: float) -> dict[str, float]:
+    return {
+        "x": float(rect["x"]) + x * float(rect["width"]) / CANVAS_WIDTH,
+        "y": float(rect["y"]) + y * float(rect["height"]) / CANVAS_HEIGHT,
+    }
 
 
 def marker_message(message: str) -> str | None:
@@ -547,6 +592,85 @@ def click_canvas_gesture(driver: Any) -> None:
     ).click().perform()
 
 
+def canvas_geometry(driver: Any, width: int, height: int) -> dict[str, Any]:
+    set_viewport(driver, width, height)
+    time.sleep(0.25)
+    canvas = page_state(driver).get("canvas") or {}
+    actual = canvas.get("rect") or {}
+    expected = expected_canvas_rect(width, height)
+    return {
+        "actual": actual,
+        "canvas_size": {
+            "height": canvas.get("height"),
+            "width": canvas.get("width"),
+        },
+        "expected": expected,
+        "pass": (
+            canvas.get("width") == CANVAS_WIDTH
+            and canvas.get("height") == CANVAS_HEIGHT
+            and rect_matches(actual, expected)
+        ),
+        "probe_viewport": {"height": height, "width": width},
+    }
+
+
+def pointer_input_count(driver: Any) -> int:
+    return sum(
+        1
+        for record in records(browser_console(driver, "pointer_probe"))
+        if record.get("kind") == "input" and record.get("event_kind") == "mouse_1"
+    )
+
+
+def probe_pointer_alignment(driver: Any, geometry: dict[str, Any]) -> dict[str, Any]:
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+
+    rect = geometry["actual"]
+    target = logical_to_client(rect, POINTER_TARGET["x"], POINTER_TARGET["y"])
+    routes_before = route_sequence(browser_console(driver, "pointer_probe"))
+    inputs_before = pointer_input_count(driver)
+    canvas = driver.find_element(By.ID, "canvas")
+    center_x = float(rect["x"]) + float(rect["width"]) / 2
+    center_y = float(rect["y"]) + float(rect["height"]) / 2
+    ActionChains(driver).move_to_element(canvas).move_by_offset(
+        round(target["x"] - center_x),
+        round(target["y"] - center_y),
+    ).click().perform()
+
+    def reached_expected_route() -> bool:
+        routes = route_sequence(browser_console(driver, "pointer_probe"))
+        return len(routes) > len(routes_before) and routes[-1] == POINTER_TARGET["route"]
+
+    try:
+        wait_until(reached_expected_route, 5, "letterboxed pointer target")
+    except RuntimeError:
+        pass
+    routes_after = route_sequence(browser_console(driver, "pointer_probe"))
+    inputs_after = pointer_input_count(driver)
+    actual_route = routes_after[-1] if len(routes_after) > len(routes_before) else None
+    result = {
+        "actual_route": actual_route,
+        "expected_route": POINTER_TARGET["route"],
+        "input_observed": inputs_after > inputs_before,
+        "logical": {"x": POINTER_TARGET["x"], "y": POINTER_TARGET["y"]},
+        "pass": actual_route == POINTER_TARGET["route"] and inputs_after > inputs_before,
+        "target_client": target,
+    }
+
+    if actual_route and actual_route != "title":
+        route_count = len(routes_after)
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+
+        def returned_to_title() -> bool:
+            routes = route_sequence(browser_console(driver, "pointer_probe"))
+            return len(routes) > route_count and routes[-1] == "title"
+
+        wait_until(returned_to_title, 5, "Title after pointer probe")
+    return result
+
+
 def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str) -> dict[str, Any]:
     driver.execute_script(
         "console.info('GC_BROWSER|memory_probe|phase=start|label=' + arguments[0]);",
@@ -878,6 +1002,7 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     set_viewport(driver, width, height)
     wait_for_route(driver, "title")
     title_state = page_state(driver)
+    requested_geometry = canvas_geometry(driver, width, height)
     driver.save_screenshot(str(output / "title.png"))
     navigation_to_title_ms = (time.monotonic() - navigation_started) * 1000
     driver.find_element(By.ID, "canvas").click()
@@ -887,6 +1012,32 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     wait_for_route(driver, "title")
     send_key(driver, "m")
     wait_for_setting(driver, "muted", "true")
+
+    probes = {"requested": requested_geometry}
+    pointer_probes = {}
+    for name, (probe_width, probe_height) in LETTERBOX_PROBES.items():
+        geometry = canvas_geometry(driver, probe_width, probe_height)
+        pointer = probe_pointer_alignment(driver, geometry)
+        geometry["pointer_hit_testing"] = pointer
+        probes[name] = geometry
+        pointer_probes[name] = pointer
+    tall = probes["tall"]
+    letterboxing = {
+        "actual": tall["actual"],
+        "expected": tall["expected"],
+        "pass": (
+            all(probe["pass"] for probe in probes.values())
+            and all(probe["pass"] for probe in pointer_probes.values())
+        ),
+        "pointer_hit_testing": {
+            "pass": all(probe["pass"] for probe in pointer_probes.values()),
+            "probes": pointer_probes,
+        },
+        "probe_viewport": tall["probe_viewport"],
+        "probes": probes,
+    }
+    set_viewport(driver, width, height)
+    time.sleep(0.25)
 
     fullscreen_observed = False
     try:
@@ -906,35 +1057,6 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     time.sleep(0.25)
     driver.close()
     driver.switch_to.window(current)
-    probe_width = max(640, width - 160)
-    probe_height = height
-    set_viewport(driver, probe_width, probe_height)
-    time.sleep(0.25)
-    canvas = page_state(driver).get("canvas") or {}
-    rect = canvas.get("rect") or {}
-    scale = min(probe_width / 960, probe_height / 540)
-    expected_width = 960 * scale
-    expected_height = 540 * scale
-    expected_x = (probe_width - expected_width) / 2
-    expected_y = (probe_height - expected_height) / 2
-    letterboxing = {
-        "actual": rect,
-        "expected": {
-            "height": expected_height,
-            "width": expected_width,
-            "x": expected_x,
-            "y": expected_y,
-        },
-        "pass": (
-            abs(float(rect.get("width", 0)) - expected_width) <= 0.5
-            and abs(float(rect.get("height", 0)) - expected_height) <= 0.5
-            and abs(float(rect.get("x", 0)) - expected_x) <= 0.5
-            and abs(float(rect.get("y", 0)) - expected_y) <= 0.5
-        ),
-        "probe_viewport": {"height": probe_height, "width": probe_width},
-    }
-    set_viewport(driver, width, height)
-    time.sleep(0.25)
 
     before_reload = browser_console(driver, "preflight")
     before_reload.extend(webdriver_console(driver, "preflight"))
@@ -1342,6 +1464,41 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
 
 def self_test() -> int:
     assert parse_viewport("960x540") == (960, 540)
+    assert expected_canvas_rect(800, 540) == {
+        "height": 450,
+        "width": 800,
+        "x": 0,
+        "y": 45,
+    }
+    assert expected_canvas_rect(1280, 540) == {
+        "height": 540,
+        "width": 960,
+        "x": 160,
+        "y": 0,
+    }
+    for width, height in DEFAULT_VIEWPORTS:
+        assert expected_canvas_rect(width, height) == {
+            "height": height,
+            "width": width,
+            "x": 0,
+            "y": 0,
+        }
+    assert rect_matches(
+        {"height": 540, "width": 959.9834, "x": 160.0166, "y": 0},
+        expected_canvas_rect(1280, 540),
+    )
+    assert not rect_matches(
+        {"height": 540, "width": 1280, "x": 0, "y": 0},
+        expected_canvas_rect(1280, 540),
+    )
+    assert logical_to_client(expected_canvas_rect(800, 540), 360, 390) == {
+        "x": 300,
+        "y": 370,
+    }
+    assert logical_to_client(expected_canvas_rect(1280, 540), 360, 390) == {
+        "x": 520,
+        "y": 390,
+    }
     assert marker_message('http://example 1:2 "GC_METRICS|route|route=title"') == (
         "GC_METRICS|route|route=title"
     )
