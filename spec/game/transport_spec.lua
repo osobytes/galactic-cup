@@ -229,6 +229,17 @@ t.describe("fake loopback transport", function()
         t.eq(assert(fake:poll_event()).code, "malformed")
         t.is_true(fake:poll_event() == nil)
     end)
+
+    t.it("retains the disconnect state/error pair at the minimum queue limit", function()
+        local fake = transport.fake({ queue_limit = 1 })
+        assert(fake:initialize())
+
+        assert(fake:disconnect("peer closed"))
+        t.eq(fake:diagnostics().event_depth, 2)
+        t.eq(assert(fake:poll_event()).state, "disconnected")
+        t.eq(assert(fake:poll_event()).code, "disconnected")
+        t.is_true(fake:poll_event() == nil)
+    end)
 end)
 
 t.describe("browser transport contract", function()

@@ -77,9 +77,11 @@ queue insertion and increment diagnostics counters.
 
 ## Queueing and backpressure
 
-The default queue limit is 64 messages per direction, and the state/error event
-queue uses the same bound. Adapters accept a `queue_limit` from 1 through 256
-for deterministic tests and can report the effective limit through
+The default queue limit is 64 messages per direction. The state/error event
+queue uses the same bound with a minimum capacity of two. That minimum makes a
+disconnect's state/error pair atomic from the observer's perspective even when
+`queue_limit` is one. Adapters accept a `queue_limit` from 1 through 256 for
+deterministic tests and can report the effective message limit through
 `diagnostics()`.
 
 The fake adapter loops outbound messages into its inbound queue immediately,
@@ -93,9 +95,11 @@ When the outbound queue is full, `enqueue` returns code `overflow`; the message
 is dropped and `dropped_outbound`/`overflow` are incremented. Inbound injection
 in the fake adapter reports the equivalent `dropped_inbound` case. There is no
 unbounded buffering and no retry loop inside the adapter. If the event queue is
-full, its oldest event is dropped and the newest state/error event is retained;
-the `overflow` counter and `last_error` make that loss observable. Issue #5
-must decide whether to drop, coalesce, or stop sampling input after observing
+full, its oldest event is dropped and the newest state/error event is retained.
+Because event capacity is never below two, the `disconnected` state event and
+the following `disconnected` error event are retained together. The `overflow`
+counter and `last_error` make any older-event loss observable. Issue #5 must
+decide whether to drop, coalesce, or stop sampling input after observing
 backpressure.
 
 `diagnostics()` includes `outbound_depth`, `inbound_depth`, `event_depth`,

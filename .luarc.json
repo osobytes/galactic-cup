@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
   "runtime.version": "LuaJIT",
   "runtime.path": ["?.lua", "?/init.lua"],
-  "workspace.library": ["types"],
+  "workspace.library": ["${3rd}/love2d/library"],
   "workspace.ignoreDir": [".claude"],
   "workspace.checkThirdParty": false,
   "diagnostics.globals": ["love"],
