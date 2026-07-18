@@ -5,6 +5,11 @@ project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 smoke_root="$(mktemp -d)"
 trap 'rm -rf "$smoke_root"' EXIT
 
+node --check "$project_root/scripts/webrtc_proof_host.js"
+node --check "$project_root/scripts/webrtc_proof_runner.js"
+node --check "$project_root/scripts/webrtc_proof_suite.js"
+node "$project_root/scripts/webrtc_proof_smoke.js"
+
 first="$smoke_root/first"
 second="$smoke_root/second"
 "$project_root/scripts/web_build.sh" "$first"
@@ -33,6 +38,10 @@ required = {
     "style.css",
     "third_party/lovejs-player.js",
     "third_party/lovejs.LICENSE.txt",
+    "webrtc-proof.html",
+    "webrtc-proof.js",
+    "webrtc-proof-suite.html",
+    "webrtc-proof-suite.js",
 }
 missing = sorted(path for path in required if not (artifact / path).is_file())
 if missing:
@@ -52,6 +61,30 @@ if "GalacticCupTransportBridge" not in loader:
 for marker in ("GalacticCupWebRTCProof", "RTCPeerConnection", "GC_WEBRTC"):
     if marker not in loader:
         raise SystemExit(f"browser loader is missing WebRTC proof marker: {marker}")
+
+proof_page = (artifact / "webrtc-proof.html").read_text(encoding="utf-8")
+proof_runner = (artifact / "webrtc-proof.js").read_text(encoding="utf-8")
+for marker in ("signal-input", "signal-output", "start-traffic", "diagnostics"):
+    if marker not in proof_page:
+        raise SystemExit(f"WebRTC proof page is missing control: {marker}")
+for marker in (
+    "GalacticCupWebRTCProof",
+    "network_profile",
+    "one_way_delay_ms",
+    "input_loss_percent",
+    "run_completed",
+):
+    if marker not in proof_runner:
+        raise SystemExit(f"WebRTC proof runner is missing marker: {marker}")
+
+proof_suite_page = (artifact / "webrtc-proof-suite.html").read_text(encoding="utf-8")
+proof_suite = (artifact / "webrtc-proof-suite.js").read_text(encoding="utf-8")
+for marker in ("baseline-host", "shaped-host", "mismatch-host", "run-suite"):
+    if marker not in proof_suite_page:
+        raise SystemExit(f"WebRTC proof suite page is missing control: {marker}")
+for marker in ("GalacticCupWebRTCProofSuite", "suite_complete", "mismatch_complete"):
+    if marker not in proof_suite:
+        raise SystemExit(f"WebRTC proof suite is missing marker: {marker}")
 
 with zipfile.ZipFile(artifact / "galactic-cup.love") as package:
     if package.testzip() is not None:

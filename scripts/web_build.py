@@ -430,6 +430,103 @@ INDEX_HTML = """<!doctype html>
 </html>
 """
 
+WEBRTC_PROOF_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galactic Cup WebRTC proof</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { background: #070b18; color: #f4f7ff; margin: 0 auto; max-width: 900px; padding: 24px; }
+      h1 { margin-top: 0; }
+      .summary { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
+      .summary span { background: #151d36; border-radius: 6px; padding: 8px 12px; }
+      label { display: block; font-weight: 700; margin-top: 16px; }
+      textarea { box-sizing: border-box; min-height: 120px; width: 100%; }
+      button { margin: 12px 8px 0 0; padding: 9px 14px; }
+      pre { background: #11182c; border-radius: 6px; overflow: auto; padding: 16px; }
+      #status { color: #86e1ff; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <h1>Galactic Cup WebRTC proof</h1>
+    <div class="summary">
+      <span>Role: <strong id="role-value"></strong></span>
+      <span>Profile: <strong id="profile-value"></strong></span>
+      <span>Duration: <strong id="duration-value"></strong> ms</span>
+      <span>Status: <strong id="status" data-state="loading">loading</strong></span>
+    </div>
+    <p>
+      Open one host tab and one guest tab with the same profile. Copy the offer
+      and answer between the signal fields, then start traffic in both tabs.
+    </p>
+    <label for="signal-input">Remote signal</label>
+    <textarea id="signal-input" data-testid="signal-input"></textarea>
+    <button id="create-offer" data-testid="create-offer">Create offer</button>
+    <button id="accept-offer" data-testid="accept-offer">Accept offer</button>
+    <button id="accept-answer" data-testid="accept-answer">Accept answer</button>
+    <label for="signal-output">Local signal</label>
+    <textarea id="signal-output" data-testid="signal-output" readonly></textarea>
+    <div>
+      <button id="start-traffic" data-testid="start-traffic" disabled>Start 60 Hz traffic</button>
+      <button id="stop-traffic" data-testid="stop-traffic" disabled>Stop traffic</button>
+    </div>
+    <h2>Diagnostics</h2>
+    <pre id="diagnostics" data-testid="diagnostics"></pre>
+    <script src="webrtc-proof.js"></script>
+  </body>
+</html>
+"""
+
+WEBRTC_PROOF_SUITE_HTML = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galactic Cup WebRTC proof suite</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { background: #070b18; color: #f4f7ff; margin: 0 auto; max-width: 1200px; padding: 24px; }
+      h1 { margin-top: 0; }
+      button { margin: 8px 0 16px; padding: 10px 16px; }
+      .pair { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin-bottom: 20px; }
+      iframe { background: #070b18; border: 1px solid #445078; height: 460px; width: 100%; }
+      .mismatch iframe { height: 260px; }
+      pre { background: #11182c; border-radius: 6px; max-height: 620px; overflow: auto; padding: 16px; }
+      #suite-status { color: #86e1ff; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <h1>Galactic Cup WebRTC proof suite</h1>
+    <p>
+      Runs baseline and 100 ms RTT/1% input-loss profiles concurrently in four
+      separate browsing contexts, plus a build-mismatch handshake.
+    </p>
+    <p>Status: <span id="suite-status" data-state="loading">loading</span></p>
+    <button id="run-suite" data-testid="run-suite">Connect and run all profiles</button>
+    <h2>Baseline profile</h2>
+    <div class="pair">
+      <iframe id="baseline-host" title="Baseline host"></iframe>
+      <iframe id="baseline-guest" title="Baseline guest"></iframe>
+    </div>
+    <h2>Shaped profile</h2>
+    <div class="pair">
+      <iframe id="shaped-host" title="Shaped host"></iframe>
+      <iframe id="shaped-guest" title="Shaped guest"></iframe>
+    </div>
+    <h2>Mismatch proof</h2>
+    <div class="pair mismatch">
+      <iframe id="mismatch-host" title="Mismatch host"></iframe>
+      <iframe id="mismatch-guest" title="Mismatch guest"></iframe>
+    </div>
+    <h2>Suite diagnostics</h2>
+    <pre id="suite-diagnostics" data-testid="suite-diagnostics"></pre>
+    <script src="webrtc-proof-suite.js"></script>
+  </body>
+</html>
+"""
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -544,6 +641,22 @@ def write_browser_loader(output: Path) -> None:
     (output / "player.js").write_text(loader, encoding="utf-8")
 
 
+def write_webrtc_proof_runner(output: Path) -> None:
+    build_id = json.dumps(source_revision())
+    proof_host = (ROOT / "scripts" / "webrtc_proof_host.js").read_text(encoding="utf-8")
+    runner = (ROOT / "scripts" / "webrtc_proof_runner.js").read_text(encoding="utf-8")
+    source = (
+        f"window.__GALACTIC_CUP__ = {{ build_id: {build_id} }};\n"
+        f"{proof_host}\n"
+        f"{runner}\n"
+    )
+    (output / "webrtc-proof.js").write_text(source, encoding="utf-8")
+    shutil.copyfile(
+        ROOT / "scripts" / "webrtc_proof_suite.js",
+        output / "webrtc-proof-suite.js",
+    )
+
+
 def write_manifest(output: Path, package_hash: str) -> None:
     files = {}
     for path in sorted(output.rglob("*")):
@@ -585,8 +698,17 @@ def build(output: Path) -> None:
         package_hash = write_game_package(staging / "galactic-cup.love")
         runtime_root = download_runtime(Path(temp))
         (staging / "index.html").write_text(INDEX_HTML, encoding="utf-8")
+        (staging / "webrtc-proof.html").write_text(
+            WEBRTC_PROOF_HTML,
+            encoding="utf-8",
+        )
+        (staging / "webrtc-proof-suite.html").write_text(
+            WEBRTC_PROOF_SUITE_HTML,
+            encoding="utf-8",
+        )
         copy_runtime(runtime_root, staging)
         write_browser_loader(staging)
+        write_webrtc_proof_runner(staging)
         write_manifest(staging, package_hash)
 
         if output.exists():
