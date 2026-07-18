@@ -33,6 +33,24 @@ RUNTIME_FILES = {
     "style.css": "style.css",
 }
 
+BROWSER_STYLE_OVERRIDE = r'''
+/* Galactic Cup preserves its 960x540 canvas aspect ratio in windowed mode. */
+html,
+body {
+  width: 100%;
+  height: 100%;
+}
+
+#canvas:not(:fullscreen) {
+  width: min(100vw, 177.7777777778vh) !important;
+  height: min(100vh, 56.25vw) !important;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  object-fit: contain !important;
+}
+'''
+
 BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
 (function () {
   "use strict";
@@ -693,6 +711,15 @@ def copy_runtime(runtime_root: Path, output: Path) -> None:
     shutil.copyfile(runtime_root / "license.txt", license_path)
 
 
+def write_browser_style(output: Path) -> None:
+    path = output / "style.css"
+    upstream = path.read_text(encoding="utf-8").rstrip()
+    path.write_text(
+        upstream + "\n\n" + BROWSER_STYLE_OVERRIDE.strip() + "\n",
+        encoding="utf-8",
+    )
+
+
 def write_browser_loader(output: Path) -> None:
     storage_host = (ROOT / "scripts" / "browser_storage_host.js").read_text(
         encoding="utf-8"
@@ -774,6 +801,7 @@ def build(output: Path) -> None:
             encoding="utf-8",
         )
         copy_runtime(runtime_root, staging)
+        write_browser_style(staging)
         write_browser_loader(staging)
         write_webrtc_proof_runner(staging)
         write_manifest(staging, package_hash)
