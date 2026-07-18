@@ -32,8 +32,9 @@ LETTERBOX_PROBES = {
 }
 POINTER_TARGET = {
     "route": "credits",
-    "x": 360,
-    "y": 390,
+    "rect": {"height": 42, "width": 260, "x": 350, "y": 382},
+    "x": 480,
+    "y": 403,
 }
 EXPECTED_FLOW = ["title", "squad", "formation", "tactic", "match", "result"]
 SOFTWARE_RENDERERS = (
@@ -106,6 +107,38 @@ def logical_to_client(rect: dict[str, Any], x: float, y: float) -> dict[str, flo
     return {
         "x": float(rect["x"]) + x * float(rect["width"]) / CANVAS_WIDTH,
         "y": float(rect["y"]) + y * float(rect["height"]) / CANVAS_HEIGHT,
+    }
+
+
+def point_in_rect(rect: dict[str, Any], point: dict[str, float]) -> bool:
+    return (
+        float(rect["x"]) <= point["x"] <= float(rect["x"]) + float(rect["width"])
+        and float(rect["y"]) <= point["y"] <= float(rect["y"]) + float(rect["height"])
+    )
+
+
+def pointer_offset_control(
+    rect: dict[str, Any],
+    logical_x: float,
+    logical_y: float,
+) -> dict[str, Any]:
+    client = logical_to_client(rect, logical_x, logical_y)
+    logical_if_offset_omitted = {
+        "x": client["x"] * CANVAS_WIDTH / float(rect["width"]),
+        "y": client["y"] * CANVAS_HEIGHT / float(rect["height"]),
+    }
+    correct_logical = {"x": logical_x, "y": logical_y}
+    correct_hits_target = point_in_rect(POINTER_TARGET["rect"], correct_logical)
+    omitted_offset_hits_target = point_in_rect(
+        POINTER_TARGET["rect"],
+        logical_if_offset_omitted,
+    )
+    return {
+        "correct_hits_target": correct_hits_target,
+        "expected_target_rect": POINTER_TARGET["rect"],
+        "logical_if_offset_omitted": logical_if_offset_omitted,
+        "omitted_offset_hits_target": omitted_offset_hits_target,
+        "pass": correct_hits_target and not omitted_offset_hits_target,
     }
 
 
@@ -657,6 +690,7 @@ def probe_pointer_alignment(driver: Any, geometry: dict[str, Any]) -> dict[str, 
 
     rect = geometry["actual"]
     target = logical_to_client(rect, POINTER_TARGET["x"], POINTER_TARGET["y"])
+    offset_control = pointer_offset_control(rect, POINTER_TARGET["x"], POINTER_TARGET["y"])
     routes_before = route_sequence(browser_console(driver, "pointer_probe"))
     inputs_before = pointer_input_count(driver)
     canvas = driver.find_element(By.ID, "canvas")
@@ -683,7 +717,12 @@ def probe_pointer_alignment(driver: Any, geometry: dict[str, Any]) -> dict[str, 
         "expected_route": POINTER_TARGET["route"],
         "input_observed": inputs_after > inputs_before,
         "logical": {"x": POINTER_TARGET["x"], "y": POINTER_TARGET["y"]},
-        "pass": actual_route == POINTER_TARGET["route"] and inputs_after > inputs_before,
+        "offset_omission_control": offset_control,
+        "pass": (
+            actual_route == POINTER_TARGET["route"]
+            and inputs_after > inputs_before
+            and offset_control["pass"]
+        ),
         "target_client": target,
     }
 
@@ -1594,14 +1633,47 @@ def self_test() -> int:
         {"height": 540, "width": 1280, "x": 0, "y": 0},
         expected_canvas_rect(1280, 540),
     )
-    assert logical_to_client(expected_canvas_rect(800, 540), 360, 390) == {
-        "x": 300,
-        "y": 370,
+    assert logical_to_client(expected_canvas_rect(800, 540), 480, 403) == {
+        "x": 400,
+        "y": 380.8333333333333,
     }
-    assert logical_to_client(expected_canvas_rect(1280, 540), 360, 390) == {
+    assert logical_to_client(expected_canvas_rect(1280, 540), 480, 403) == {
+        "x": 640,
+        "y": 403,
+    }
+    old_wide_control = pointer_offset_control(
+        expected_canvas_rect(1280, 540),
+        360,
+        390,
+    )
+    assert old_wide_control["logical_if_offset_omitted"] == {
         "x": 520,
         "y": 390,
     }
+    assert old_wide_control["omitted_offset_hits_target"] is True
+    assert old_wide_control["pass"] is False
+    wide_control = pointer_offset_control(
+        expected_canvas_rect(1280, 540),
+        POINTER_TARGET["x"],
+        POINTER_TARGET["y"],
+    )
+    assert wide_control["logical_if_offset_omitted"] == {
+        "x": 640,
+        "y": 403,
+    }
+    assert wide_control["omitted_offset_hits_target"] is False
+    assert wide_control["pass"] is True
+    tall_control = pointer_offset_control(
+        expected_canvas_rect(800, 540),
+        POINTER_TARGET["x"],
+        POINTER_TARGET["y"],
+    )
+    assert tall_control["logical_if_offset_omitted"] == {
+        "x": 480,
+        "y": 457.0,
+    }
+    assert tall_control["omitted_offset_hits_target"] is False
+    assert tall_control["pass"] is True
     assert with_query("http://127.0.0.1:8000/?arg=flow", {"storage": "unavailable"}) == (
         "http://127.0.0.1:8000/?arg=flow&storage=unavailable"
     )
