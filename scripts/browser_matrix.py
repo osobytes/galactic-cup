@@ -119,6 +119,21 @@ def fetch_bytes(url: str) -> bytes:
         return response.read()
 
 
+def with_query(url: str, values: dict[str, str]) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(values)
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urllib.parse.urlencode(query),
+            parsed.fragment,
+        )
+    )
+
+
 def validate_manifest(base_url: str, manifest: dict[str, Any]) -> None:
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
@@ -383,6 +398,7 @@ return {
     .map((pad) => ({connected: pad.connected, id: pad.id, index: pad.index, mapping: pad.mapping})),
   js_heap_bytes: performance.memory ? performance.memory.usedJSHeapSize : null,
   renderer,
+  storage: compat.storage || null,
   status: compat.status || "missing",
   user_activation: navigator.userActivation ? {
     active: navigator.userActivation.isActive,
@@ -524,6 +540,18 @@ def wait_for_setting(driver: Any, key: str, expected: str, timeout: float = 10) 
         lambda: expected in settings_values(browser_console(driver, "wait"), key),
         timeout,
         f"{key}={expected}",
+    )
+
+
+def wait_for_storage_state(driver: Any, expected: str, timeout: float = 10) -> dict[str, Any]:
+    return wait_until(
+        lambda: (
+            page_state(driver).get("storage")
+            if (page_state(driver).get("storage") or {}).get("state") == expected
+            else None
+        ),
+        timeout,
+        f"browser storage state {expected}",
     )
 
 
@@ -845,8 +873,19 @@ def evidence_checks(
         "performance": sample_gate(entries),
         "stability_performance": stability_performance,
         "persistence": {
+            "flush_after_save": preflight.get("flush_after_save"),
             "muted_after_reload": preflight.get("muted_after_reload"),
-            "pass": preflight.get("muted_after_reload") == "true",
+            "pass": (
+                preflight.get("flush_after_save") is True
+                and preflight.get("muted_after_reload") == "true"
+                and preflight.get("storage_after_reload", {}).get("state") == "ready"
+                and preflight.get("storage_after_reload", {}).get("populate_count", 0) >= 1
+            ),
+            "storage_after_reload": preflight.get("storage_after_reload"),
+        },
+        "storage_unavailable": {
+            "pass": preflight.get("storage_unavailable_boot_recoverable") is True,
+            "state": preflight.get("storage_unavailable_state"),
         },
         "runtime_stability": {
             "late_input": late_input,
@@ -875,6 +914,7 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     navigation_started = time.monotonic()
     driver.get(url)
     wait_until(lambda: page_state(driver).get("status") == "running", 30, "browser runtime")
+    wait_for_storage_state(driver, "ready")
     set_viewport(driver, width, height)
     wait_for_route(driver, "title")
     title_state = page_state(driver)
@@ -885,8 +925,20 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     wait_for_route(driver, "squad")
     send_key(driver, Keys.ESCAPE)
     wait_for_route(driver, "title")
+    flush_count = int((page_state(driver).get("storage") or {}).get("flush_count") or 0)
     send_key(driver, "m")
     wait_for_setting(driver, "muted", "true")
+    storage_after_save = wait_until(
+        lambda: (
+            page_state(driver).get("storage")
+            if int((page_state(driver).get("storage") or {}).get("flush_count") or 0)
+            > flush_count
+            else None
+        ),
+        10,
+        "settings flush",
+    )
+    flush_after_save = int(storage_after_save.get("flush_count") or 0) > flush_count
 
     fullscreen_observed = False
     try:
@@ -941,18 +993,60 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     user_activation = page_state(driver).get("user_activation")
     driver.refresh()
     wait_until(lambda: page_state(driver).get("status") == "running", 30, "reloaded runtime")
+    storage_after_reload = wait_for_storage_state(driver, "ready")
     set_viewport(driver, width, height)
+    wait_for_route(driver, "title")
     after_reload = browser_console(driver, "persistence_reload")
     values = settings_values(after_reload, "muted")
     muted_after_reload = values[-1] if values else None
     after_reload.extend(webdriver_console(driver, "persistence_reload"))
-    write_json(output / "preflight-console.json", before_reload + after_reload)
+
+    driver.get(with_query(url, {"storage": "unavailable"}))
+    wait_until(
+        lambda: page_state(driver).get("status") == "running",
+        30,
+        "storage-unavailable runtime",
+    )
+    wait_for_storage_state(driver, "unavailable")
+    set_viewport(driver, width, height)
+    wait_for_route(driver, "title")
+    send_key(driver, "m")
+    wait_for_setting(driver, "muted", "true")
+    storage_unavailable_state = wait_until(
+        lambda: (
+            page_state(driver).get("storage")
+            if int(
+                (page_state(driver).get("storage") or {}).get("skipped_flush_count") or 0
+            )
+            >= 1
+            else None
+        ),
+        10,
+        "recoverable unavailable-storage save",
+    )
+    storage_unavailable_page = page_state(driver)
+    unavailable_console = browser_console(driver, "storage_unavailable")
+    unavailable_console.extend(webdriver_console(driver, "storage_unavailable"))
+    storage_unavailable_boot_recoverable = (
+        storage_unavailable_page.get("status") == "running"
+        and storage_unavailable_state.get("state") == "unavailable"
+        and storage_unavailable_state.get("last_error", {}).get("recoverable") is True
+        and "title" in route_sequence(unavailable_console)
+        and "true" in settings_values(unavailable_console, "muted")
+    )
+
+    console = before_reload + after_reload + unavailable_console
+    write_json(output / "preflight-console.json", console)
     return {
-        "console": before_reload + after_reload,
+        "console": console,
+        "flush_after_save": flush_after_save,
         "fullscreen_observed": fullscreen_observed,
         "letterboxing": letterboxing,
         "muted_after_reload": muted_after_reload,
         "navigation_to_title_ms": navigation_to_title_ms,
+        "storage_after_reload": storage_after_reload,
+        "storage_unavailable_boot_recoverable": storage_unavailable_boot_recoverable,
+        "storage_unavailable_state": storage_unavailable_state,
         "title_state": title_state,
         "user_activation": user_activation,
     }
@@ -1231,9 +1325,13 @@ def run_viewport(
                 key: preflight.get(key)
                 for key in (
                     "fullscreen_observed",
+                    "flush_after_save",
                     "letterboxing",
                     "muted_after_reload",
                     "navigation_to_title_ms",
+                    "storage_after_reload",
+                    "storage_unavailable_boot_recoverable",
+                    "storage_unavailable_state",
                     "title_state",
                 )
             },
@@ -1302,10 +1400,14 @@ def run_viewport(
             key: preflight.get(key)
             for key in (
                 "fullscreen_observed",
+                "flush_after_save",
                 "letterboxing",
                 "match_focus_recovery",
                 "muted_after_reload",
                 "navigation_to_title_ms",
+                "storage_after_reload",
+                "storage_unavailable_boot_recoverable",
+                "storage_unavailable_state",
                 "title_state",
             )
         },
@@ -1331,6 +1433,7 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
         "lifecycle",
         "performance",
         "persistence",
+        "storage_unavailable",
     ]
     if require_stability:
         required.extend(("gamepad", "memory", "runtime_stability", "stability_performance"))
@@ -1342,6 +1445,9 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
 
 def self_test() -> int:
     assert parse_viewport("960x540") == (960, 540)
+    assert with_query("http://127.0.0.1:8000/?arg=flow", {"storage": "unavailable"}) == (
+        "http://127.0.0.1:8000/?arg=flow&storage=unavailable"
+    )
     assert marker_message('http://example 1:2 "GC_METRICS|route|route=title"') == (
         "GC_METRICS|route|route=title"
     )

@@ -8,6 +8,9 @@ trap 'rm -rf "$smoke_root"' EXIT
 node --check "$project_root/scripts/webrtc_proof_host.js"
 node --check "$project_root/scripts/webrtc_proof_runner.js"
 node --check "$project_root/scripts/webrtc_proof_suite.js"
+node --check "$project_root/scripts/browser_storage_host.js"
+node --check "$project_root/scripts/browser_storage_smoke.js"
+node "$project_root/scripts/browser_storage_smoke.js"
 node "$project_root/scripts/webrtc_proof_smoke.js"
 python3 "$project_root/scripts/browser_matrix.py" --self-test
 
@@ -56,6 +59,12 @@ if "Promise.all(paths.map(fetch_binary))" not in loader:
     raise SystemExit("browser loader does not use direct deterministic asset loading")
 if "page_query.get(\"arg\")" not in loader:
     raise SystemExit("browser loader does not read flow arguments from the page URL")
+if "GalacticCupBrowserStorage" not in loader:
+    raise SystemExit("browser loader does not include the settings persistence host")
+if 'page_query.get("storage") === "unavailable"' not in loader:
+    raise SystemExit("browser loader does not expose the unavailable-storage diagnostic")
+if "Module.FS.syncfs = function (_populate, callback)" in loader:
+    raise SystemExit("browser loader still suppresses persistent filesystem synchronization")
 for marker in (
     "window.__GALACTIC_CUP__",
     "console_entries",
