@@ -419,6 +419,15 @@ def launch_browser(
     return webdriver.Firefox(service=service, options=options)
 
 
+def profile_directory(capabilities: dict[str, Any]) -> str | None:
+    chrome = capabilities.get("chrome")
+    if isinstance(chrome, dict):
+        value = chrome.get("userDataDir")
+        return str(value) if value else None
+    value = capabilities.get("moz:profile")
+    return str(value) if value else None
+
+
 def set_viewport(driver: Any, width: int, height: int) -> dict[str, Any]:
     for _attempt in range(5):
         dimensions = driver.execute_script(
@@ -555,6 +564,51 @@ def flow_console(
         chrome_entries.extend(webdriver_console(driver, phase, include_markers=True))
         return chrome_entries
     return browser_console(driver, phase)
+
+
+def final_flow_capture(
+    driver: Any,
+    browser_name: str,
+    chrome_entries: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    entries = flow_console(driver, browser_name, "flow", chrome_entries)
+    final_state = page_state(driver)
+    if browser_name == "chrome":
+        # PAGE_STATE can itself cause a final console entry. Drain after that
+        # diagnostic so the evidence retains everything through final capture.
+        entries = flow_console(driver, browser_name, "flow_final", chrome_entries)
+    return entries, final_state
+
+
+def failure_diagnostics(
+    driver: Any,
+    browser_name: str,
+    chrome_entries: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    state: dict[str, Any] = {}
+    entries = list(chrome_entries) if browser_name == "chrome" else []
+    try:
+        state = page_state(driver)
+    except Exception:
+        pass
+    if browser_name == "chrome":
+        try:
+            entries.extend(webdriver_console(driver, "failure", include_markers=True))
+        except Exception:
+            pass
+    elif state:
+        for entry in state.get("console_entries", []):
+            if not isinstance(entry, dict):
+                continue
+            entries.append(
+                {
+                    "at_ms": entry.get("at_ms"),
+                    "level": entry.get("level", "log"),
+                    "message": str(entry.get("message", "")),
+                    "phase": "failure",
+                }
+            )
+    return state, entries
 
 
 def service_console(path: Path, runtime_bytes: int | None = None) -> list[dict[str, Any]]:
@@ -784,24 +838,14 @@ def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str)
         label,
     )
     gc_method = "unavailable"
-    try:
-        if browser_name == "chrome":
-            driver.execute_cdp_cmd("HeapProfiler.collectGarbage", {})
-            gc_method = "cdp HeapProfiler.collectGarbage"
-        else:
-            collected = driver.execute_script(
-                "if (window.windowUtils && window.windowUtils.garbageCollect) {"
-                "window.windowUtils.garbageCollect(); return true; } return false;"
-            )
-            if collected:
-                gc_method = "window.windowUtils.garbageCollect"
-    except Exception:
-        gc_method = "unavailable"
-    time.sleep(0.25)
-    state = page_state(driver)
     performance_metrics = None
     runtime_heap_usage = None
     if browser_name == "chrome":
+        try:
+            driver.execute_cdp_cmd("HeapProfiler.collectGarbage", {})
+            gc_method = "cdp HeapProfiler.collectGarbage"
+        except Exception:
+            gc_method = "unavailable"
         try:
             performance_metrics = driver.execute_cdp_cmd("Performance.getMetrics", {})
         except Exception:
@@ -810,6 +854,22 @@ def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str)
             runtime_heap_usage = driver.execute_cdp_cmd("Runtime.getHeapUsage", {})
         except Exception:
             runtime_heap_usage = None
+    else:
+        try:
+            collected = driver.execute_script(
+                "if (window.windowUtils && window.windowUtils.garbageCollect) {"
+                "window.windowUtils.garbageCollect(); return true; } return false;"
+            )
+            if collected:
+                gc_method = "window.windowUtils.garbageCollect"
+        except Exception:
+            gc_method = "unavailable"
+        time.sleep(0.25)
+
+    # For Chrome, both CDP heap reads above are deliberately adjacent to the
+    # forced GC. PAGE_STATE serializes page-side diagnostics and must run only
+    # after the authoritative Performance metric and Runtime cross-check.
+    state = page_state(driver)
     page_js_heap = state.get("js_heap_bytes")
     performance_js_heap = performance_metric(performance_metrics, "JSHeapUsedSize")
     runtime_js_heap = (
@@ -842,6 +902,25 @@ def collect_memory(driver: Any, browser_name: str, service_pid: int, label: str)
         "performance_metrics": performance_metrics,
         "process_tree": process_tree_rss(service_pid),
         "runtime_heap_usage": runtime_heap_usage,
+        "sampling_order": (
+            [
+                "cdp HeapProfiler.collectGarbage",
+                "cdp Performance.getMetrics.JSHeapUsedSize",
+                "cdp Runtime.getHeapUsage.usedSize",
+                "page PAGE_STATE",
+                "process-tree RSS",
+            ]
+            if browser_name == "chrome"
+            else [
+                "forced garbage collection",
+                "page PAGE_STATE",
+                "process-tree RSS",
+            ]
+        ),
+        "target_counts": {
+            "documents": performance_metric(performance_metrics, "Documents"),
+            "frames": performance_metric(performance_metrics, "Frames"),
+        },
     }
     driver.execute_script(
         "console.info('GC_BROWSER|memory_probe|phase=end|label=' + arguments[0]);",
@@ -955,6 +1034,7 @@ def console_gate(
 
 
 def evidence_checks(
+    browser_name: str,
     entries: list[dict[str, Any]],
     final_state: dict[str, Any],
     preflight: dict[str, Any],
@@ -1015,12 +1095,29 @@ def evidence_checks(
         if any(value is not None for value in heap_crosschecks)
         else None
     )
+    document_counts = [
+        memory.get("target_counts", {}).get("documents") for memory in memories
+    ]
+    frame_counts = [memory.get("target_counts", {}).get("frames") for memory in memories]
+    one_document_baseline = (
+        len(document_counts) == 3 and all(count == 1 for count in document_counts)
+        if browser_name == "chrome"
+        else None
+    )
+    acceptance_isolation = preflight.get("acceptance_isolation", {})
+    isolated_acceptance = (
+        acceptance_isolation.get("dedicated_flow_browser") is True
+        and acceptance_isolation.get("distinct_profile") is True
+        if browser_name == "chrome" and stability_seconds
+        else None
+    )
     memory_available = (
         len(memories) == 3
         and rss_growth is not None
         and heap_growth is not None
         and post_gc_samples
         and heap_crosscheck_pass is not False
+        and one_document_baseline is not False
     )
     stability_performance = (
         sample_gate(entries, flow_only=False) if stability_seconds else None
@@ -1038,6 +1135,19 @@ def evidence_checks(
         for record in audio_records
     )
     return {
+        "acceptance_isolation": {
+            **acceptance_isolation,
+            "one_document_baseline": one_document_baseline,
+            "pass": (
+                None
+                if not stability_seconds
+                else (
+                    isolated_acceptance is True and one_document_baseline is True
+                    if browser_name == "chrome"
+                    else True
+                )
+            ),
+        },
         "audio_after_gesture": {
             "observations": audio_records,
             "autoplay_warnings": len(audio_warnings),
@@ -1098,9 +1208,12 @@ def evidence_checks(
         ),
         "memory": {
             "available": memory_available,
+            "document_counts": document_counts,
+            "frame_counts": frame_counts,
             "heap_crosscheck_pass": heap_crosscheck_pass,
             "heap_growth_percent": heap_growth,
             "heap_source": first_memory.get("js_heap_source"),
+            "one_document_baseline": one_document_baseline,
             "pass": (
                 None
                 if not memory_available
@@ -1303,6 +1416,7 @@ def run_flow(
     flow_timeout: int,
     stability_seconds: int,
     trace_enabled: bool,
+    chrome_entries: list[dict[str, Any]],
 ) -> dict[str, Any]:
     from selenium.webdriver.common.by import By
 
@@ -1336,7 +1450,6 @@ def run_flow(
     )
     memory_index = 0
     memories = []
-    chrome_entries: list[dict[str, Any]] = []
     performance_entries = []
     flow_completed = False
     match_focus_recovery = False
@@ -1407,12 +1520,9 @@ def run_flow(
             trace_at = None
         time.sleep(1)
 
-    entries = flow_console(driver, browser_name, "flow", chrome_entries)
-    if browser_name != "chrome":
-        entries.extend(webdriver_console(driver, "flow"))
     if trace_at:
         performance_entries.extend(driver.get_log("performance"))
-    final_state = page_state(driver)
+    entries, final_state = final_flow_capture(driver, browser_name, chrome_entries)
     return {
         "console": entries,
         "dimensions": dimensions,
@@ -1441,6 +1551,11 @@ def run_viewport(
     width, height = viewport
     output.mkdir(parents=True, exist_ok=True)
     driver_log = output / "webdriver.log"
+    dedicated_flow_browser = browser_name == "chrome" and stability_seconds > 0
+    preflight_driver_log = (
+        output / "preflight-webdriver.log" if dedicated_flow_browser else driver_log
+    )
+    active_driver_log = preflight_driver_log
     expected_revision = str(expected_manifest.get("source_revision"))
     driver = None
     capabilities: dict[str, Any] = {}
@@ -1449,6 +1564,7 @@ def run_viewport(
     failure: Exception | None = None
     failure_entries: list[dict[str, Any]] = []
     failure_state: dict[str, Any] = {}
+    chrome_entries: list[dict[str, Any]] = []
     service_runtime_bytes = 0
     quit_error = None
     try:
@@ -1457,16 +1573,48 @@ def run_viewport(
             browser_name,
             binary,
             driver_path,
-            driver_log,
-            trace_enabled,
+            preflight_driver_log,
+            trace_enabled and not dedicated_flow_browser,
         )
         capabilities = driver.capabilities
+        preflight_profile = profile_directory(capabilities)
         preflight = run_preflight(driver, base_url, width, height, output)
         if preflight["title_state"].get("build_id") != expected_revision:
             raise RuntimeError(
                 "page build ID does not match manifest revision: "
                 f"{preflight['title_state'].get('build_id')} != {expected_revision}"
             )
+        if dedicated_flow_browser:
+            preflight_session_id = driver.session_id
+            driver.quit()
+            driver = None
+            active_driver_log = driver_log
+            driver = launch_browser(
+                browser_name,
+                binary,
+                driver_path,
+                driver_log,
+                trace_enabled,
+            )
+            capabilities = driver.capabilities
+            flow_profile = profile_directory(capabilities)
+            preflight["acceptance_isolation"] = {
+                "dedicated_flow_browser": True,
+                "distinct_profile": bool(
+                    preflight_profile
+                    and flow_profile
+                    and preflight_profile != flow_profile
+                ),
+                "flow_profile": flow_profile,
+                "flow_session_id": driver.session_id,
+                "preflight_profile": preflight_profile,
+                "preflight_session_id": preflight_session_id,
+            }
+        else:
+            preflight["acceptance_isolation"] = {
+                "dedicated_flow_browser": False,
+                "distinct_profile": False,
+            }
         flow = run_flow(
             driver,
             browser_name,
@@ -1477,6 +1625,7 @@ def run_viewport(
             flow_timeout,
             stability_seconds,
             trace_enabled,
+            chrome_entries,
         )
         if flow["final_state"].get("build_id") != expected_revision:
             raise RuntimeError(
@@ -1488,23 +1637,22 @@ def run_viewport(
         failure = error
         if driver:
             capabilities = driver.capabilities
-            try:
-                failure_state = page_state(driver)
-                failure_entries.extend(browser_console(driver, "failure"))
-                failure_entries.extend(webdriver_console(driver, "failure"))
-            except Exception:
-                pass
+            failure_state, failure_entries = failure_diagnostics(
+                driver,
+                browser_name,
+                chrome_entries,
+            )
     finally:
         if driver:
-            if driver_log.is_file():
-                service_runtime_bytes = driver_log.stat().st_size
+            if active_driver_log.is_file():
+                service_runtime_bytes = active_driver_log.stat().st_size
             try:
                 driver.quit()
             except Exception as error:
                 quit_error = error
 
     service_entries = (
-        service_console(driver_log, service_runtime_bytes)
+        service_console(active_driver_log, service_runtime_bytes)
         if browser_name == "firefox"
         else []
     )
@@ -1573,6 +1721,7 @@ def run_viewport(
                 for key in (
                     "fullscreen_observed",
                     "flush_after_save",
+                    "acceptance_isolation",
                     "letterboxing",
                     "muted_after_reload",
                     "navigation_to_title_ms",
@@ -1597,6 +1746,7 @@ def run_viewport(
     write_gzip_json(output / "performance-log.json.gz", flow["performance_log"])
     preflight["match_focus_recovery"] = flow["match_focus_recovery"]
     checks = evidence_checks(
+        browser_name,
         entries,
         flow["final_state"],
         preflight,
@@ -1648,6 +1798,7 @@ def run_viewport(
             for key in (
                 "fullscreen_observed",
                 "flush_after_save",
+                "acceptance_isolation",
                 "letterboxing",
                 "match_focus_recovery",
                 "muted_after_reload",
@@ -1683,7 +1834,15 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
         "storage_unavailable",
     ]
     if require_stability:
-        required.extend(("gamepad", "memory", "runtime_stability", "stability_performance"))
+        required.extend(
+            (
+                "acceptance_isolation",
+                "gamepad",
+                "memory",
+                "runtime_stability",
+                "stability_performance",
+            )
+        )
     return (
         result.get("web_report_exit_code") == 0
         and all(result.get("checks", {}).get(name, {}).get("pass") is True for name in required)
@@ -1715,6 +1874,90 @@ def self_test() -> int:
         def get_log(self, log_type: str) -> list[dict[str, Any]]:
             assert log_type == "browser"
             return self.log_batches.pop(0)
+
+    class MemoryOrderDriver:
+        capabilities = {"browserName": "chrome"}
+
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        def execute_script(self, script: str, *_args: Any) -> Any:
+            if script == PAGE_STATE:
+                self.actions.append("page_state")
+                return {"js_heap_bytes": 99, "status": "running"}
+            if "phase=start" in script:
+                self.actions.append("marker_start")
+            elif "phase=end" in script:
+                self.actions.append("marker_end")
+            return None
+
+        def execute_cdp_cmd(self, method: str, _params: dict[str, Any]) -> dict[str, Any]:
+            self.actions.append(method)
+            if method == "Performance.getMetrics":
+                return {
+                    "metrics": [
+                        {"name": "Documents", "value": 1},
+                        {"name": "Frames", "value": 1},
+                        {"name": "JSHeapUsedSize", "value": 100},
+                    ]
+                }
+            if method == "Runtime.getHeapUsage":
+                return {"usedSize": 101}
+            return {}
+
+    class FinalCaptureDriver:
+        capabilities = {"browserName": "chrome"}
+
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+            self.log_batches = [
+                [
+                    {
+                        "level": "INFO",
+                        "message": 'http://example "GC_METRICS|route|route=result"',
+                        "timestamp": 1,
+                    }
+                ],
+                [
+                    {
+                        "level": "SEVERE",
+                        "message": "late severe failure",
+                        "timestamp": 2,
+                    }
+                ],
+            ]
+
+        def execute_script(self, script: str, *_args: Any) -> dict[str, Any]:
+            assert script == PAGE_STATE
+            self.actions.append("page_state")
+            return {"status": "running"}
+
+        def get_log(self, log_type: str) -> list[dict[str, Any]]:
+            assert log_type == "browser"
+            self.actions.append("get_log")
+            return self.log_batches.pop(0)
+
+    class FailureDriver:
+        capabilities = {"browserName": "chrome"}
+
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        def execute_script(self, script: str, *_args: Any) -> Any:
+            assert script == PAGE_STATE
+            self.actions.append("page_state")
+            raise RuntimeError("page state unavailable")
+
+        def get_log(self, log_type: str) -> list[dict[str, Any]]:
+            assert log_type == "browser"
+            self.actions.append("get_log")
+            return [
+                {
+                    "level": "SEVERE",
+                    "message": "failure-path severe entry",
+                    "timestamp": 3,
+                }
+            ]
 
     assert parse_viewport("960x540") == (960, 540)
     assert expected_canvas_rect(800, 540) == {
@@ -1810,6 +2053,49 @@ def self_test() -> int:
     assert route_sequence(flow_console(fake_driver, "chrome", "flow", chrome_entries)) == [
         "title"
     ]
+    memory_driver = MemoryOrderDriver()
+    memory = collect_memory(memory_driver, "chrome", -1, "t0")
+    assert memory_driver.actions == [
+        "marker_start",
+        "HeapProfiler.collectGarbage",
+        "Performance.getMetrics",
+        "Runtime.getHeapUsage",
+        "page_state",
+        "marker_end",
+    ]
+    assert memory["js_heap_bytes"] == 100
+    assert memory["js_heap_source"] == "cdp Performance.getMetrics.JSHeapUsedSize"
+    assert memory["runtime_heap_usage"]["usedSize"] == 101
+    assert memory["target_counts"] == {"documents": 1, "frames": 1}
+    final_driver = FinalCaptureDriver()
+    final_entries, final_state = final_flow_capture(final_driver, "chrome", [])
+    assert final_driver.actions == ["get_log", "page_state", "get_log"]
+    assert final_state == {"status": "running"}
+    assert any(
+        entry.get("level") == "error" and entry.get("message") == "late severe failure"
+        for entry in final_entries
+    )
+    accumulated = [
+        {
+            "level": "info",
+            "message": "GC_METRICS|route|route=match",
+            "phase": "flow",
+        }
+    ]
+    failure_driver = FailureDriver()
+    failure_state, failure_entries = failure_diagnostics(
+        failure_driver,
+        "chrome",
+        accumulated,
+    )
+    assert failure_driver.actions == ["page_state", "get_log"]
+    assert failure_state == {}
+    assert route_sequence(failure_entries) == ["match"]
+    assert any(
+        entry.get("level") == "error"
+        and entry.get("message") == "failure-path severe entry"
+        for entry in failure_entries
+    )
     assert performance_metric(
         {"metrics": [{"name": "JSHeapUsedSize", "value": 100}]},
         "JSHeapUsedSize",
