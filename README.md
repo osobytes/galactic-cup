@@ -59,6 +59,20 @@ love .
 x86_64 Linux. If LÖVE 11.5 is already installed, running `love .` from the
 repository root is enough to start the game.
 
+### Browser artifact
+
+The OMP-0 browser proof can be built and served locally without committing
+generated files:
+
+```sh
+./scripts/web_build.sh
+./scripts/web_serve.sh build/web 8000
+```
+
+Open <http://127.0.0.1:8000/> in a desktop browser. See
+[docs/online/browser_build.md](docs/online/browser_build.md) for runtime
+provenance, headers, and the non-interactive smoke check.
+
 ## Quality checks
 
 ```sh
