@@ -9,6 +9,7 @@ node --check "$project_root/scripts/webrtc_proof_host.js"
 node --check "$project_root/scripts/webrtc_proof_runner.js"
 node --check "$project_root/scripts/webrtc_proof_suite.js"
 node "$project_root/scripts/webrtc_proof_smoke.js"
+python3 "$project_root/scripts/browser_matrix.py" --self-test
 
 first="$smoke_root/first"
 second="$smoke_root/second"
@@ -53,7 +54,15 @@ if 'player.js?g=galactic-cup.love&amp;v=11.5' not in index:
 loader = (artifact / "player.js").read_text(encoding="utf-8")
 if "Promise.all(paths.map(fetch_binary))" not in loader:
     raise SystemExit("browser loader does not use direct deterministic asset loading")
-for marker in ("window.__GALACTIC_CUP__", "GC_BROWSER|", "runtime_postrun"):
+if "page_query.get(\"arg\")" not in loader:
+    raise SystemExit("browser loader does not read flow arguments from the page URL")
+for marker in (
+    "window.__GALACTIC_CUP__",
+    "console_entries",
+    'mark("first_frame")',
+    "GC_BROWSER|",
+    "runtime_postrun",
+):
     if marker not in loader:
         raise SystemExit(f"browser loader is missing compatibility marker: {marker}")
 if "GalacticCupTransportBridge" not in loader:
@@ -105,5 +114,7 @@ with zipfile.ZipFile(artifact / "galactic-cup.love") as package:
 manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
 if manifest["runtime"]["commit"] != "495c5eb7eb55b54aaadfc21405c58f50a6d819c4":
     raise SystemExit("manifest runtime commit is not pinned")
+if not isinstance(manifest.get("source_dirty"), bool):
+    raise SystemExit("manifest does not record whether the source tree was dirty")
 print("browser artifact smoke: OK")
 PY

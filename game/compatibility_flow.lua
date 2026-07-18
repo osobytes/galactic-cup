@@ -5,6 +5,7 @@ local viewport = require("game.ui.viewport")
 ---@field next_action_at number
 ---@field action_delay number
 ---@field finished boolean
+---@field last_route string?
 ---@field record_input fun(kind: string)?
 local CompatibilityFlow = {}
 CompatibilityFlow.__index = CompatibilityFlow
@@ -14,6 +15,7 @@ local ROUTE_WIDGETS = {
     squad = "next",
     formation = "next",
     tactic = "kickoff",
+    pause = "resume",
 }
 
 ---@param record_input fun(kind: string)?
@@ -23,6 +25,7 @@ function CompatibilityFlow.new(record_input)
         next_action_at = 0,
         action_delay = 0.5,
         finished = false,
+        last_route = nil,
         record_input = record_input,
     }, CompatibilityFlow)
 end
@@ -61,6 +64,13 @@ function CompatibilityFlow:update(app, now)
         return
     end
     local route = app:current_route()
+    if route ~= self.last_route then
+        self.last_route = route
+        if route == "pause" then
+            self.next_action_at = now + self.action_delay
+            return
+        end
+    end
     if route == "result" then
         self.finished = true
         return

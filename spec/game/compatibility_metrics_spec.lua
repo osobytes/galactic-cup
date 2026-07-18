@@ -25,6 +25,24 @@ t.describe("compatibility metrics", function()
         t.eq(#metrics.draw_samples, 1)
     end)
 
+    t.it("records browser-observable runtime state", function()
+        local metrics = compatibility_metrics.new(0)
+        local value = {
+            master_volume = 1,
+            sfx_volume = 0.8,
+            crowd_volume = 0.55,
+            muted = true,
+            fullscreen = false,
+            screen_shake = true,
+            bloom = true,
+        }
+
+        metrics:settings(0.5, value)
+        metrics:audio(0.6, 1, 1)
+
+        t.eq(metrics.sample_number, 0)
+    end)
+
     t.it("starts a new bounded sample after sixty seconds", function()
         local metrics = compatibility_metrics.new(0)
         metrics:begin_update(10)

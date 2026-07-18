@@ -274,17 +274,41 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
   var script = document.currentScript;
   var canvas = document.getElementById("canvas");
   var spinner = document.getElementById("spinner");
-  var query = new URL(script.src).searchParams;
+  var page_query = new URL(window.location.href).searchParams;
+  var script_query = new URL(script.src).searchParams;
   var version = "11.5";
-  var uri = query.get("g") || "galactic-cup.love";
+  var uri = script_query.get("g") || "galactic-cup.love";
   var args = [];
   var browser_compat = window.__GALACTIC_CUP__ = {
     artifact: "galactic-cup-web",
     build_id: "__GALACTIC_CUP_BUILD_ID__",
+    console_entries: [],
     events: [],
     status: "loading",
     started_at_ms: performance.now()
   };
+
+  ["debug", "info", "log", "warn", "error"].forEach(function (level) {
+    var original = console[level].bind(console);
+    console[level] = function () {
+      var values = Array.prototype.slice.call(arguments);
+      browser_compat.console_entries.push({
+        at_ms: performance.now() - browser_compat.started_at_ms,
+        level: level,
+        message: values.map(function (value) {
+          if (typeof value === "string") {
+            return value;
+          }
+          try {
+            return JSON.stringify(value);
+          } catch (_error) {
+            return String(value);
+          }
+        }).join(" ")
+      });
+      original.apply(console, values);
+    };
+  });
 
   function mark(name, detail) {
     var event = { name: name, at_ms: performance.now() - browser_compat.started_at_ms };
@@ -298,9 +322,9 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
 
   mark("loader_start");
 
-  if (query.get("arg")) {
+  if (page_query.get("arg")) {
     try {
-      args = JSON.parse(query.get("arg"));
+      args = JSON.parse(page_query.get("arg"));
       if (!Array.isArray(args)) {
         args = [String(args)];
       }
@@ -380,6 +404,9 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
           canvas.style.display = "block";
           canvas.focus();
           spinner.className = "";
+          requestAnimationFrame(function () {
+            mark("first_frame");
+          });
         };
 
         var runtime = document.createElement("script");
@@ -420,6 +447,7 @@ INDEX_HTML = """<!doctype html>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Galactic Cup</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="style.css">
   </head>
   <body>
@@ -547,22 +575,38 @@ def source_revision() -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
+def source_dirty() -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode != 0 or bool(result.stdout.strip())
+
+
 def package_paths() -> list[tuple[Path, str]]:
-    files: list[tuple[Path, str]] = []
-    for name in PACKAGE_ROOT_FILES:
+    allowed = [*PACKAGE_ROOT_FILES, *PACKAGE_ROOT_DIRECTORIES]
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--", *allowed],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("cannot enumerate tracked browser-package files")
+    names = [name.decode("utf-8") for name in result.stdout.split(b"\0") if name]
+    for required in PACKAGE_ROOT_FILES:
+        if required not in names:
+            raise RuntimeError(f"missing tracked package entrypoint: {required}")
+
+    files = []
+    for name in names:
         path = ROOT / name
-        if not path.is_file():
-            raise RuntimeError(f"missing package entrypoint: {name}")
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"unsafe or missing tracked package file: {name}")
         files.append((path, name))
-
-    for directory in PACKAGE_ROOT_DIRECTORIES:
-        source = ROOT / directory
-        if not source.is_dir():
-            raise RuntimeError(f"missing package directory: {directory}")
-        for path in source.rglob("*"):
-            if path.is_file():
-                files.append((path, path.relative_to(ROOT).as_posix()))
-
     return sorted(files, key=lambda item: item[1])
 
 
@@ -670,6 +714,7 @@ def write_manifest(output: Path, package_hash: str) -> None:
             "sha256": package_hash,
         },
         "source_revision": source_revision(),
+        "source_dirty": source_dirty(),
         "runtime": {
             "repository": RUNTIME_REPOSITORY,
             "commit": RUNTIME_COMMIT,

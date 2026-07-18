@@ -31,6 +31,8 @@
 ---@field input fun(self: CompatibilityMetrics, now: number, kind: string)
 ---@field route fun(self: CompatibilityMetrics, now: number, route: string)
 ---@field lifecycle fun(self: CompatibilityMetrics, now: number, event: string)
+---@field settings fun(self: CompatibilityMetrics, now: number, settings: GameSettings)
+---@field audio fun(self: CompatibilityMetrics, now: number, active_sources: number, volume: number)
 ---@field flow_complete fun(self: CompatibilityMetrics, now: number, route: string)
 ---@field finish fun(self: CompatibilityMetrics, now: number)
 
@@ -283,6 +285,29 @@ function compatibility_metrics.lifecycle(self, now, event)
     emit("lifecycle", {
         at_ms = (now - self.started_at) * 1000,
         event = event,
+    })
+end
+
+---@param self CompatibilityMetrics
+---@param now number
+---@param settings GameSettings
+function compatibility_metrics.settings(self, now, settings)
+    emit("settings", {
+        at_ms = (now - self.started_at) * 1000,
+        fullscreen = settings.fullscreen,
+        muted = settings.muted,
+    })
+end
+
+---@param self CompatibilityMetrics
+---@param now number
+---@param active_sources number
+---@param volume number
+function compatibility_metrics.audio(self, now, active_sources, volume)
+    emit("audio", {
+        active_sources = active_sources,
+        at_ms = (now - self.started_at) * 1000,
+        volume = volume,
     })
 end
 

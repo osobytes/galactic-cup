@@ -221,16 +221,29 @@ local function record_input(kind)
     end
 end
 
+---@param settings GameSettings
+local function apply_settings(settings)
+    runtime_settings.apply(settings)
+    metrics:settings(clock(), settings)
+end
+
+---@param now number
+local function record_audio(now)
+    if love.audio and love.audio.getActiveSourceCount and love.audio.getVolume then
+        metrics:audio(now, love.audio.getActiveSourceCount(), love.audio.getVolume())
+    end
+end
+
 function love.load()
     metrics = compatibility_metrics.new(clock())
     local width, height = love.graphics.getDimensions()
     app = bootstrap.new(width, height, {
-        apply_settings = runtime_settings.apply,
+        apply_settings = apply_settings,
         request_quit = function()
             love.event.quit()
         end,
     })
-    runtime_settings.apply(app.settings)
+    apply_settings(app.settings)
     app:resize(love.graphics.getDimensions())
     last_route = app:current_route()
     metrics:route(clock(), last_route)
@@ -252,7 +265,9 @@ function love.update(dt)
     if route ~= last_route then
         metrics:route(now, route)
         last_route = route
-        if route == "result" then
+        if route == "match" then
+            record_audio(now)
+        elseif route == "result" then
             metrics:flow_complete(now, route)
         end
     end

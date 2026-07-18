@@ -1,97 +1,113 @@
 # OMP-0 browser compatibility report
 
-Status: issue #3 evidence snapshot. This is a compatibility spike report, not
-the final platform decision owned by issue #6.
+Status: **incomplete with reproducible failures**. Issue
+[#16](https://github.com/osobytes/galactic-cup/issues/16) now has the required
+stable Linux Chrome and Firefox evidence, but Windows 11, physical-gamepad, and
+Firefox JS-heap evidence are still unavailable. Missing evidence is not treated
+as a pass.
 
-## Artifact and collection method
+## Artifact and evidence
 
-The artifact was built with `scripts/web_build.sh` and served with
-`scripts/web_serve.sh build/web 8000`. The compatibility instrumentation emits
-`GC_BROWSER|...` loader events and `GC_METRICS|...` LÖVE events to the browser
-console and native stdout. It keeps a 10-second warm-up followed by bounded
-60-second samples. `scripts/web_report.py` summarizes an exported console log
-and can fail a run that does not contain the complete route:
+- Full-matrix source revision: `5f8e76cf46ce85f488be7a3ee8e88105cd43ab19`
+- Full-matrix game-package SHA-256:
+  `c939d74873cb49fe8d587c66af9d7363c15580a3523846ee2ea210921c5aaef5`
+- Pinned love.js revision: `495c5eb7eb55b54aaadfc21405c58f50a6d819c4`
+- Full-matrix raw evidence:
+  [OMP-0 issue 16 Linux browser evidence](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-evidence-5f8e76c)
+- Full-matrix archive SHA-256:
+  `0088e7f878f0c965e77d60eda1fdc0c681132e99cf55669f0c8f29fcebc1b131`
+- Reviewed Chrome 960×540 probe:
+  [supplemental evidence](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-review-evidence-806f7a3),
+  source `806f7a3cb6ebb4d4dd64fc11848d8d08c03221ff`, package
+  `3542846f22b64249bdef454ddbfce07d84c9ccbe620435dc68c2bf557f2f8daa`
+- Supplemental archive SHA-256:
+  `30f7808f8e28865e658e2bbee0f29c941a533ea52a125f955d3b19890bf7b7d9`
 
-```sh
-scripts/web_report.py browser-console.json --require-flow
-```
+The raw archive is a release asset rather than a committed generated artifact.
+It contains browser/driver versions, OS/GPU metadata, served-file hashes,
+capabilities, screenshots, console and service logs, memory samples, per-run
+summaries, and the compressed Chrome performance trace.
 
-For repeatable environment and viewport runs, pass the browser-only flow
-argument through the generated loader:
+`scripts/browser_matrix.py` creates a fresh browser profile for each viewport,
+disables extensions, verifies every served file against `manifest.json`,
+checks the page build ID, and refuses a dirty source artifact. It drives the
+real Title → Squad → Formation → Tactic → Match → Result flow and runs
+`scripts/web_report.py --require-flow`.
 
-```text
-http://127.0.0.1:8000/?arg=%5B%22--compat-flow%22%5D
-```
+## Required environment matrix
 
-The driver clicks the existing Play, setup, and kickoff widgets through
-`App:event`; it does not bypass screen state or accelerate the real match. It
-records each scripted click as input telemetry and stops at Result. Keyboard
-and gamepad checks remain separate manual acceptance rows.
-
-Run date: 2026-07-18. Source revision and game-package hash are recorded in
-`build/web/manifest.json` for the local artifact; generated `build/` output is
-not committed.
-
-## Compatibility matrix
-
-| Row | Environment actually exercised | 960×540 | 1280×720 | 1920×1080 | Console / flow result |
+| Row | Exact environment | 960×540 | 1280×720 | 1920×1080 | Status |
 | --- | --- | --- | --- | --- | --- |
-| L-C | Zorin OS 18.1, in-app Chromium-based runtime; exact browser version unavailable through the connected browser inspector | Pending rerun | Exercised | Pending rerun | Browser booted; title → squad → formation → tactic → match reached live match in the captured run |
-| L-F | Same Linux desktop, stable Firefox | Unavailable | Unavailable | Unavailable | Firefox is not installed in this worker environment |
-| W-C | Windows 11, stable Chromium-based browser | Unavailable | Unavailable | Unavailable | No Windows environment is attached |
-| W-F | Windows 11, stable Firefox | Unavailable | Unavailable | Unavailable | No Windows environment is attached |
-| M-C | macOS, stable Chromium-based browser | Unavailable | Unavailable | Unavailable | No macOS environment is attached |
+| L-C | Zorin OS 18.1; Chrome 150.0.7871.124; NVIDIA RTX 2070 SUPER, driver 595.71.05 | Flow pass; performance fail | Flow pass; performance fail | Flow pass; performance fail | Viewport/flow and positive audio complete; physical gamepad missing; letterboxing fails |
+| L-F | Zorin OS 18.1; Firefox 152.0.6; geckodriver 0.37.0; hardware WebGL | Flow pass; performance fail | Flow and performance pass | Flow and performance pass | Viewport/flow complete; JS heap, physical gamepad, and positive audio/letterbox proof missing |
+| W-C | Windows 11; stable Chrome | Unavailable | Unavailable | Unavailable | Missing required environment |
+| W-F | Windows 11; stable Firefox | Unavailable | Unavailable | Unavailable | Missing required environment |
 
-Unavailable required rows are recorded as missing evidence and are not treated
-as passes. The exact Chromium version and the remaining Linux viewport rows are
-also missing from this worker’s captured evidence.
+Every exercised Linux row passed artifact boot, complete product flow,
+`web_report.py --require-flow`, hardware acceleration, user activation,
+keyboard input, focus/blur recovery, resize events, real fullscreen entry/exit,
+clean Result, and page-runtime console checks. Review found that the original
+runner did not positively verify audible playback or non-16:9 letterboxing.
+The corrected Chrome probe found one or two active audio sources at volume 1
+after its user gesture. It also found that an 800×540 viewport stretches the
+canvas to 800×540 instead of centering an 800×450 canvas with 45 px bars.
 
-## Captured L-C measurement
+## Startup and flow-performance results
 
-The 1280×720 run used the actual canvas input path: Return on the title, then
-mouse clicks on the visible Squad, Formation, and Tactic actions. The captured
-route reached `match` without an artifact error. The first complete 60-second
-sample began after warm-up and reported:
+The fixed hard gates in [`omp0_acceptance.md`](omp0_acceptance.md) were applied
+without adjustment. Input-latency gates passed in every exercised row.
 
-| Metric | Browser observation | OMP-0 hard gate | Soft target |
-| --- | ---: | ---: | ---: |
-| Frames / updates | 4,463 / 4,464 | — | — |
-| Update p95 / max | 0.845 / 2.870 ms | ≤8 / ≤33 ms | ≤4 ms p95 |
-| Draw p95 / max | 3.490 / 7.120 ms | ≤8 / ≤33 ms | ≤6 ms p95 |
-| Frame interval p50 / p95 | 13.380 / 19.620 ms | fewer than 3 >33 ms; none >250 ms | ≤16.7 ms p95 |
-| Frame intervals over 33 / 250 ms | 1 / 0 | pass for this sample | — |
-| Input response | Per-event lines added; final flow summary pending | ≤100 ms p95 | ≤50 ms p95 |
+| Browser | Viewport | Navigation → Title screenshot | Flow performance | Recorded hard-gate miss |
+| --- | ---: | ---: | --- | --- |
+| Chrome 150 | 960×540 | 825.1 ms reviewed probe | Fail | At least 3 frame intervals over 33 ms without a memory probe |
+| Chrome 150 | 1280×720 | 963.7 ms | Fail | Repeated >33 ms frames; draw p95 8.200 ms in sample 2 |
+| Chrome 150 | 1920×1080 | 969.0 ms | Fail | Repeated >33 ms frames; draw p95 8.710/8.125 ms |
+| Firefox 152 | 960×540 | 619.4 ms | Fail | Draw max 36.740 ms; at least 3 frame intervals over 33 ms |
+| Firefox 152 | 1280×720 | 684.5 ms | Pass | None |
+| Firefox 152 | 1920×1080 | 529.5 ms | Pass | None |
 
-The sample is a single worker run, not a cross-machine promise. The existing
-native comparison baseline remains the reference in
-`docs/online/omp0_acceptance.md`: native title boot p50 509 ms / p95 516 ms,
-scripted title-to-kickoff p50 605 ms / p95 675 ms, and a 60 Hz frame budget.
+Chrome's page runtime emitted no warning/error. Firefox's page runtime also
+remained clean, while its service channel reported 19 classified
+browser/driver messages per run. Those include a fatal Firefox
+`AsyncShutdown` error after WebDriver requested browser exit. Post-PR review
+corrected the runner to separate runtime console evidence from teardown
+diagnostics and to prevent fatal runtime errors from being classified away.
+The raw archive remains immutable and preserves the original classification.
 
-## Browser startup and runtime warnings
+## Ten-minute stability and memory
 
-The loader reported asset fetch, runtime script load, and runtime post-run
-events before the title route. No uncaught exception, unhandled rejection,
-WebAssembly trap, or artifact error was observed in the captured console.
+The first viewport in each Linux browser ran for at least 615 seconds. Both
+sessions reached Result, remained `running`, recovered from focus loss during
+Match, and accepted a late mute input with resulting settings telemetry.
+Runtime stability therefore passed; both sessions separately failed the
+full-run frame-pacing gate.
 
-The connected in-app browser emitted repeated Electron “Insecure
-Content-Security-Policy” warnings because the OMP-0 server policy intentionally
-contains `unsafe-eval` for the pinned upstream WASM player. These are host
-warnings, not LÖVE exceptions; they must remain classified in future exports
-and reviewed before public deployment.
+| Browser | Duration | Process-tree RSS growth | Post-GC JS-heap growth | Full-run pacing | Memory result |
+| --- | ---: | ---: | ---: | --- | --- |
+| Chrome 150, 960×540 | 615.1 s | 12.91% | 185.76% (3,928,712 → 11,226,576 bytes) | Fail | Fail |
+| Firefox 152, 960×540 | 615.1 s | 1.17% | Unavailable | Fail | Inconclusive |
 
-## Lifecycle and input checklist
+Chrome uses CDP garbage collection plus `Performance.getMetrics`. Firefox
+provided the required process-tree RSS series but no equivalent automated
+post-GC JS-heap metric in this environment.
 
-| Check | Evidence | Status |
-| --- | --- | --- |
-| Focus / blur | LÖVE lifecycle lines appeared during browser startup | Observed; deliberate focus-loss recovery not yet rerun |
-| Resize / letterboxing | Instrumentation path is present; 960/1920 evidence pending | Missing required rows |
-| Fullscreen | Not exercised | Missing |
-| Audio gesture | Not separately exercised | Missing |
-| Gamepad | No gamepad attached | Unavailable |
-| Clean Result transition | Match was live in the captured run; result transition pending | Missing |
-| 10-minute stability and memory | No task-manager/heap capture in this worker | Unavailable |
+## Reproducible defects and remaining blockers
 
-Required stable-browser, Windows, lifecycle, gamepad, and memory evidence is
-tracked in issue #16. Those missing rows are environment/evidence acquisition
-blockers rather than reproducible browser compatibility defects. The parent
-decision remains inconclusive until #16 satisfies the fixed acceptance rules.
+- [#20](https://github.com/osobytes/galactic-cup/issues/20): browser settings
+  reset after reload in every Linux row.
+- [#21](https://github.com/osobytes/galactic-cup/issues/21): affected browser
+  rows miss the fixed frame-pacing gates.
+- [#22](https://github.com/osobytes/galactic-cup/issues/22): Chrome post-GC
+  JS-heap growth exceeds 25%.
+- [#24](https://github.com/osobytes/galactic-cup/issues/24): non-16:9 browser
+  viewports stretch the canvas instead of letterboxing.
+- Windows 11 Chrome and Firefox runners are not attached.
+- No physical standard-mapped gamepad was available; no A/B input proof was
+  inferred from the ASRock LED controller exposed at `/dev/input/js0`.
+- Firefox post-GC JS-heap acquisition remains unavailable.
+- Firefox still needs positive audible-playback and reviewed letterbox probes.
+
+Issue #16 and the parent compatibility issue
+[#3](https://github.com/osobytes/galactic-cup/issues/3) therefore remain open.
+The platform decision in [`platform_decision.md`](platform_decision.md) stays
+inconclusive.
