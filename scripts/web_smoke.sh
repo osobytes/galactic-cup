@@ -48,6 +48,9 @@ for marker in ("window.__GALACTIC_CUP__", "GC_BROWSER|", "runtime_postrun"):
         raise SystemExit(f"browser loader is missing compatibility marker: {marker}")
 if "GalacticCupTransportBridge" not in loader:
     raise SystemExit("browser loader does not include the transport bridge host")
+for marker in ("GalacticCupWebRTCProof", "RTCPeerConnection", "GC_WEBRTC"):
+    if marker not in loader:
+        raise SystemExit(f"browser loader is missing WebRTC proof marker: {marker}")
 
 with zipfile.ZipFile(artifact / "galactic-cup.love") as package:
     if package.testzip() is not None:
@@ -59,6 +62,7 @@ with zipfile.ZipFile(artifact / "galactic-cup.love") as package:
         "game/app.lua",
         "game/compatibility_metrics.lua",
         "game/transport.lua",
+        "game/webrtc_proof.lua",
         "sim/match.lua",
     ):
         if path not in names:

@@ -118,11 +118,12 @@ disconnect(reason?)     -> "state|disconnected"
 diagnostics()           -> pipe-separated diagnostic fields
 ```
 
-The host currently provides loopback only. No JavaScript module is imported by
-`core/`, `data/`, or `sim/`, and no generated artifact is checked in. The
-browser build smoke check verifies that the host is present in generated
-`player.js`; issue #3 can rebase without changing the Lua contract or adding
-performance instrumentation here.
+The `GalacticCupTransportBridge` host remains a bounded loopback seam. Issue #5
+adds a separate `GalacticCupWebRTCProof` host for manual peer connections while
+reusing this envelope shape; it does not turn the loopback adapter into a
+production network client. No JavaScript module is imported by `core/`, `data/`,
+or `sim/`, and no generated artifact is checked in. The browser build smoke
+check verifies both hosts are present in generated `player.js`.
 
 ## Observability contract
 
