@@ -13,7 +13,25 @@ from typing import Any
 EXPECTED_FLOW = ["title", "squad", "formation", "tactic", "match", "result"]
 
 
+def normalized_routes(routes: list[str]) -> list[str]:
+    result = []
+    for route in routes:
+        if route == "pause" or (result and result[-1] == route):
+            continue
+        result.append(route)
+    return result
+
+
 def parse_marker(message: str) -> dict[str, str] | None:
+    starts = [
+        index
+        for index in (message.find("GC_BROWSER|"), message.find("GC_METRICS|"))
+        if index >= 0
+    ]
+    if starts:
+        message = message[min(starts) :]
+        if message.endswith('"'):
+            message = message[:-1]
     prefix, separator, payload = message.partition("|")
     if prefix not in {"GC_BROWSER", "GC_METRICS"} or not separator:
         return None
@@ -22,7 +40,7 @@ def parse_marker(message: str) -> dict[str, str] | None:
     for part in parts[1:]:
         key, equals, value = part.partition("=")
         if equals:
-            record[key] = value
+            record["event_kind" if key == "kind" else key] = value
     return record
 
 
@@ -78,7 +96,7 @@ def summarize(paths: list[Path], require_flow: bool) -> int:
         logs.extend(parsed_logs)
 
     routes = [record["route"] for record in records if record.get("kind") == "route"]
-    flow_ok = routes[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW
+    flow_ok = normalized_routes(routes)[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW
     print("Compatibility telemetry")
     print(f"  inputs: {len([r for r in records if r.get('kind') == 'input'])}")
     print(f"  routes: {' -> '.join(routes) if routes else 'missing'}")

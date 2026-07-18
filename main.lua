@@ -221,16 +221,22 @@ local function record_input(kind)
     end
 end
 
+---@param settings GameSettings
+local function apply_settings(settings)
+    runtime_settings.apply(settings)
+    metrics:settings(clock(), settings)
+end
+
 function love.load()
     metrics = compatibility_metrics.new(clock())
     local width, height = love.graphics.getDimensions()
     app = bootstrap.new(width, height, {
-        apply_settings = runtime_settings.apply,
+        apply_settings = apply_settings,
         request_quit = function()
             love.event.quit()
         end,
     })
-    runtime_settings.apply(app.settings)
+    apply_settings(app.settings)
     app:resize(love.graphics.getDimensions())
     last_route = app:current_route()
     metrics:route(clock(), last_route)

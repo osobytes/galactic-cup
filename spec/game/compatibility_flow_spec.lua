@@ -54,6 +54,12 @@ t.describe("compatibility flow", function()
 
         t.eq(app.adapter.kind, "real")
         t.eq(app:current_route(), "match")
+        app:focus(false)
+        t.eq(app:current_route(), "pause")
+        flow:update(app, 4.5)
+        t.eq(app:current_route(), "pause")
+        flow:update(app, 5.0)
+        t.eq(app:current_route(), "match")
         local screen = assert(app.stack:current())
         ---@cast screen RealMatchScreen
         screen.match.state.finished = true
