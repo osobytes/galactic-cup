@@ -199,12 +199,15 @@ end
 local bootstrap = require("game.bootstrap")
 local compatibility_metrics = require("game.compatibility_metrics")
 local runtime_settings = require("game.runtime_settings")
+local CompatibilityFlow = require("game.compatibility_flow")
 
 ---@type App
 local app
 ---@type CompatibilityMetrics
 local metrics
 local last_route
+---@type CompatibilityFlow?
+local compatibility_flow
 
 ---@return number
 local function clock()
@@ -231,11 +234,17 @@ function love.load()
     app:resize(love.graphics.getDimensions())
     last_route = app:current_route()
     metrics:route(clock(), last_route)
+    if has_flag("--compat-flow") then
+        compatibility_flow = CompatibilityFlow.new(record_input)
+    end
 end
 
 ---@param dt number
 function love.update(dt)
     metrics:begin_update(clock())
+    if compatibility_flow then
+        compatibility_flow:update(app, clock())
+    end
     app:update(dt)
     local now = clock()
     metrics:finish_update(now)
