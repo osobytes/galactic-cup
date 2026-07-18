@@ -44,6 +44,24 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
   var version = "11.5";
   var uri = query.get("g") || "galactic-cup.love";
   var args = [];
+  var browser_compat = window.__GALACTIC_CUP__ = {
+    artifact: "galactic-cup-web",
+    events: [],
+    status: "loading",
+    started_at_ms: performance.now()
+  };
+
+  function mark(name, detail) {
+    var event = { name: name, at_ms: performance.now() - browser_compat.started_at_ms };
+    if (detail) {
+      event.detail = detail;
+    }
+    browser_compat.events.push(event);
+    console.info("GC_BROWSER|" + name + "|at_ms=" + event.at_ms.toFixed(3) +
+      (detail ? "|detail=" + detail : ""));
+  }
+
+  mark("loader_start");
 
   if (query.get("arg")) {
     try {
@@ -62,6 +80,8 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
   };
 
   function fail(error) {
+    browser_compat.status = "failed";
+    mark("error", String(error));
     console.error(error);
     canvas.style.display = "none";
     spinner.className = "error";
@@ -84,6 +104,7 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
 
     Promise.all(paths.map(fetch_binary))
       .then(function (files) {
+        mark("assets_loaded", "count=" + files.length);
         var cache = {};
         for (var i = 0; i < paths.length; i++) {
           cache[paths[i]] = files[i];
@@ -119,6 +140,8 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
           }
         };
         Module.postrun = function () {
+          browser_compat.status = "running";
+          mark("runtime_postrun");
           canvas.style.display = "block";
           canvas.focus();
           spinner.className = "";
@@ -128,6 +151,7 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
         runtime.src = version + "/love.js";
         runtime.async = true;
         runtime.onload = function () {
+          mark("runtime_script_loaded");
           try {
             window.Love(Module);
           } catch (error) {
@@ -143,9 +167,11 @@ BROWSER_LOADER = r'''/* Galactic Cup browser bootstrap. */
   }
 
   window.onerror = function (message) {
+    mark("window_error", String(message));
     fail(message);
   };
   window.onunhandledrejection = function (event) {
+    mark("unhandled_rejection", String(event.reason || "Unhandled browser promise rejection"));
     fail(event.reason || "Unhandled browser promise rejection");
   };
   window.onload = window.focus.bind(window);
