@@ -48,7 +48,6 @@ coverage/
 *.trace
 
 # Vendored type definitions (re-fetched by scripts/setup.sh)
-types/
 
 # Private planning and work-management material
 /docs/issues/
