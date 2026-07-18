@@ -9,6 +9,7 @@
 local Vec2 = require("core.vec2")
 local rng = require("core.rng")
 local TUNE = require("sim.tuning").values -- live-tunable knobs (F1 panel)
+local aerial = require("sim.aerial")
 local stats = require("sim.stats")
 local species = require("sim.species")
 local placement = require("sim.placement")
@@ -23,14 +24,27 @@ local PLAYER_RADIUS = 12
 local BALL_RADIUS = 6
 local FRICTION = 1.2 -- fraction of ball speed shed per second
 local STICK_AHEAD = PLAYER_RADIUS + BALL_RADIUS -- ball's resting offset at the feet
--- Touch-based dribble: an outfield carrier nudges a free-rolling ball ahead of
--- their feet rather than gluing it in place. The touch point rides further
--- ahead the faster they run (a heavier touch at pace); dribble skill pulls it
--- back toward the feet and stiffens the touch. Stray past the control radius
--- (skill-scaled) and possession is lost — a heavy touch gets robbed.
--- DRIBBLE_LEAD / DRIBBLE_TOUCH / DRIBBLE_CONTROL are live-tunable (F1 panel).
-local DRIBBLE_LEAD_MIN = STICK_AHEAD -- ball rides at least this far ahead, at rest
-local DRIBBLE_SKILL_TIGHTEN = 0.55 -- top skill pulls the lead in by up to this fraction
+-- Touch-based dribble, DISCRETE: the carrier KICKS the ball ahead of their run
+-- and it rolls free under grass friction — it never tracks the player. The
+-- carrier in turn is HOOKED to it: while the touch is beyond playing reach
+-- their movement steers back to the ball (see move_players), and only with the
+-- ball at the feet do they move freely — the glue that keeps player and ball
+-- one unit. When it slows back into playing reach they play the next touch,
+-- struck harder than they move (TUNE.DRIBBLE_PUSH) so it runs on ahead again
+-- (aim decides the direction: a carrier's facing obeys the stick). Every touch carries
+-- direction/weight error scaled down by dribble skill (TUNE.DRIBBLE_ERR): a
+-- clean toucher strokes it straight and tight, a sloppy one leathers it
+-- off-line — past the control radius (skill-scaled) it's simply loose.
+-- DRIBBLE_PUSH / DRIBBLE_ERR / DRIBBLE_TOUCH / DRIBBLE_CONTROL are live-tunable (F1 panel).
+local DRIBBLE_LEAD_MIN = STICK_AHEAD -- resting point: the ball sits this far ahead when standing
+-- CLOSE CONTROL vs KNOCK-ON: below DRIBBLE_CLOSE x move_speed (standing,
+-- walking, an ordinary jog) the ball is kept glued to the feet with soft
+-- corrective touches — natural control, nothing to lose. Only ABOVE it (a
+-- sprint) does the carrier knock the ball on in discrete kicks, with all the
+-- reach and risk that brings. DRIBBLE_CLOSE is the sweetspot lever (F1).
+local DRIBBLE_TOUCH_REACH = STICK_AHEAD + 6 -- the ball is playable for the next touch inside this
+local DRIBBLE_CATCH_PACE = 10 -- ...once it has slowed back to about the carrier's own pace
+local DRIBBLE_ERR_SKILL = 0.85 -- top skill cancels this fraction of the touch error
 local DRIBBLE_CONTROL_SKILL = 26 -- extra control radius a top-skill carrier earns (px)
 local POSSESS_DIST = 22 -- outfield control radius
 local KEEPER_DIST = 18 -- keeper catch radius (small enough that corners stay open)
@@ -44,9 +58,10 @@ local KEEPER_BOX_PAD = 30 -- vertical margin beyond the posts for the claim zone
 local KEEPER_CLAIM_DIST = 40 -- grab radius when actively claiming a ball in the box (priority)
 local KEEPER_LEAD = 0.01 -- anticipation lead when claiming a moving ball
 local POSSESS_MAX_SPEED = 350 -- outfield can only collect a slow-enough ball
-local PASS_SPEED = 320 -- minimum pass pace; long passes are driven harder (see pass_speed_for)
-local PASS_ARRIVE_PACE = 70 -- ball speed left when a pass reaches its receiver
-local PASS_SPEED_MAX = 620 -- cap so long passes are driven, never rockets
+local PASS_SPEED = 420 -- minimum pass pace; long passes are driven harder (see pass_speed_for)
+local PASS_ARRIVE_PACE = 120 -- ball speed left when a pass reaches its receiver
+local PASS_SPEED_MAX = 700 -- cap so long passes are driven, never rockets
+local PASS_LEAD = 0.6 -- lead a moving receiver by this fraction of the flight time
 -- PASS_CHARGE_RATE: live-tunable — see sim/tuning.lua (F1 panel)
 local PASS_RANGE_MIN = 110 -- a tap pass prefers someone close
 -- PASS_RANGE_MAX: live-tunable — see sim/tuning.lua (F1 panel)
@@ -143,24 +158,14 @@ local CHIP_LINE_Z = 65 -- a chip shot is this high crossing the line (over keepe
 local CAGE_CEILING = 170
 local CEIL_BOUNCE = 0.55
 
--- Aerial play: an airborne ball at head height can be met first-time. Above
--- VOLLEY_MAX_Z it's a HEADER (safe, moderate); below, a VOLLEY (harder and
--- riskier: it can be skied into the cage ceiling). Bands are generous so a
--- dropping cross is reliably meetable — a clean volley shouldn't take frame-
--- perfect timing.
-local HEADER_MAX_Z = 74 -- headable up to here
-local VOLLEY_MAX_Z = 44 -- at/below this an aerial strike is a volley
-local AERIAL_REACH = 24 -- AI horizontal reach to meet an airborne ball
--- AERIAL_ASSIST: live-tunable — extra reach a HUMAN going for it earns (aim
--- assist), so "attack the ball" connects without pixel-perfect positioning.
+-- Aerial play. Geometry and quality live in sim.aerial; match owns movement,
+-- candidate intent, ball output, and transient state.
 local AERIAL_ANTICIPATE = 84 -- the ball magnet engages within this of a dropping ball
-local VOLLEY_SKY_SKILL = 0.6 -- technique cuts the volley-sky chance by up to this
 -- Cross-finishing aid: hand control to the best-placed attacker when a lofted
 -- ball flies into the human's attacking third, so one strike finishes it.
 local CROSS_AID_Z = 30 -- only a genuinely lofted ball triggers the aid
 local CROSS_AID_THIRD = 0.6 -- ... once it is this far into the attacking half (x fraction)
 local CROSS_AID_RANGE = 150 -- ... and only if an attacker is this close to meet it
-local HEADER_CD = 0.5 -- per-player cooldown between aerial attempts
 -- HEADER_SPEED: live-tunable — see sim/tuning.lua (F1 panel)
 local CLEAR_HEADER_SPEED = 320 -- defensive header clearance pace
 local VOLLEY_SPEED = 1.3 -- volley pace multiplier
@@ -209,12 +214,27 @@ local THROW_MIN_OPEN = 30
 local DROPKICK_DIST = 420 -- how far upfield a drop-kick clearance lands
 local DROPKICK_CLEAR_H = 46 -- drop-kick loft: sails over every head on the way
 local THROW_CLEAR_H = 34 -- hand throws arc clearly over heads (> LOB_CLEAR_H foot lobs)
+-- A keeper's HANDS are accurate: a throw must not be interferable. Any
+-- opponent near the flight lane raises the arc above the aerial strike
+-- envelope (nobody can jump that high); a covered receiver gets the ball
+-- landed to their SAFE side — away from the cover, close enough to run onto.
+local THROW_SAFE_CLEAR = aerial.MAX_TOUCH_Z + 16 -- over a presser: beyond any jumping strike
+local THROW_LANE_W = 60 -- an opponent this close to the throw lane can attack the flight
+local THROW_LEAD_MAX = 55 -- land a covered outlet's throw at most this far to their safe side
+local THROW_COVER_DIST = 140 -- an opponent this close to the receiver counts as cover
 local RELEASE_DINK_DIST = 44 -- a defender this close on the release line gets dinked over
 local SAVE_PAD = 18 -- on-target tolerance beyond the posts when projecting a shot
 local SAVE_ZONE = 130 -- the keeper commits a dive once the shot is this close to its line
 local KEEPER_GRAB_POSE = 0.25 -- seconds of the gather/reach pose after a grab
 local KEEPER_THROW_POSE = 0.25 -- seconds of the release/throw pose after distributing
 local RECEIVE_TIME = 1.3 -- seconds the intended receiver runs onto a keeper's distribution
+-- A back-pass keeps the keeper coming to MEET it until it resolves: long enough
+-- to outlive any under-hit roll (the window is cut short the moment anyone
+-- gains the ball or a body/strike disrupts the pass — see match.step).
+local KEEPER_RECEIVE_TIME = 4
+-- Aim within ~23 degrees of the keeper — and closer-aligned than any other
+-- teammate — and a pass is a deliberate back-pass: the keeper receives it.
+local BACKPASS_AIM_COS = 0.92
 
 -- Locomotion momentum. All walking/running movement (controlled player, AI owner
 -- dribble, keeper positioning, off-ball AI) goes through apply_locomotion, which
@@ -257,6 +277,11 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field move_speed number
 ---@field shot_speed number
 ---@field dribble number  -- 0..1 ball control (higher = tighter touches, harder to nick)
+---@field strength number  -- normalized 0..1, used by aerial contests
+---@field first_touch number  -- 0..1 aerial reception quality
+---@field header_skill number  -- 0..1 header contact quality
+---@field volley_skill number  -- 0..1 volley contact quality
+---@field bicycle_skill number  -- 0..1 bicycle-kick contact quality
 ---@field is_keeper boolean
 ---@field radius number
 ---@field dash_cd number  -- AI tackle cooldown (seconds until it can challenge again)
@@ -270,6 +295,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field dive_delay number  -- countdown until a queued dive launches (synced to ball arrival)
 ---@field dive_target Vec2?  -- intercept point the dive converges on (movement stops there)
 ---@field hold_timer number  -- seconds a keeper holds the ball before distributing
+---@field feet_ball boolean  -- keeper took a teammate's pass with the feet (no hands: dribbles, tackleable)
 ---@field slide_timer number  -- seconds of an active slide tackle remaining
 ---@field slide_dir Vec2  -- locked travel direction of the slide
 ---@field slide_vel number  -- current slide speed (px/s), decays over the slide
@@ -287,6 +313,11 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field save_vx number  -- shot x-velocity at commit (sign flip = deflected, dive whiffs)
 ---@field settle_timer number  -- AI first-touch control window (no pressured pass until settled)
 ---@field header_cd number  -- cooldown between aerial (header/volley) attempts
+---@field aerial_timer number  -- transient aerial pose timer
+---@field aerial_style AerialStyle?
+---@field aerial_outcome AerialOutcome?
+---@field aerial_jump number  -- 0..1 required lift for rendering
+---@field aerial_recovery number  -- movement/action recovery after an aerial attempt
 ---@field windup_timer number  -- seconds until a pending shot/punt releases (0 = none)
 ---@field windup_shot { dir: Vec2, speed: number, vz: number, spin: number }?  -- payload captured at commit
 ---@field jockey_timer number  -- seconds of active jockey stance remaining (grants bonus poke reach)
@@ -305,16 +336,22 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field lob boolean  -- loft modifier: chip a shot / lob a pass over a defender
 ---@field sprint boolean  -- hold to sprint (drains the sprint meter)
 ---@field jockey boolean  -- hold Space off the ball: slow shadow stance, bonus poke reach on release
+---@field aerial_strike boolean?  -- abstract first-time strike intent
+---@field aerial_acrobatic boolean?  -- abstract bicycle/acrobatic intent
 
 -- One-frame notifications of discrete actions, for the renderer's juice layer
 -- (flashes, trails). Produced by the sim, cleared at the top of every step, so
 -- a frame's events are whatever happened during that frame. Positions are world
 -- space; `player` is the actor's id (nil for ball-only events).
 ---@class MatchEvent
----@field kind "shot"|"pass"|"touch"|"tackle"|"catch"|"parry"|"claim"|"block"|"header"|"volley"
+---@field kind "shot"|"pass"|"touch"|"tackle"|"catch"|"parry"|"claim"|"block"|"header"|"volley"|"bicycle"|"reception"|"juke"
 ---@field x number
 ---@field y number
 ---@field player string?
+---@field style AerialStyle?
+---@field outcome AerialOutcome?
+---@field jumping boolean?
+---@field difficulty number?
 
 ---@class MatchState
 ---@field field { w: number, h: number }
@@ -342,6 +379,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field ball_spin number  -- lateral curve applied to the loose ball
 ---@field rng integer  -- seeded PRNG state (core.rng): same seed = same match
 ---@field block_grace number  -- body-blocking re-enabled when this hits 0 (set on release)
+---@field aerial_lock number  -- seconds until this loose ball can take another aerial contact
 ---@field kickoff_hold number  -- seconds left of post-restart defensive hold (0 = press resumes)
 ---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
 
@@ -421,6 +459,11 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
                     stats.dribble(effective_stats) + species.dribble_protection(species_data.verb)
                 )
             ),
+            strength = effective_stats.strength / 10,
+            first_touch = stats.first_touch(effective_stats),
+            header_skill = stats.header(effective_stats),
+            volley_skill = stats.volley(effective_stats),
+            bicycle_skill = stats.bicycle(effective_stats),
             is_keeper = pd.position == "keeper",
             radius = PLAYER_RADIUS,
             dash_cd = 0,
@@ -434,6 +477,7 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             dive_delay = 0,
             dive_target = nil,
             hold_timer = 0,
+            feet_ball = false,
             slide_timer = 0,
             slide_dir = Vec2.new(0, 0),
             slide_vel = 0,
@@ -451,6 +495,11 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             save_vx = 0,
             settle_timer = 0,
             header_cd = 0,
+            aerial_timer = 0,
+            aerial_style = nil,
+            aerial_outcome = nil,
+            aerial_jump = 0,
+            aerial_recovery = 0,
             windup_timer = 0,
             windup_shot = nil,
             jockey_timer = 0,
@@ -508,6 +557,7 @@ local function place_kickoff(s, kicking)
         p.dive_delay = 0
         p.dive_target = nil
         p.hold_timer = 0
+        p.feet_ball = false
         p.slide_timer = 0
         p.slide_dir = Vec2.new(0, 0)
         p.slide_vel = 0
@@ -524,6 +574,11 @@ local function place_kickoff(s, kicking)
         p.save_vx = 0
         p.settle_timer = 0
         p.header_cd = 0
+        p.aerial_timer = 0
+        p.aerial_style = nil
+        p.aerial_outcome = nil
+        p.aerial_jump = 0
+        p.aerial_recovery = 0
         p.windup_timer = 0
         p.windup_shot = nil
         p.jockey_timer = 0
@@ -559,6 +614,7 @@ local function place_kickoff(s, kicking)
     s.charge = 0
     s.pass_charge = 0
     s.block_grace = 0
+    s.aerial_lock = 0
     s.pass_target = nil
     s.ball_spin = 0
     s.kickoff_hold = KICKOFF_HOLD
@@ -653,6 +709,7 @@ function match.new(opts)
         charge = 0,
         pass_charge = 0,
         block_grace = 0,
+        aerial_lock = 0,
         kickoff_hold = 0,
         pass_target = nil,
         ball_spin = 0,
@@ -820,12 +877,15 @@ end
 ---@param target_idx integer
 ---@param blocker_f number?  -- lob over this lane fraction; nil = driven ground pass
 ---@param clear_h number?  -- loft clearance height (defaults to a foot lob)
-local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
+---@param land_pos Vec2?  -- planned landing point (keeper throws); default: the receiver
+local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h, land_pos)
     local owner = s.players[owner_idx]
     local target = s.players[target_idx]
     -- Control follows a HUMAN pass to its receiver (standard soccer-game
     -- behavior): you take over the man the ball is travelling to — attack the
-    -- cross, time the first touch — while it is still in flight.
+    -- cross, time the first touch — while it is still in flight. A back-pass
+    -- is the exception: the keeper AI steps out to meet it, and control hands
+    -- over in step() the moment the keeper traps it (see "Keeper control").
     if is_human_player(s, owner_idx) and target.team == "home" and not target.is_keeper then
         s.controlled = target_idx
     end
@@ -833,7 +893,9 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     -- is still low in its first strides (the lane check ignores segment ends).
     -- Dink over them: an arc that clears at 15% of the lane also stays above
     -- head height through the middle, so any mid-lane blocker is cleared too.
-    do
+    -- (A planned throw — land_pos set — already cleared its own lane; the dink
+    -- would LOWER its arc back into the presser's reach.)
+    if not land_pos then
         local dirn = target.pos:sub(owner.pos):normalized()
         for qi, q in ipairs(s.players) do
             -- ANY body on the release line eats a driven ball — an adjacent
@@ -849,7 +911,9 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
             end
         end
     end
-    target.receive_timer = RECEIVE_TIME
+    -- A keeper receiver gets a long window: it must keep coming for the pass
+    -- (or its dying roll) until the ball is actually resolved, not for a beat.
+    target.receive_timer = target.is_keeper and KEEPER_RECEIVE_TIME or RECEIVE_TIME
     s.events[#s.events + 1] = { kind = "pass", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
     s.kickoff_hold = 0
@@ -858,17 +922,27 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h)
     s.pickup_cd = RELEASE_CD
     s.block_grace = BLOCK_GRACE
     if blocker_f then
-        s.ball_vel, s.ball_vz = lob_launch(owner.pos, target.pos, blocker_f, clear_h or LOB_CLEAR_H)
+        s.ball_vel, s.ball_vz =
+            lob_launch(owner.pos, land_pos or target.pos, blocker_f, clear_h or LOB_CLEAR_H)
     else
         local d = owner.pos:dist(target.pos)
         local pass_speed = pass_speed_for(d) * species.link_pass_speed(owner.owned_verb)
-        s.ball_vel = target.pos:sub(owner.pos):normalized():scale(pass_speed)
+        -- Lead a MOVING receiver into their run (a fraction of the flight
+        -- time) so the ball meets their stride instead of their heels.
+        local aim_pt = target.pos:add(target.vel:scale(d / pass_speed * PASS_LEAD))
+        s.ball_vel = aim_pt:sub(owner.pos):normalized():scale(pass_speed)
         s.ball_vz = 0
     end
 end
 
 -- Pure receiver selection for an outfield pass: returns the player index that
 -- would receive a pass if released right now, or nil if nobody is available.
+-- The own keeper is a valid receiver like anyone else — but only via the aim
+-- cone (a deliberate back-pass); the openness fallback never panics it home.
+-- Aim SQUARE at the keeper (best-aligned of all candidates, within
+-- BACKPASS_AIM_COS) and the keeper wins outright: the generic scoring's
+-- distance penalty must not hand a long deliberate back-pass to a mid-lane
+-- defender instead.
 -- Does NOT draw from s.rng — deterministic, safe to call every frame for preview.
 ---@param s MatchState
 ---@param owner_idx integer
@@ -881,11 +955,32 @@ local function select_pass_target(s, owner_idx, lofted, aim, range)
     aim = aim or owner.facing
     local cand, positions, opp_positions = {}, {}, {}
     for i, p in ipairs(s.players) do
-        if p.team == owner.team and i ~= owner_idx and not p.is_keeper then
+        if p.team == owner.team and i ~= owner_idx then
             cand[#cand + 1] = i
             positions[#positions + 1] = p.pos
         elseif p.team ~= owner.team then
             opp_positions[#opp_positions + 1] = p.pos
+        end
+    end
+    -- Deliberate back-pass: the keeper is the best-aligned candidate and the
+    -- aim points near-square at it — it receives, however far it stands.
+    do
+        local naim = aim:normalized()
+        if naim.x ~= 0 or naim.y ~= 0 then
+            local best_cos, best_idx
+            for k, pk in ipairs(positions) do
+                local to = pk:sub(owner.pos)
+                local d = to:length()
+                if d > 1 then
+                    local cos = (to.x * naim.x + to.y * naim.y) / d
+                    if not best_cos or cos > best_cos then
+                        best_cos, best_idx = cos, cand[k]
+                    end
+                end
+            end
+            if best_idx and s.players[best_idx].is_keeper and best_cos >= BACKPASS_AIM_COS then
+                return best_idx
+            end
         end
     end
     local rel, pick_cand, pick_pos
@@ -908,13 +1003,17 @@ local function select_pass_target(s, owner_idx, lofted, aim, range)
         if not rel then
             local best_fb
             for k, pk in ipairs(positions) do
-                local open = math.huge
-                for _, qp in ipairs(opp_positions) do
-                    open = math.min(open, qp:dist(pk))
-                end
-                local score = math.min(open, 80) - owner.pos:dist(pk) * 0.15
-                if not best_fb or score > best_fb then
-                    best_fb, rel = score, k
+                -- Fallback (nobody in the cone) considers outfielders only: an
+                -- unaimed pass must never dump the ball back at the keeper.
+                if not s.players[cand[k]].is_keeper then
+                    local open = math.huge
+                    for _, qp in ipairs(opp_positions) do
+                        open = math.min(open, qp:dist(pk))
+                    end
+                    local score = math.min(open, 80) - owner.pos:dist(pk) * 0.15
+                    if not best_fb or score > best_fb then
+                        best_fb, rel = score, k
+                    end
                 end
             end
         end
@@ -1059,8 +1158,57 @@ local function try_pass(s, owner_idx, lofted, aim)
     release_pass(s, owner_idx, target_idx, f, clear_h)
 end
 
+-- Plan a keeper HAND throw to `target_idx`. Hands see the whole pitch: a
+-- throw is not a hopeful ball, it is placed. Two tools, composable:
+--   - a COVERED receiver gets the ball landed to their safe side — away from
+--     the nearest opponent but close enough to run onto (receive_timer);
+--   - any opponent near the flight lane raises the arc ABOVE the aerial
+--     strike envelope (aerial.MAX_TOUCH_Z): the flight cannot be met at all,
+--     and the receiver takes it out of the air (aerial reception) or off the
+--     bounce at the safe landing spot.
+-- With nobody near the lane the throw stays the old low, quick float.
+---@param s MatchState
+---@param keeper MatchPlayer
+---@param target_idx integer
+---@return Vec2 land, number f, number clear_h
+local function plan_throw(s, keeper, target_idx)
+    local target = s.players[target_idx]
+    local near_d, near_opp
+    for _, q in ipairs(s.players) do
+        if q.team ~= keeper.team then
+            local d = q.pos:dist(target.pos)
+            if not near_d or d < near_d then
+                near_d, near_opp = d, q
+            end
+        end
+    end
+    local land = target.pos
+    if near_opp and near_d < THROW_COVER_DIST then
+        local away = target.pos:sub(near_opp.pos)
+        -- Cover standing ON the receiver: push the landing toward the corner
+        -- the keeper is facing away from goal — any consistent safe side.
+        local dir = (away:length() > 1) and away:normalized() or keeper.facing
+        local lead = math.min(THROW_LEAD_MAX, (THROW_COVER_DIST - near_d) * 0.5)
+        land = Vec2.new(
+            math.max(25, math.min(s.field.w - 25, target.pos.x + dir.x * lead)),
+            math.max(25, math.min(s.field.h - 25, target.pos.y + dir.y * lead))
+        )
+    end
+    local opp_positions = {}
+    for _, q in ipairs(s.players) do
+        if q.team ~= keeper.team then
+            opp_positions[#opp_positions + 1] = q.pos
+        end
+    end
+    local f = ai.lane_blocker(keeper.pos, land, opp_positions, THROW_LANE_W)
+    if f then
+        return land, math.max(0.2, math.min(0.8, f)), THROW_SAFE_CLEAR
+    end
+    return land, 0.5, THROW_CLEAR_H
+end
+
 -- Human keeper throw: aimed like a pass (facing cone), the charged range
--- picking WHICH teammate; a floaty hand throw that sails over heads.
+-- picking WHICH teammate; the flight comes from plan_throw (uninterferable).
 ---@param s MatchState
 ---@param keeper_idx integer
 ---@param range number
@@ -1071,15 +1219,8 @@ local function keeper_throw(s, keeper_idx, range, aim)
     if not target_idx then
         return
     end
-    local opp_positions = {}
-    for _, p in ipairs(s.players) do
-        if p.team ~= keeper.team then
-            opp_positions[#opp_positions + 1] = p.pos
-        end
-    end
-    local f = ai.lane_blocker(keeper.pos, s.players[target_idx].pos, opp_positions, POSSESS_DIST)
-        or 0.5
-    release_pass(s, keeper_idx, target_idx, f, THROW_CLEAR_H)
+    local land, f, clear_h = plan_throw(s, keeper, target_idx)
+    release_pass(s, keeper_idx, target_idx, f, clear_h, land)
     keeper.throw_timer = KEEPER_THROW_POSE
 end
 
@@ -1237,7 +1378,7 @@ local function attempt_steals(s)
         return
     end
     local owner = s.players[s.owner]
-    if owner.is_keeper then
+    if owner.is_keeper and not owner.feet_ball then
         return -- a keeper has the ball in hand: it can't be tackled off them
     end
     if owner.dodge_timer > 0 then
@@ -1266,6 +1407,7 @@ local function attempt_steals(s)
             s.ball_spin = 0
             p.grab_timer = KEEPER_GRAB_POSE
             p.hold_timer = KEEPER_HOLD
+            p.feet_ball = false
             return
         end
     end
@@ -1629,7 +1771,8 @@ local function offball_targets(s, pos)
 
     -- Hard retreat: you can't challenge a keeper holding the ball, so the opposing
     -- team must give it space — push any target inside the respect ring back out.
-    if s.owner and s.players[s.owner].is_keeper then
+    -- A keeper playing a back-pass with the FEET gets no such protection.
+    if s.owner and s.players[s.owner].is_keeper and not s.players[s.owner].feet_ball then
         local kpos = s.players[s.owner].pos
         local kteam = s.players[s.owner].team
         for i, tgt in pairs(targets) do
@@ -1710,7 +1853,19 @@ local function apply_locomotion(s, p, desired, dt)
     local diff_len = math.sqrt(dx * dx + dy * dy)
     local dlen = desired:length()
     -- Use DECEL when stopping (no input), ACCEL when steering toward any speed.
-    local rate = (dlen < 1) and TUNE.MOVE_DECEL or TUNE.MOVE_ACCEL
+    local rate
+    if dlen < 1 then
+        rate = TUNE.MOVE_DECEL
+    else
+        -- Standing-start inertia: acceleration builds with momentum. From
+        -- rest you push off at START_ACCEL and only reach full MOVE_ACCEL
+        -- as speed builds — no 0-to-full-stride in an instant. A body
+        -- already at speed redirects at full rate, so turns stay sharp.
+        -- Normalized by the player's BASE speed (not the desired speed), so
+        -- asking for a sprint never weakens the initial push-off.
+        local momentum = math.min(1, p.run_vel:length() / math.max(1, p.move_speed))
+        rate = TUNE.START_ACCEL + (TUNE.MOVE_ACCEL - TUNE.START_ACCEL) * momentum
+    end
     local max_step = rate * dt
     if diff_len <= max_step then
         p.run_vel = desired
@@ -1724,6 +1879,38 @@ local function apply_locomotion(s, p, desired, dt)
     local rvlen = p.run_vel:length()
     if rvlen > RUN_VEL_FACE_MIN then
         p.facing = p.run_vel:normalized()
+    end
+end
+
+---@param s MatchState
+---@param carrier MatchPlayer
+---@return number distance
+---@return MatchPlayer? opponent
+local function nearest_outfield_opponent(s, carrier)
+    local best = math.huge
+    local opponent = nil
+    for _, p in ipairs(s.players) do
+        if p.team ~= carrier.team and not p.is_keeper then
+            local d = carrier.pos:dist(p.pos)
+            if d < best then
+                best = d
+                opponent = p
+            end
+        end
+    end
+    return best, opponent
+end
+
+---@param p MatchPlayer
+---@param want boolean
+---@param dt number
+local function update_sprint(p, want, dt)
+    local can = p.sprint_meter > (p.sprinting and 0 or SPRINT_ENGAGE)
+    p.sprinting = (want and can) or false
+    if p.sprinting then
+        p.sprint_meter = math.max(0, p.sprint_meter - dt / p.sprint_dur)
+    else
+        p.sprint_meter = math.min(1, p.sprint_meter + TUNE.SPRINT_REFILL * dt)
     end
 end
 
@@ -1742,11 +1929,20 @@ local function move_players(s, dt, input)
 
     for i, p in ipairs(s.players) do
         if is_human_player(s, i) then
+            local aerial_requested = aerial.strike_requested(input)
+            local aerial_active = i ~= s.owner
+                and p.aerial_recovery <= 0
+                and s.ball_z > GROUND_GRAB_HEIGHT
+                and s.ball_vz < 0
+                and p.pos:dist(s.ball) <= AERIAL_ANTICIPATE
+                and (aerial_requested or p.receive_timer > 0)
             -- Tackle button: a committed slide while SPRINTING, else a standing
             -- poke — one legible rule (sprint + tackle = the big slide). Slide
             -- speed scales off current velocity (p.vel) so it feels relative.
             if
                 input.dash
+                and not aerial_active
+                and p.aerial_recovery <= 0
                 and p.slide_timer <= 0
                 and p.tackle_timer <= 0
                 and p.tackle_cd <= 0
@@ -1767,7 +1963,12 @@ local function move_players(s, dt, input)
                 end
             end
             -- Trigger a juke (not while sliding): a quick sidestep with tackle immunity.
-            if input.dodge and p.dodge_cd <= 0 and p.slide_timer <= 0 then
+            if
+                input.dodge
+                and p.dodge_cd <= 0
+                and p.slide_timer <= 0
+                and p.aerial_recovery <= 0
+            then
                 local perp = Vec2.new(-p.facing.y, p.facing.x)
                 if input.move.x * perp.x + input.move.y * perp.y < 0 then
                     perp = perp:scale(-1)
@@ -1775,6 +1976,7 @@ local function move_players(s, dt, input)
                 p.dodge_timer = DODGE_DURATION
                 p.dodge_cd = DODGE_CD
                 p.dodge_dir = perp
+                s.events[#s.events + 1] = { kind = "juke", x = p.pos.x, y = p.pos.y, player = p.id }
             end
 
             if p.slide_timer > 0 then
@@ -1797,7 +1999,10 @@ local function move_players(s, dt, input)
                 -- Jockey stance (Space held off the ball): shadow the carrier at
                 -- reduced speed, facing locked toward the ball. Mutually exclusive
                 -- with sprint (jockey wins). Grants bonus poke reach on release.
-                local jockeying = input.jockey and i ~= s.owner and p.stun_timer <= 0
+                local jockeying = input.jockey
+                    and i ~= s.owner
+                    and p.stun_timer <= 0
+                    and not aerial_active
                 if jockeying then
                     p.jockey_timer = JOCKEY_HOLD
                 end
@@ -1805,13 +2010,7 @@ local function move_players(s, dt, input)
                 -- burns to empty — so a drained meter doesn't flicker the boost
                 -- on and off at the refill rate.
                 local want = input.sprint and moving and p.stun_timer <= 0 and not jockeying
-                local can = p.sprint_meter > (p.sprinting and 0 or SPRINT_ENGAGE)
-                p.sprinting = (want and can) or false
-                if p.sprinting then
-                    p.sprint_meter = math.max(0, p.sprint_meter - dt / p.sprint_dur)
-                else
-                    p.sprint_meter = math.min(1, p.sprint_meter + TUNE.SPRINT_REFILL * dt)
-                end
+                update_sprint(p, want, dt)
                 local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
                 if jockeying then
                     mv = mv * TUNE.JOCKEY_SLOW
@@ -1822,17 +2021,53 @@ local function move_players(s, dt, input)
                 if p.windup_timer > 0 then
                     mv = mv * WINDUP_MOVE
                 end
+                if p.aerial_recovery > 0 then
+                    if p.aerial_style == "bicycle" then
+                        mv = 0
+                    elseif p.aerial_jump > 0 then
+                        mv = mv * 0.35
+                    elseif p.aerial_style == "leg_control" or p.aerial_style == "chest_control" then
+                        mv = mv * 0.6
+                    else
+                        mv = mv * 0.55
+                    end
+                end
                 -- Stationary-aiming exception: when input is held but the player
                 -- hasn't built speed yet, facing should follow input, not run_vel.
                 -- apply_locomotion handles facing via run_vel; for the input case
                 -- we override after the call when run_vel is still tiny.
                 local desired = moving and dir:normalized():scale(mv) or Vec2.new(0, 0)
                 local had_input_facing = moving and p.run_vel:length() <= RUN_VEL_FACE_MIN
+                -- Dribble hook: while the carrier's touch runs on ahead they are
+                -- NOT free to run elsewhere — movement steers back to the ball
+                -- (the chase half of kick-chase-kick), automatically when no
+                -- input is held. The stick keeps choosing the FACING — where
+                -- the NEXT touch goes — and free movement returns the moment
+                -- the ball is back at the feet. Owners only: off the ball you
+                -- run wherever you like.
+                local hooked = i == s.owner
+                    and not (p.is_keeper and not p.feet_ball)
+                    and p.pos:dist(s.ball) > DRIBBLE_TOUCH_REACH
+                if hooked then
+                    local to_ball = s.ball:sub(p.pos)
+                    if to_ball:length() > 1 then
+                        desired = to_ball:normalized():scale(mv)
+                    end
+                elseif not moving and p.receive_timer > 0 and s.owner == nil then
+                    -- Receive assist: the designated receiver of a pass works
+                    -- to meet it by default — hold a direction to override
+                    -- and attack a different spot instead.
+                    local to_ball = s.ball:sub(p.pos)
+                    if to_ball:length() > 1 then
+                        desired = to_ball:normalized():scale(mv)
+                    end
+                end
                 -- Aerial magnet: going up for a dropping ball nearby (holding the
                 -- aerial button off the ball) glides the player toward it, so a
                 -- cross is met without pixel-perfect positioning. It overrides
                 -- the jockey slowdown and steers even from a standstill.
-                local going_aerial = (input.jockey or input.dash) and i ~= s.owner
+                local going_aerial = aerial_active
+                local facing_before_aerial = p.facing
                 if going_aerial and s.ball_z > GROUND_GRAB_HEIGHT and s.ball_vz < 0 then
                     local to_ball = s.ball:sub(p.pos)
                     local d = to_ball:length()
@@ -1845,19 +2080,27 @@ local function move_players(s, dt, input)
                     end
                 end
                 apply_locomotion(s, p, desired, dt)
-                if jockeying then
+                if going_aerial and aerial.acrobatic_requested(input) then
+                    -- Bicycle geometry reads the approach facing; the contact
+                    -- magnet must not rotate the player to face a ball behind.
+                    p.facing = facing_before_aerial
+                elseif jockeying then
                     -- Jockey stance: face the ball regardless of movement.
                     local ball_off = s.ball:sub(p.pos)
                     if ball_off:length() > 1 then
                         p.facing = ball_off:normalized()
                     end
-                elseif had_input_facing then
+                elseif (i == s.owner and moving) or had_input_facing then
+                    -- A carrier's facing always obeys the stick — even while
+                    -- hooked to a run-on ball — so the next touch turns the
+                    -- dribble where you point, not where the chase ran.
                     p.facing = dir:normalized()
                 end
             end
-            -- A keeper holding the ball may not carry it out of the penalty
-            -- area (the drawn box) — the laws, and the renderer, agree.
-            if p.is_keeper then
+            -- A keeper holding the ball in its HANDS may not carry it out of the
+            -- penalty area (the drawn box) — the laws, and the renderer, agree.
+            -- Off the ball or with a back-pass at the feet it may roam.
+            if p.is_keeper and s.owner == i and not p.feet_ball then
                 local minx = (p.team == "home") and PLAYER_RADIUS or (s.field.w - PENALTY_DEPTH)
                 local maxx = (p.team == "home") and PENALTY_DEPTH or (s.field.w - PLAYER_RADIUS)
                 local top = s.field.h / 2 - PENALTY_H / 2 + PLAYER_RADIUS
@@ -1872,7 +2115,48 @@ local function move_players(s, dt, input)
             if not p.is_keeper then
                 local goal = (p.team == "home") and s.goal_away or s.goal_home
                 local gc = Vec2.new(goal.x + goal.w / 2, goal.y + goal.h / 2)
+                local pressure, threat = nearest_outfield_opponent(s, p)
+                -- React on the NEXT tick after the tackle begins. Reading a
+                -- same-frame human button here would make AI carriers psychic
+                -- and invalidate a correctly timed challenge.
+                local threat_committed = threat ~= nil
+                    and (
+                        (threat.tackle_timer > 0 and threat.tackle_timer < STAND_TIMER)
+                        or (threat.slide_timer > 0 and threat.slide_timer < SLIDE_DURATION)
+                    )
+                if
+                    threat_committed
+                    and threat ~= nil
+                    and pressure <= TUNE.AI_JUKE_DIST
+                    and p.dodge_cd <= 0
+                    and p.dodge_timer <= 0
+                    and p.stun_timer <= 0
+                    and p.pos:dist(s.ball) <= DRIBBLE_TOUCH_REACH
+                then
+                    -- React to a defender who has actually committed: sidestep
+                    -- away from their side, rather than spamming jukes on proximity.
+                    local perp = Vec2.new(-p.facing.y, p.facing.x)
+                    local to_threat = threat.pos:sub(p.pos)
+                    if to_threat.x * perp.x + to_threat.y * perp.y > 0 then
+                        perp = perp:scale(-1)
+                    end
+                    p.dodge_timer = DODGE_DURATION
+                    p.dodge_cd = TUNE.AI_JUKE_CD
+                    p.dodge_dir = perp
+                    s.events[#s.events + 1] =
+                        { kind = "juke", x = p.pos.x, y = p.pos.y, player = p.id }
+                end
+                local goal_dist = p.pos:dist(gc)
+                local want_sprint = pressure >= TUNE.AI_SPRINT_SPACE
+                    and goal_dist > TUNE.AI_SHOOT_RANGE
+                    and p.windup_timer <= 0
+                    and p.dodge_timer <= 0
+                    and p.stun_timer <= 0
+                update_sprint(p, want_sprint, dt)
                 local mv = p.move_speed * (p.stun_timer > 0 and STUN_SLOW or 1)
+                if p.sprinting then
+                    mv = mv * TUNE.SPRINT_MULT * species.burst_speed(p.owned_verb)
+                end
                 -- Plant during wind-up: AI striker slows to 30% while winding up.
                 if p.windup_timer > 0 then
                     mv = mv * WINDUP_MOVE
@@ -1881,7 +2165,27 @@ local function move_players(s, dt, input)
                 -- position and a unit direction), then feed apply_locomotion.
                 local _, dir = ai.steer(p.pos, gc, mv * dt)
                 local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(mv) or Vec2.new(0, 0)
-                apply_locomotion(s, p, desired, dt)
+                -- Dribble hook (same rule as the human carrier): chase the
+                -- run-on touch before anything else, facing kept on the
+                -- dribble line so the next touch continues toward goal.
+                if p.pos:dist(s.ball) > DRIBBLE_TOUCH_REACH then
+                    local to_ball = s.ball:sub(p.pos)
+                    if to_ball:length() > 1 then
+                        desired = to_ball:normalized():scale(mv)
+                    end
+                end
+                if p.dodge_timer > 0 then
+                    p.pos = clamp_to_field(
+                        s,
+                        p.pos:add(p.dodge_dir:scale(p.move_speed * DODGE_SPEED_MULT * dt))
+                    )
+                    p.run_vel = Vec2.new(0, 0)
+                else
+                    apply_locomotion(s, p, desired, dt)
+                end
+                if dir.x ~= 0 or dir.y ~= 0 then
+                    p.facing = dir
+                end
             else
                 -- A keeper holding the ball faces upfield; if an opponent is camped
                 -- right in front of it, step laterally to open a throwing angle.
@@ -1906,6 +2210,7 @@ local function move_players(s, dt, input)
                 end
             end
         elseif p.is_keeper then
+            update_sprint(p, false, dt)
             local opp_owns = owner ~= nil and owner.team ~= p.team
             if p.dive_timer > 0 then
                 -- Diving: lunge hard toward the intercept point — and STOP
@@ -1926,9 +2231,19 @@ local function move_players(s, dt, input)
                     p.facing = p.dive_dir
                 end
                 p.run_vel = Vec2.new(0, 0)
+            elseif s.owner == nil and p.receive_timer > 0 then
+                -- Meet a teammate's back-pass at the ball. Generic predictive
+                -- pursuit is wrong here: its horizon grows with distance, so an
+                -- incoming pass projects behind the keeper and sends it backward
+                -- through the goal instead of forward to receive.
+                local _, dir = ai.steer(p.pos, s.ball, p.move_speed * dt)
+                local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
+                    or Vec2.new(0, 0)
+                apply_locomotion(s, p, desired, dt)
             elseif (s.owner == nil or opp_owns) and in_claim_zone(s, p) then
                 -- Come off the line to claim a loose ball in the box — or to close
-                -- down a carrier who brings it in (the 1v1 rush).
+                -- down a carrier who brings it in (the 1v1 rush). Predictive
+                -- pursuit remains useful for these non-designated claims.
                 local aim = ai.pursue(p.pos, s.ball, s.ball_vel, KEEPER_LEAD)
                 local _, dir = ai.steer(p.pos, aim, p.move_speed * dt)
                 local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
@@ -1947,6 +2262,7 @@ local function move_players(s, dt, input)
                 apply_locomotion(s, p, desired, dt)
             end
         else
+            update_sprint(p, false, dt)
             -- Off-ball AI: role-assigned target (press/cover/mark/support/zone).
             -- Positional roles have CALM: ease in on approach, plant inside the
             -- deadband, and once standing, stay planted until the spot drifts
@@ -1969,8 +2285,9 @@ local function move_players(s, dt, input)
 
     -- A keeper in possession is PHYSICALLY protected (laws of the game: you
     -- cannot challenge a keeper holding the ball). AI targets already retreat;
-    -- this ring catches the human-controlled player and any straggler.
-    if s.owner and s.players[s.owner].is_keeper then
+    -- this ring catches the human-controlled player and any straggler. Ball at
+    -- the keeper's FEET (a received back-pass) is fair game — no ring.
+    if s.owner and s.players[s.owner].is_keeper and not s.players[s.owner].feet_ball then
         local k = s.players[s.owner]
         for _, p in ipairs(s.players) do
             if p.team ~= k.team then
@@ -2008,6 +2325,9 @@ end
 ---@param keeper_idx integer
 local function keeper_distribute(s, keeper_idx)
     local keeper = s.players[keeper_idx]
+    -- Ball at the feet (received back-pass): distribution is KICKED — a normal
+    -- foot pass (no throw pose, ordinary lob height), released immediately.
+    local kicked = keeper.feet_ball
     local fwd = (keeper.team == "home") and 1 or -1 -- +x is upfield for home
     local opp = {}
     for _, q in ipairs(s.players) do
@@ -2049,14 +2369,30 @@ local function keeper_distribute(s, keeper_idx)
         end
     end
 
-    keeper.throw_timer = KEEPER_THROW_POSE -- release/throw pose (visual)
+    if not kicked then
+        keeper.throw_timer = KEEPER_THROW_POSE -- release/throw pose (visual)
+    end
+    -- Hands place their lobs via plan_throw (safe-side landing + an arc no
+    -- jump can reach); a kicked distribution keeps ordinary foot-lob flight.
+    ---@param idx integer
+    ---@param f number?
+    local function release_throw(idx, f)
+        if kicked then
+            release_pass(s, keeper_idx, idx, f, LOB_CLEAR_H)
+        elseif f then
+            local land, pf, clear_h = plan_throw(s, keeper, idx)
+            release_pass(s, keeper_idx, idx, pf, clear_h, land)
+        else
+            release_pass(s, keeper_idx, idx, nil, nil) -- clear ground lane: bowl it
+        end
+    end
     if best then
-        release_pass(s, keeper_idx, best, best_f, THROW_CLEAR_H)
+        release_throw(best, best_f)
     elseif open_best then
-        -- Float it over the traffic to the least-marked teammate: the ball spends
-        -- its flight clearly above head height, so camped opponents can't pick it off.
+        -- Float it over the traffic to the least-marked teammate: the flight
+        -- stays out of everyone's reach, so camped opponents can't pick it off.
         local f = ai.lane_blocker(keeper.pos, s.players[open_best].pos, opp, POSSESS_DIST) or 0.5
-        release_pass(s, keeper_idx, open_best, f, THROW_CLEAR_H)
+        release_throw(open_best, f)
     else
         -- Everyone swarmed: drop-kick a high clearance upfield (lands around
         -- DROPKICK_DIST away, toward the middle of the pitch).
@@ -2076,7 +2412,9 @@ end
 -- is a charged PUNT off the foot — the longer the hold, the further upfield it
 -- sails. K (hold + release) is a charged THROW: the range picks which teammate
 -- along your aim receives it. The hold clock still runs as the six-second-rule
--- fallback so play can't stall.
+-- fallback so play can't stall. With the ball at the FEET (a received
+-- back-pass) the throw becomes a normal outfield-style pass, and there is no
+-- six-second fallback — feet are exempt, and you're in control.
 ---@param s MatchState
 ---@param dt number
 ---@param input MatchInput
@@ -2110,13 +2448,17 @@ local function human_keeper_actions(s, dt, input, owner)
         owner.windup_timer = TUNE.SHOT_WINDUP
         owner.windup_shot = { dir = vel:normalized(), speed = vel:length(), vz = vz, spin = 0 }
     elseif fire_pass then
-        local range = PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
-        keeper_throw(s, s.owner, range, aim)
+        if owner.feet_ball then
+            try_pass(s, s.owner, input.lob, aim)
+        else
+            local range = PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
+            keeper_throw(s, s.owner, range, aim)
+        end
         s.pass_charge = 0
     end
-    if s.owner and owner.hold_timer <= 0 and owner.windup_timer == 0 then
+    if s.owner and not owner.feet_ball and owner.hold_timer <= 0 and owner.windup_timer == 0 then
         keeper_distribute(s, s.owner)
     end
 end
@@ -2178,6 +2520,7 @@ local function attempt_save(s)
     for _, keeper in ipairs(s.players) do
         if
             keeper.is_keeper
+            and keeper.receive_timer <= 0 -- a teammate's back-pass is RECEIVED (feet), never saved
             and keeper.dive_timer <= 0
             and keeper.dive_delay <= 0
             and not keeper.save_pending
@@ -2297,6 +2640,7 @@ local function resolve_pending_save(s, dt)
                     s.ball_spin = 0
                     keeper.grab_timer = KEEPER_GRAB_POSE
                     keeper.hold_timer = KEEPER_HOLD
+                    keeper.feet_ball = false
                     return "catch"
                 end
                 -- Parry from the actual contact point: punch it clear — out AND
@@ -2508,43 +2852,83 @@ local function update_ball(s, dt, input)
             q.save_pending = nil
         end
         local owner = s.players[s.owner]
-        if owner.is_keeper then
+        if owner.is_keeper and not owner.feet_ball then
             -- A keeper holds the ball in its hands, clamped clear of its own line.
             s.ball = keeper_hold_pos(s, owner)
             s.ball_vel = Vec2.new(0, 0)
             s.ball_z = 0 -- an owned ball is grounded (at feet / in hands)
             s.ball_vz = 0
         else
-            -- Touch-based dribble: the ball rolls free and the carrier nudges it
-            -- toward a touch point that rides further ahead the faster they run
-            -- (a heavier touch at pace). Dribble skill pulls the touch in toward
-            -- the feet and closes the gap faster. Push it past the (skill-scaled)
-            -- control radius and possession breaks — a heavy touch, robbed.
+            -- Touch-based dribble, DISCRETE (see the constants block): kick,
+            -- chase, kick again. Between touches the ball runs free under
+            -- grass friction; each new touch is a visible, audible kick ahead
+            -- of the run with skill-scaled direction/weight error. Push one
+            -- past the (skill-scaled) control radius and possession breaks —
+            -- a heavy touch, robbed.
             local skill = owner.dribble
-            local speed = owner.run_vel:length()
-            local lead = (DRIBBLE_LEAD_MIN + speed * TUNE.DRIBBLE_LEAD)
-                * (1 - DRIBBLE_SKILL_TIGHTEN * skill)
-            local touch_pt = owner.pos:add(owner.facing:scale(lead))
-            -- The ball rolls ALONG with the carrier (inherits their run velocity)
-            -- plus a corrective touch toward the feet-ahead point, so at pace it
-            -- settles further ahead instead of being left behind. A cleaner
-            -- toucher (skill) corrects harder, keeping it tighter.
-            local correct = touch_pt:sub(s.ball):scale(TUNE.DRIBBLE_TOUCH * (0.5 + 0.5 * skill))
-            s.ball_vel = owner.run_vel:add(correct)
-            s.ball = s.ball:add(s.ball_vel:scale(dt))
+            -- REALIZED speed (actual motion), not run_vel: a carrier body-
+            -- checked to a stop must not keep pushing the ball at the pace
+            -- their legs are asking for — the ball rides what the body DOES.
+            local speed = owner.vel:length()
+            local at_feet = owner.pos:dist(s.ball) <= DRIBBLE_TOUCH_REACH
             s.ball_z = 0
             s.ball_vz = 0
+            if not at_feet then
+                -- The ball is away from the feet: it rolls free — the PLAYER
+                -- goes to the BALL (the hook in move_players), never the
+                -- other way around.
+                s.ball_vel = s.ball_vel:scale(math.max(0, 1 - FRICTION * dt))
+            elseif speed < owner.move_speed * TUNE.DRIBBLE_CLOSE then
+                -- CLOSE CONTROL (standing through an ordinary jog): the ball
+                -- stays glued to the feet with soft corrective touches —
+                -- natural, safe, nothing knocked away. Sprinting breaks into
+                -- the kick-and-chase below.
+                local rest = owner.pos:add(owner.facing:scale(DRIBBLE_LEAD_MIN))
+                local correct = rest:sub(s.ball):scale(TUNE.DRIBBLE_TOUCH * (0.5 + 0.5 * skill))
+                s.ball_vel = owner.vel:add(correct)
+            elseif s.ball_vel:length() <= speed + DRIBBLE_CATCH_PACE then
+                -- The ball has slowed back to the feet: play the next touch —
+                -- a kick ahead of the run, struck harder than the carrier
+                -- moves so it runs on and returns. Sloppier feet (low skill)
+                -- spray the angle and the weight; the seeded rolls keep the
+                -- sim reproducible.
+                local roll_a, roll_w
+                s.rng, roll_a = rng.roll(s.rng)
+                s.rng, roll_w = rng.roll(s.rng)
+                local slop = 1 - DRIBBLE_ERR_SKILL * skill
+                local ang = (roll_a * 2 - 1) * TUNE.DRIBBLE_ERR * slop
+                local ca, sa = math.cos(ang), math.sin(ang)
+                local dir = Vec2.new(
+                    owner.facing.x * ca - owner.facing.y * sa,
+                    owner.facing.x * sa + owner.facing.y * ca
+                )
+                local weight = 1 + (roll_w * 2 - 1) * TUNE.DRIBBLE_ERR * 0.8 * slop
+                s.ball_vel = dir:scale(speed * TUNE.DRIBBLE_PUSH * weight)
+                s.events[#s.events + 1] =
+                    { kind = "touch", x = s.ball.x, y = s.ball.y, player = owner.id }
+            else
+                -- At the feet but still leaving the boot (just kicked): let it
+                -- run, shedding pace on the grass.
+                s.ball_vel = s.ball_vel:scale(math.max(0, 1 - FRICTION * dt))
+            end
+            s.ball = s.ball:add(s.ball_vel:scale(dt))
             local control = TUNE.DRIBBLE_CONTROL + DRIBBLE_CONTROL_SKILL * skill
             if owner.pos:dist(s.ball) > control then
-                s.owner = nil -- ran too far ahead of the feet: it's loose now
+                s.owner = nil -- the touch got away from the feet: it's loose now
+                return -- no owner actions this frame; the ball plays loose next
             end
         end
 
         if owner.is_keeper then
             if is_human_player(s, s.owner) then
                 -- Preview: while pass_held, show which teammate would receive.
+                -- Ball at the feet passes like an outfielder; in the hands it throws.
                 if input.pass_held then
-                    update_pass_target_keeper(s, input)
+                    if owner.feet_ball then
+                        update_pass_target_outfield(s, input)
+                    else
+                        update_pass_target_keeper(s, input)
+                    end
                 else
                     s.pass_target = nil
                 end
@@ -2685,6 +3069,11 @@ local function update_ball(s, dt, input)
                             s.ball_vel = s.ball_vel:sub(n:scale(2 * vn)):scale(BLOCK_DAMP)
                             s.ball = p.pos:add(n:scale(contact))
                             s.ball_spin = 0
+                            -- The ricochet ends the pass: nobody is receiving this
+                            -- ball any more (a keeper's save reflexes included).
+                            for _, q in ipairs(s.players) do
+                                q.receive_timer = 0
+                            end
                             break
                         end
                     end
@@ -2706,107 +3095,16 @@ local function update_ball(s, dt, input)
         return
     end
 
-    -- Aerial play: a ball at head height can be met first-time. The human
-    -- strikes with the act button; an AI attacker strikes at goal when in
-    -- range, an AI defender in its own third heads clear. Headers are safe;
-    -- volleys (lower contact) hit harder but can be SKIED into the cage
-    -- ceiling — the seeded roll keeps the sim reproducible.
-    -- Only a DESCENDING ball is attackable in the air (you meet a cross, you
-    -- don't chase a rising clearance) — this also breaks header ping-pong.
-    if
-        s.ball_z > GROUND_GRAB_HEIGHT
-        and s.ball_z <= HEADER_MAX_Z
-        and s.ball_vz < 0
-        and s.pickup_cd == 0
-    then
-        local striker
-        for i, p in ipairs(s.players) do
-            if not p.is_keeper and p.header_cd <= 0 then
-                if is_human_player(s, i) then
-                    -- Going for it = pressing OR holding the aerial button as the
-                    -- ball drops in. A generous assist reach means "attack the
-                    -- ball" connects without frame-perfect positioning.
-                    local going = input.dash or input.jockey
-                    local reach = AERIAL_REACH
-                        + TUNE.AERIAL_ASSIST
-                        + species.jump_reach(p.owned_verb)
-                    if going and p.pos:dist(s.ball) <= reach then
-                        striker = i
-                        break
-                    end
-                elseif p.pos:dist(s.ball) <= AERIAL_REACH + species.jump_reach(p.owned_verb) then
-                    local g = attack_goal(s, p.team)
-                    local gl = Vec2.new((p.team == "home") and g.x or (g.x + g.w), g.y + g.h / 2)
-                    local own_third = (p.team == "home") and (p.pos.x < s.field.w * 0.33)
-                        or (p.team == "away" and p.pos.x > s.field.w * 0.67)
-                    if p.pos:dist(gl) <= TUNE.AI_HEADER_RANGE or own_third then
-                        striker = i
-                        break
-                    end
-                end
-            end
-        end
-        if striker then
-            local p = s.players[striker]
-            p.header_cd = HEADER_CD
-            local own_third = (p.team == "home") and (p.pos.x < s.field.w * 0.33)
-                or (p.team == "away" and p.pos.x > s.field.w * 0.67)
-            if own_third and not is_human_player(s, striker) then
-                -- Defensive header: clear it high upfield, away from the middle.
-                s.events[#s.events + 1] =
-                    { kind = "header", x = s.ball.x, y = s.ball.y, player = p.id }
-                local dir = Vec2.new(
-                    (p.team == "home") and 1 or -1,
-                    (s.ball.y < s.field.h / 2) and -0.3 or 0.3
-                ):normalized()
-                s.ball_vel = dir:scale(CLEAR_HEADER_SPEED)
-                s.ball_vz = 260
-                s.ball_spin = 0
-                s.pickup_cd = RELEASE_CD * 0.6
-            else
-                -- Strike at goal: header above the waist, volley below. The
-                -- human holding a direction strikes THAT way instead (a
-                -- directed header/flick — pass it down, nod it wide, anything).
-                local target
-                if is_human_player(s, striker) and (input.move.x ~= 0 or input.move.y ~= 0) then
-                    target = p.pos:add(input.move:normalized():scale(240))
-                else
-                    local keeper = team_keeper(s, p.team == "home" and "away" or "home")
-                    local g = attack_goal(s, p.team)
-                    local vbias = 0.85
-                    if keeper then
-                        vbias = (keeper.pos.y < g.y + g.h / 2) and 0.85 or -0.85
-                    end
-                    target = shot_target(s, p, vbias)
-                end
-                if s.ball_z <= VOLLEY_MAX_Z then
-                    s.events[#s.events + 1] =
-                        { kind = "volley", x = s.ball.x, y = s.ball.y, player = p.id }
-                    local roll
-                    s.rng, roll = rng.roll(s.rng)
-                    -- A cleaner striker (technique) skies the volley less often.
-                    local sky_p = TUNE.VOLLEY_SKY_P * (1 - VOLLEY_SKY_SKILL * p.dribble)
-                    if roll < sky_p then
-                        -- Skied! Blasted over everything; the cage returns it.
-                        s.ball_vel = target:sub(p.pos):normalized():scale(p.shot_speed * 0.5)
-                        s.ball_vz = 520
-                    else
-                        s.ball_vel =
-                            target:sub(p.pos):normalized():scale(p.shot_speed * VOLLEY_SPEED)
-                        s.ball_vz = 40
-                    end
-                else
-                    s.events[#s.events + 1] =
-                        { kind = "header", x = s.ball.x, y = s.ball.y, player = p.id }
-                    s.ball_vel =
-                        target:sub(p.pos):normalized():scale(p.shot_speed * TUNE.HEADER_SPEED)
-                    s.ball_vz = -40 -- headed down toward the goal
-                end
-                s.ball_spin = 0
-                s.pickup_cd = RELEASE_CD * 0.6
-            end
-        end
-    end
+    -- Descending high-ball reception and first-time strikes. Geometry,
+    -- difficulty, and seeded quality live in sim.aerial.
+    aerial.resolve_play(s, input, {
+        ground_grab_height = GROUND_GRAB_HEIGHT,
+        stick_ahead = STICK_AHEAD,
+        gravity = GRAVITY,
+        release_cd = RELEASE_CD,
+        clear_header_speed = CLEAR_HEADER_SPEED,
+        volley_speed = VOLLEY_SPEED,
+    })
 
     -- Collection. A keeper has PRIORITY in its own box: it claims any loose ball it
     -- can reach there (with its hands), beating outfielders even if they are a touch
@@ -2819,6 +3117,7 @@ local function update_ball(s, dt, input)
             if
                 p.is_keeper
                 and not p.save_pending -- a committed save resolves on contact instead
+                and p.receive_timer <= 0 -- a teammate's pass is taken with the FEET below
                 and in_claim_zone(s, p)
                 and s.ball_z <= KEEPER_AIR_GRAB
                 and p.pos:dist(s.ball) <= KEEPER_CLAIM_DIST + species.jump_reach(p.owned_verb)
@@ -2830,9 +3129,13 @@ local function update_ball(s, dt, input)
 
         if not best then
             for i, p in ipairs(s.players) do
-                local reach = p.is_keeper and KEEPER_DIST or POSSESS_DIST
+                -- A keeper meeting a teammate's pass traps it with an outfield
+                -- reach; hand grabs use the tighter keeper radius.
+                local reach = (p.is_keeper and p.receive_timer <= 0) and KEEPER_DIST or POSSESS_DIST
                 -- A ball above head height flies over everyone — not collectable.
-                local eligible = (p.is_keeper or speed < POSSESS_MAX_SPEED)
+                -- The DESIGNATED receiver traps a driven pass at full pace (the
+                -- first touch is theirs); everyone else needs it slowed down.
+                local eligible = (p.is_keeper or p.receive_timer > 0 or speed < POSSESS_MAX_SPEED)
                     and s.ball_z <= GROUND_GRAB_HEIGHT
                 local d = p.pos:dist(s.ball)
                 if eligible and d <= reach and (not best_dist or d < best_dist) then
@@ -2844,7 +3147,7 @@ local function update_ball(s, dt, input)
 
         if best then
             local bp = s.players[best]
-            if bp.is_keeper then
+            if bp.is_keeper and bp.receive_timer <= 0 then
                 -- A keeper gather: claim event + gather pose, then it surveys/holds.
                 -- Snap the ball into its hands so a claim right on the line can't
                 -- still register as a goal this frame.
@@ -2853,12 +3156,19 @@ local function update_ball(s, dt, input)
                 s.ball = keeper_hold_pos(s, bp)
                 bp.grab_timer = KEEPER_GRAB_POSE
                 bp.hold_timer = KEEPER_HOLD
-            elseif speed > 1 then
-                -- A moving ball trapped by an outfielder reads as a "touch";
-                -- an AI needs a beat of control before it can pass on.
-                s.events[#s.events + 1] =
-                    { kind = "touch", x = s.ball.x, y = s.ball.y, player = bp.id }
-                bp.settle_timer = TUNE.CARRIER_SETTLE
+                bp.feet_ball = false
+            else
+                -- A back-pass rule of sorts: a keeper receiving a teammate's
+                -- deliberate pass takes it with the FEET — it can dribble, pass,
+                -- or punt, and is tackleable like any carrier.
+                bp.feet_ball = bp.is_keeper
+                if speed > 1 then
+                    -- A moving ball trapped by a player reads as a "touch";
+                    -- an AI needs a beat of control before it can pass on.
+                    s.events[#s.events + 1] =
+                        { kind = "touch", x = s.ball.x, y = s.ball.y, player = bp.id }
+                    bp.settle_timer = TUNE.CARRIER_SETTLE
+                end
             end
             s.owner = best
             s.ball_vel = Vec2.new(0, 0)
@@ -2924,6 +3234,9 @@ function match.step(s, dt, input)
     if s.block_grace > 0 then
         s.block_grace = math.max(0, s.block_grace - dt)
     end
+    if s.aerial_lock > 0 then
+        s.aerial_lock = math.max(0, s.aerial_lock - dt)
+    end
     if s.kickoff_hold > 0 then
         s.kickoff_hold = math.max(0, s.kickoff_hold - dt)
     end
@@ -2984,6 +3297,17 @@ function match.step(s, dt, input)
         if p.header_cd > 0 then
             p.header_cd = math.max(0, p.header_cd - dt)
         end
+        if p.aerial_timer > 0 then
+            p.aerial_timer = math.max(0, p.aerial_timer - dt)
+            if p.aerial_timer == 0 then
+                p.aerial_style = nil
+                p.aerial_outcome = nil
+                p.aerial_jump = 0
+            end
+        end
+        if p.aerial_recovery > 0 then
+            p.aerial_recovery = math.max(0, p.aerial_recovery - dt)
+        end
         if p.windup_timer > 0 then
             p.windup_timer = math.max(0, p.windup_timer - dt)
         end
@@ -3002,6 +3326,15 @@ function match.step(s, dt, input)
     move_players(s, dt, input)
     attempt_steals(s)
     update_ball(s, dt, input)
+
+    -- A gained ball resolves any in-flight pass: nobody is "running onto" it
+    -- any more. In particular an INTERCEPTED back-pass ends the keeper's
+    -- receive window, so its save reflexes come straight back online.
+    if s.owner and s.owner ~= prev_owner then
+        for _, p in ipairs(s.players) do
+            p.receive_timer = 0
+        end
+    end
 
     -- Auto-switch on turnover: the moment the opponent wins the ball, hand
     -- control to the home outfielder best placed to defend (nearest the ball)
@@ -3041,7 +3374,11 @@ function match.step(s, dt, input)
         if s.owner and s.players[s.owner].team == "home" and s.players[s.owner].is_keeper then
             if s.owner ~= prev_owner then
                 s.controlled = s.owner
-                s.players[s.owner].hold_timer = TUNE.KEEPER_HOLD_HUMAN
+                -- The six-second clock only runs on a ball held in the HANDS;
+                -- a back-pass trapped at the feet plays on at your own pace.
+                if not s.players[s.owner].feet_ball then
+                    s.players[s.owner].hold_timer = TUNE.KEEPER_HOLD_HUMAN
+                end
             end
         elseif s.players[s.controlled].is_keeper then
             s.controlled = best_defender(s)

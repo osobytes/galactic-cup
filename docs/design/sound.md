@@ -1,12 +1,10 @@
-# Design: Sound (T4)
-
-**Owner:** Mr. Pink · **Branch scope:** `game/audio.lua` (new), `game/screens/match.lua`, `spec/render/draw_smoke_spec.lua` (or a new spec file), `docs/controls.md`
+# Design: Sound
 
 ## Why
 
-The game is silent — no kick, bounce, whistle, crowd, or goal. Audio is half of
-game feel and we already emit a sim event for every discrete action. Gap #12 in
-`docs/gameplay-gaps.md` (cheapest big win).
+Audio is half of game feel, and the simulation already emits an event for
+every discrete action. Synthesized match sound is one of the cheapest
+high-impact presentation improvements.
 
 ## Player-facing behavior
 
@@ -54,7 +52,3 @@ game feel and we already emit a sim event for every discrete action. Gap #12 in
 2. Every event kind in `MatchEvent` maps to a sound; goal + kickoff covered
    via score/state edges.
 3. Mute toggle works and is documented.
-
-## Done signal
-
-Output exactly: `Mr. Pink ✓ — <one-line summary>`

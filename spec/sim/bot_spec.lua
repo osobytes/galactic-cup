@@ -67,6 +67,55 @@ t.describe("bot carrier decisions", function()
         t.is_true(first.pass, "the queued pass fires")
         t.is_true(not second.pass, "and does not repeat")
     end)
+
+    t.it("jukes a nearby defender who has committed", function()
+        local s = new_match()
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(300, 270)
+        s.ball = me.pos:add(Vec2.new(18, 0))
+        for _, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                p.pos = Vec2.new(340, 270)
+                p.tackle_timer = 0.2
+                break
+            end
+        end
+        local dodged = false
+        for seed = 1, 50 do
+            local input = bot.input(bot.new({ seed = seed }), s, 1 / 60)
+            dodged = dodged or input.dodge
+        end
+        t.is_true(dodged, "the proxy sometimes represents the player's reactive juke")
+    end)
+
+    t.it("charges a deliberate long pass", function()
+        local s = new_match()
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(180, 270)
+        s.ball = me.pos:add(Vec2.new(18, 0))
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and i ~= s.controlled and not p.is_keeper then
+                p.pos = Vec2.new(520, 100 + i * 40)
+            elseif p.team == "away" and not p.is_keeper then
+                p.pos = Vec2.new(230, 270)
+            end
+        end
+        local b = bot.new({ seed = 2 })
+        bot.input(b, s, 1 / 60) -- decision queues the charged pass
+        local held = bot.input(b, s, 1 / 60)
+        t.is_true(held.pass_held, "long options use the same range charge as a player")
+    end)
+
+    t.it("requests an aerial strike under a dropping ball", function()
+        local s = new_match()
+        local me = s.players[s.controlled]
+        s.owner = nil
+        s.ball = me.pos:add(Vec2.new(20, 0))
+        s.ball_z = 40
+        s.ball_vz = -100
+        local input = bot.input(bot.new({ seed = 3 }), s, 1 / 60)
+        t.is_true(input.aerial_strike, "the proxy can represent first-time aerial intent")
+    end)
 end)
 
 t.describe("bot determinism", function()

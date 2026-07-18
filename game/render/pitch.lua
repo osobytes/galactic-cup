@@ -3,9 +3,12 @@
 -- (Bloom/neon post-processing is a later pass; this is the geometry layer.)
 
 local camera = require("game.render.camera")
+local arena_render = require("game.render.arena")
 local player_renderer = require("game.render.player_renderer")
+local identity = require("game.presentation.identity")
 local view_state = require("game.render.view_state")
 local effects = require("game.render.effects")
+local arenas = require("data.arenas")
 local sim_match = require("sim.match") -- CROSSBAR_H: the goal frame height
 
 local pitch = {}
@@ -146,23 +149,22 @@ end
 -- Render the whole pitch + entities for one frame.
 ---@param s MatchState
 ---@param vp { w: number, h: number }
----@param opts { home_color: number[], away_color: number[] }
+---@param opts { home_color: number[], away_color: number[], arena: ArenaData?, arena_pulse: number? }
 function pitch.draw(s, vp, opts)
     local field = s.field
+    local arena = opts.arena or arenas.helios_crown
     local function project(wx, wy)
         return camera.project(wx, wy, field, vp)
     end
 
-    -- Space backdrop.
-    love.graphics.setColor(0.03, 0.04, 0.10)
-    love.graphics.rectangle("fill", 0, 0, vp.w, vp.h)
+    arena_render.draw_backdrop(arena, vp)
 
     -- Pitch surface (projected trapezoid).
     local ax, ay = project(0, 0)
     local bx, by = project(field.w, 0)
     local cx, cy = project(field.w, field.h)
     local dx, dy = project(0, field.h)
-    set({ 0.06, 0.15, 0.20 })
+    set(arena.floor_color)
     love.graphics.polygon("fill", ax, ay, bx, by, cx, cy, dx, dy)
 
     -- Floor luminance (soft additive glow toward the centre).
@@ -176,9 +178,19 @@ function pitch.draw(s, vp, opts)
 
     -- Pitch outline (bright neon border).
     love.graphics.setLineWidth(2)
-    set({ 0.35, 0.75, 1.0 }, 0.9)
+    set(arena.rail_color, 0.9)
     love.graphics.polygon("line", ax, ay, bx, by, cx, cy, dx, dy)
     love.graphics.setLineWidth(1)
+    arena_render.draw_frame(arena, {
+        ax = ax,
+        ay = ay,
+        bx = bx,
+        by = by,
+        cx = cx,
+        cy = cy,
+        dx = dx,
+        dy = dy,
+    }, opts.arena_pulse)
 
     -- Real goals standing behind the goal line, outside the field: side/back/
     -- roof netting (screen-space mesh shader) inside a frame of two posts and
@@ -282,13 +294,27 @@ function pitch.draw(s, vp, opts)
         return a.depth < b.depth
     end)
 
-    local keeper_holds = s.owner ~= nil and s.players[s.owner].is_keeper
+    -- Held in the HANDS only: a keeper with a back-pass at its feet dribbles a
+    -- ground ball like anyone else.
+    local keeper_holds = s.owner ~= nil
+        and s.players[s.owner].is_keeper
+        and not s.players[s.owner].feet_ball
     for _, it in ipairs(items) do
         if it.kind == "player" then
             local p = it.p
             local sx, sy, scale = project(p.pos.x, p.pos.y)
             local r = p.radius * scale
             local color = (p.team == "home") and opts.home_color or opts.away_color
+            local presentation =
+                assert(identity.for_player(p.id), "missing pitch identity for " .. p.id)
+            local aerial_duration = 0.22
+            if p.aerial_style == "bicycle" then
+                aerial_duration = 0.6
+            elseif (p.aerial_jump or 0) > 0 then
+                aerial_duration = 0.35
+            elseif p.aerial_style == "leg_control" or p.aerial_style == "chest_control" then
+                aerial_duration = 0.18
+            end
             player_renderer.draw(sx, sy, r, color, view_state.get(p.id), {
                 facing = p.facing,
                 is_keeper = p.is_keeper,
@@ -299,11 +325,20 @@ function pitch.draw(s, vp, opts)
                 dive = (p.dive_timer > 0) and math.min(1, p.dive_timer / 0.3) or 0,
                 dive_dir = p.dive_dir,
                 -- Keeper holding the ball: render it cradled in the hands (below).
-                holding = (it.idx == s.owner and p.is_keeper),
+                holding = (it.idx == s.owner and p.is_keeper and not p.feet_ball),
                 grab = (p.grab_timer > 0) and math.min(1, p.grab_timer / 0.25) or 0,
                 throw = (p.throw_timer > 0) and math.min(1, p.throw_timer / 0.25) or 0,
                 -- Wind-up back-swing: 0 = no windup, 1 = just committed.
                 windup = (p.windup_timer > 0) and (p.windup_timer / 0.15) or 0,
+                aerial = ((p.aerial_timer or 0) > 0)
+                        and math.min(1, p.aerial_timer / aerial_duration)
+                    or 0,
+                aerial_style = p.aerial_style,
+                aerial_outcome = p.aerial_outcome,
+                aerial_jump = p.aerial_jump or 0,
+                species_shape = presentation.shape,
+                species_color = presentation.palette,
+                team = p.team,
             })
         elseif not keeper_holds then
             -- Loose / dribbled ball. (A keeper-held ball is drawn in its hands by the
@@ -371,11 +406,11 @@ function pitch.draw(s, vp, opts)
     -- Charge meter under the controlled player (soccer-game power bar):
     -- warm while charging a shot/punt, cool while charging a pass range.
     local cp = s.players[s.controlled]
-    local amt, ccol
+    local amt, ccol, label
     if s.charge > 0.02 then
-        amt, ccol = s.charge, { 1, 0.72, 0.3 }
+        amt, ccol, label = s.charge, { 1, 0.72, 0.3 }, "SHOT"
     elseif s.pass_charge > 0.02 then
-        amt, ccol = s.pass_charge, { 0.45, 0.85, 1 }
+        amt, ccol, label = s.pass_charge, { 0.45, 0.85, 1 }, "PASS"
     end
     if amt then
         local sx, sy, scale = project(cp.pos.x, cp.pos.y)
@@ -387,6 +422,12 @@ function pitch.draw(s, vp, opts)
         love.graphics.rectangle("fill", sx - w / 2, y0, w * amt, h)
         love.graphics.setColor(1, 1, 1, 0.35)
         love.graphics.rectangle("line", sx - w / 2, y0, w, h)
+        for i = 1, 4 do
+            local tick_x = sx - w / 2 + w * i / 5
+            love.graphics.line(tick_x, y0, tick_x, y0 + h)
+        end
+        love.graphics.setColor(ccol[1], ccol[2], ccol[3], 0.95)
+        love.graphics.printf(label, sx - w / 2, y0 + h + 1, w, "center")
     end
 
     -- Flashes/sparks ride on top of everything.

@@ -1,12 +1,10 @@
-# Design: Pass-target preview (T3)
-
-**Owner:** Mr. Blonde · **Branch scope:** `sim/match.lua`, `game/render/pitch.lua`, `spec/sim/match_spec.lua`, `spec/render/draw_smoke_spec.lua`
+# Design: Pass-target preview
 
 ## Why
 
 The receiver of a pass is chosen invisibly at release, so every pass is an act
 of faith — most of the reported "aim/meter mistrust". FIFA-style: show WHO will
-receive while the pass button is held. Gap #3 in `docs/gameplay-gaps.md`.
+receive while the pass button is held.
 
 ## Player-facing behavior
 
@@ -53,7 +51,3 @@ receive while the pass button is held. Gap #3 in `docs/gameplay-gaps.md`.
 2. Spec: `pass_target` is nil when not charging.
 3. Existing pass/throw specs unchanged and green (refactor is behavior-neutral).
 4. `./scripts/check.sh` green.
-
-## Done signal
-
-Output exactly: `Mr. Blonde ✓ — <one-line summary>`

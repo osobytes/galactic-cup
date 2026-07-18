@@ -14,7 +14,8 @@
 ---@field name string
 ---@field planet string
 ---@field position Position
----@field species string
+---@field species string Mechanical species; remains neutral until species gameplay ships.
+---@field presentation_species string? Showcase identity used by non-match UI.
 ---@field stats StatBlock
 ---@field trait string
 
@@ -26,6 +27,7 @@ return {
         planet = "Kairon-9",
         position = "forward",
         species = "neutral",
+        presentation_species = "voltari",
         stats = { pace = 8, strength = 6, technique = 7, stamina = 5, mental = 2 },
         trait = "comet_first_touch",
     },
@@ -35,6 +37,7 @@ return {
         planet = "Vega Prime",
         position = "forward",
         species = "neutral",
+        presentation_species = "myceloid",
         stats = { pace = 7, strength = 5, technique = 8, stamina = 6, mental = 3 },
         trait = "nebula_vision",
     },
@@ -44,6 +47,7 @@ return {
         planet = "Titan Reach",
         position = "midfielder",
         species = "neutral",
+        presentation_species = "terran",
         stats = { pace = 5, strength = 7, technique = 6, stamina = 7, mental = 5 },
         trait = "quantum_pass",
     },
@@ -53,6 +57,7 @@ return {
         planet = "Andromeda Fringe",
         position = "midfielder",
         species = "neutral",
+        presentation_species = "voltari",
         stats = { pace = 6, strength = 4, technique = 7, stamina = 6, mental = 6 },
         trait = "solar_flare_sprint",
     },
@@ -62,6 +67,7 @@ return {
         planet = "Orion Belt",
         position = "defender",
         species = "neutral",
+        presentation_species = "gravling",
         stats = { pace = 4, strength = 8, technique = 3, stamina = 7, mental = 8 },
         trait = "meteor_tackle",
     },
@@ -71,6 +77,7 @@ return {
         planet = "Europa Deep",
         position = "defender",
         species = "neutral",
+        presentation_species = "gravling",
         stats = { pace = 5, strength = 6, technique = 4, stamina = 6, mental = 7 },
         trait = "gravity_anchor",
     },
@@ -80,6 +87,7 @@ return {
         planet = "Kairon-9",
         position = "keeper",
         species = "neutral",
+        presentation_species = "terran",
         stats = { pace = 4, strength = 5, technique = 4, stamina = 8, mental = 8 },
         trait = "zero_g_reflex",
     },
@@ -89,6 +97,7 @@ return {
         planet = "Mars Colony",
         position = "midfielder",
         species = "neutral",
+        presentation_species = "myceloid",
         stats = { pace = 6, strength = 6, technique = 6, stamina = 5, mental = 5 },
         trait = "comet_first_touch",
     },
@@ -100,6 +109,7 @@ return {
         planet = "Orion Belt",
         position = "keeper",
         species = "neutral",
+        presentation_species = "gravling",
         stats = { pace = 4, strength = 6, technique = 3, stamina = 8, mental = 8 },
         trait = "gravity_anchor",
     },
@@ -109,6 +119,7 @@ return {
         planet = "Orion Belt",
         position = "defender",
         species = "neutral",
+        presentation_species = "gravling",
         stats = { pace = 4, strength = 9, technique = 2, stamina = 7, mental = 8 },
         trait = "meteor_tackle",
     },
@@ -118,6 +129,7 @@ return {
         planet = "Ceres Outpost",
         position = "midfielder",
         species = "neutral",
+        presentation_species = "terran",
         stats = { pace = 5, strength = 7, technique = 4, stamina = 7, mental = 6 },
         trait = "meteor_tackle",
     },
@@ -127,6 +139,7 @@ return {
         planet = "Orion Belt",
         position = "forward",
         species = "neutral",
+        presentation_species = "gravling",
         stats = { pace = 6, strength = 8, technique = 4, stamina = 6, mental = 3 },
         trait = "comet_first_touch",
     },
@@ -136,6 +149,7 @@ return {
         planet = "Ceres Outpost",
         position = "forward",
         species = "neutral",
+        presentation_species = "voltari",
         stats = { pace = 7, strength = 7, technique = 5, stamina = 5, mental = 3 },
         trait = "solar_flare_sprint",
     },

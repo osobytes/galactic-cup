@@ -2,13 +2,17 @@
 -- `sim.match`, and renders the result. Drawing lives ONLY here (AGENTS.md §2).
 
 local sim_match = require("sim.match")
+local arenas = require("data.arenas")
 local teams = require("data.teams")
 local tactics = require("data.tactics")
 local pitch = require("game.render.pitch")
 local bloom = require("game.render.bloom")
 local effects = require("game.render.effects")
+local match_hud_render = require("game.render.match_hud")
 local view_state = require("game.render.view_state")
 local audio = require("game.audio")
+local match_hud = require("game.match_hud")
+local onboarding = require("game.match_onboarding")
 local tuning_panel = require("game.ui.tuning_panel")
 local replay = require("game.render.replay")
 local Vec2 = require("core.vec2")
@@ -16,13 +20,28 @@ local Vec2 = require("core.vec2")
 local FIELD_W = 960
 local FIELD_H = 540
 
+---@class MatchScreenOptions
+---@field formation string?
+---@field tactic string?
+---@field home TeamData?
+---@field away TeamData?
+---@field seed integer?
+---@field arena_id string?
+---@field show_onboarding boolean?
+---@field profile "product"|"playtest"?
+
 ---@class MatchScreen : Screen
 ---@field state MatchState
 ---@field home_color number[]
 ---@field away_color number[]
 ---@field home_name string
 ---@field away_name string
----@field _opts { formation: string?, tactic: string? }
+---@field arena ArenaData
+---@field _opts MatchScreenOptions
+---@field _profile "product"|"playtest"
+---@field _onboarding MatchOnboardingState
+---@field _kickoff_banner number
+---@field _last_scoring_team "home"|"away"?
 ---@field _shoot_held_prev boolean
 ---@field _pass_held_prev boolean
 ---@field _lob_latch boolean
@@ -34,18 +53,22 @@ local FIELD_H = 540
 local Match = {}
 Match.__index = Match
 
----@param opts { formation: string?, tactic: string? }?
+---@param opts MatchScreenOptions?
 ---@return MatchScreen
 function Match.new(opts)
     local self = setmetatable({}, Match)
     self._opts = opts or {}
-    if love.window then
+    self._profile = self._opts.profile or "playtest"
+    if self._profile == "playtest" and love.window then
         tuning_panel.load() -- playtest tuning persists across runs (F1 panel)
     end
-    self.home_color = teams.nebula.color
-    self.away_color = teams.orion.color
-    self.home_name = teams.nebula.name
-    self.away_name = teams.orion.name
+    local home = self._opts.home or teams.nebula
+    local away = self._opts.away or teams.orion
+    self.home_color = home.color
+    self.away_color = away.color
+    self.home_name = home.name
+    self.away_name = away.name
+    self.arena = assert(arenas[self._opts.arena_id or "helios_crown"], "unknown match arena")
     self:restart()
     return self
 end
@@ -54,11 +77,12 @@ end
 -- Used at construction and for the full-time rematch.
 function Match:restart()
     self.state = sim_match.new({
-        home = teams.nebula,
-        away = teams.orion,
+        home = self._opts.home or teams.nebula,
+        away = self._opts.away or teams.orion,
         field = { w = FIELD_W, h = FIELD_H },
         home_formation = self._opts.formation,
         tactic = self._opts.tactic and tactics[self._opts.tactic] or nil,
+        seed = self._opts.seed,
     })
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     self._shoot_held_prev = false
@@ -67,6 +91,9 @@ function Match:restart()
     self._space_held_prev = false
     self._last_score = 0
     self._last_home = 0
+    self._last_scoring_team = nil
+    self._kickoff_banner = 1.15
+    self._onboarding = onboarding.new(self._opts.show_onboarding == true)
     self._replay_state = nil
     replay.reset()
     view_state.reset()
@@ -77,23 +104,45 @@ end
 
 ---@param evt InputEvent
 function Match:event(evt)
+    if evt.kind == "action" then
+        if self.state.finished then
+            if self._profile == "playtest" and evt.action == "confirm" then
+                self:restart()
+            end
+            return
+        end
+        if replay.active() then
+            if evt.action == "confirm" or evt.action == "pass_switch" then
+                replay.stop()
+                effects.reset()
+            end
+            return
+        end
+        local carrying = self.state.owner == self.state.controlled
+        if evt.action == "pass_switch" and not carrying then
+            self._switch = true
+        elseif evt.action == "juke" then
+            self._dodge = true
+        end
+        return
+    end
     if evt.kind ~= "key" then
         return
     end
     -- After full time only the rematch keys act; match inputs stop buffering.
     if self.state.finished then
-        if evt.key == "r" or evt.key == "return" then
+        if self._profile == "playtest" and (evt.key == "r" or evt.key == "return") then
             self:restart()
         end
         return
     end
     -- Tuning panel (playtest): F1 toggles; while open it owns the keyboard
     -- and the match is paused (see update).
-    if evt.key == "f1" then
+    if self._profile == "playtest" and evt.key == "f1" then
         tuning_panel.toggle()
         return
     end
-    if tuning_panel.open then
+    if self._profile == "playtest" and tuning_panel.open then
         tuning_panel.key(evt.key, love.keyboard.isDown("lshift", "rshift"))
         return
     end
@@ -118,11 +167,27 @@ function Match:event(evt)
         end
     elseif evt.key == "c" then
         self._dodge = true
-    elseif evt.key == "b" then
+    elseif self._profile == "playtest" and evt.key == "b" then
         bloom.config.enabled = not bloom.config.enabled
     elseif evt.key == "m" then
         audio.toggle_mute()
     end
+end
+
+---@return love.Joystick?
+local function active_gamepad()
+    if not love.joystick or not love.joystick.getJoysticks then
+        return nil
+    end
+    local joysticks = love.joystick.getJoysticks()
+    return joysticks[1]
+end
+
+---@param button love.GamepadButton
+---@return boolean
+local function gamepad_down(button)
+    local joystick = active_gamepad()
+    return joystick ~= nil and joystick:isGamepadDown(button)
 end
 
 ---@return Vec2
@@ -140,12 +205,35 @@ local function read_move_axis()
     if love.keyboard.isDown("down", "s") then
         y = y + 1
     end
+    local joystick = active_gamepad()
+    if joystick then
+        local gx = joystick:getGamepadAxis("leftx")
+        local gy = joystick:getGamepadAxis("lefty")
+        if math.abs(gx) >= 0.2 then
+            x = x + gx
+        end
+        if math.abs(gy) >= 0.2 then
+            y = y + gy
+        end
+        if joystick:isGamepadDown("dpleft") then
+            x = x - 1
+        end
+        if joystick:isGamepadDown("dpright") then
+            x = x + 1
+        end
+        if joystick:isGamepadDown("dpup") then
+            y = y - 1
+        end
+        if joystick:isGamepadDown("dpdown") then
+            y = y + 1
+        end
+    end
     return Vec2.new(x, y)
 end
 
 ---@param dt number
 function Match:update(dt)
-    if tuning_panel.open then
+    if self._profile == "playtest" and tuning_panel.open then
         return -- paused for tuning: tweak, close, resume
     end
     -- Slow-motion goal replay: the sim freezes while the buffer plays back
@@ -158,16 +246,23 @@ function Match:update(dt)
         else
             effects.reset() -- replay over: clean slate for the live kickoff
         end
+        audio.tick(dt)
         return
     end
+    if self.state.finished then
+        audio.update(self.state, dt)
+        return
+    end
+    self._kickoff_banner = math.max(0, self._kickoff_banner - dt)
     replay.record(self.state) -- pre-step: the goal flight stays in the buffer
     -- Space reads as "shoot" while carrying (hold to charge, release to fire);
     -- off the ball it is "jockey" while held and fires the poke on release
     -- — mirroring the on-ball hold/release pattern so muscle memory transfers.
     local carrying = self.state.owner == self.state.controlled
-    local held = carrying and love.keyboard.isDown("space")
-    local space_down_offball = (not carrying) and love.keyboard.isDown("space")
-    local k_held = carrying and love.keyboard.isDown("k")
+    local shoot_down = love.keyboard.isDown("space") or gamepad_down("a")
+    local held = carrying and shoot_down
+    local space_down_offball = (not carrying) and shoot_down
+    local k_held = carrying and (love.keyboard.isDown("k") or gamepad_down("x"))
     -- Jockey release: Space was held last frame off the ball and is now up.
     if self._space_held_prev and not space_down_offball and not carrying then
         self._dash = true
@@ -175,7 +270,7 @@ function Match:update(dt)
     -- L is a modifier, and fingers naturally lift it a frame before the action
     -- key on release. LATCH it across the hold so "L + K/Space" always lofts,
     -- even when L comes up first.
-    local l_down = love.keyboard.isDown("l")
+    local l_down = love.keyboard.isDown("l") or gamepad_down("y")
     local firing = (self._shoot_held_prev and not held) or (self._pass_held_prev and not k_held)
     local lob = l_down or (firing and self._lob_latch) or false
     if held or k_held then
@@ -183,9 +278,10 @@ function Match:update(dt)
     else
         self._lob_latch = false
     end
+    local move = read_move_axis()
     ---@type MatchInput
     local input = {
-        move = read_move_axis(),
+        move = move,
         shoot = self._shoot_held_prev and not held, -- fire on release
         shoot_held = held,
         pass = self._pass_held_prev and not k_held, -- pass fires on release too
@@ -194,8 +290,10 @@ function Match:update(dt)
         dash = self._dash,
         dodge = self._dodge,
         lob = lob,
-        sprint = love.keyboard.isDown("lshift", "rshift"),
+        sprint = love.keyboard.isDown("lshift", "rshift") or gamepad_down("leftshoulder"),
         jockey = space_down_offball, -- hold Space off the ball: slow shadow stance
+        aerial_strike = space_down_offball,
+        aerial_acrobatic = space_down_offball and l_down,
     }
     self._shoot_held_prev = held
     self._pass_held_prev = k_held
@@ -205,12 +303,26 @@ function Match:update(dt)
     view_state.update(self.state.players, dt)
     effects.update(self.state, dt) -- juice layer: event bursts + ball trail
     audio.update(self.state, dt) -- synthesized SFX from event queue
+    local controlled = self.state.players[self.state.controlled]
+    local owner = self.state.owner and self.state.players[self.state.owner] or nil
+    self._onboarding = onboarding.update(self._onboarding, {
+        carrying = self.state.owner == self.state.controlled,
+        defending = owner ~= nil and owner.team == "away",
+        keeper_holding = self.state.owner == self.state.controlled
+            and controlled.is_keeper
+            and not controlled.feet_ball,
+        moved = move:length() > 0.2 or input.sprint,
+        shot = input.shoot or input.shoot_held,
+        passed = input.pass or input.pass_held,
+        defended = input.jockey or input.dash or input.switch,
+    }, dt)
 
     -- A goal just went in (score edge, match still live): celebrate, then roll
     -- the replay. Which side scored picks the celebrating team.
     local sh, sa = self.state.score.home, self.state.score.away
     if sh + sa > self._last_score and not self.state.finished then
         local scoring_team = sh > self._last_home and "home" or "away"
+        self._last_scoring_team = scoring_team
         if replay.start(scoring_team) then
             effects.reset() -- the scene jumps back in time; drop live particles
         end
@@ -222,60 +334,40 @@ end
 ---@param vp { w: number, h: number }
 function Match:draw_frame(s, vp)
     -- World: 2.5D perspective pitch + billboard players.
-    pitch.draw(s, vp, { home_color = self.home_color, away_color = self.away_color })
+    pitch.draw(s, vp, {
+        home_color = self.home_color,
+        away_color = self.away_color,
+        arena = self.arena,
+        arena_pulse = math.min(1, self._kickoff_banner),
+    })
 
-    -- HUD (screen space, unprojected).
-    love.graphics.setColor(1, 1, 1)
-    local mins = math.floor(s.time_left / 60)
-    local secs = math.floor(s.time_left % 60)
-    love.graphics.printf(
-        ("%s  %d - %d  %s     %d:%02d"):format(
-            self.home_name,
-            s.score.home,
-            s.score.away,
-            self.away_name,
-            mins,
-            secs
-        ),
-        0,
-        16,
-        vp.w,
-        "center"
-    )
-    love.graphics.print(
-        "Move: WASD/Arrows    Sprint: Shift (hold)    Space: Shoot / Tackle    K: Pass / Switch",
-        16,
-        vp.h - 44
-    )
-    love.graphics.print(
-        "Hold Space/K to charge power & range    L: Lob/Cross    C: Juke    Hold Space under a cross: Head/Volley    Esc: Quit",
-        16,
-        vp.h - 26
-    )
-
-    -- Sprint meter: only drawn while it's not full, so the HUD stays quiet.
-    local me = s.players[s.controlled]
-    if me.sprint_meter < 1 then
-        love.graphics.setColor(0, 0, 0, 0.5)
-        love.graphics.rectangle("fill", 16, vp.h - 58, 120, 6)
-        love.graphics.setColor(0.4, 0.9, 1, 0.9)
-        love.graphics.rectangle("fill", 16, vp.h - 58, 120 * me.sprint_meter, 6)
+    ---@type BroadcastPhase?
+    local phase = nil
+    if self.state.finished then
+        phase = "full_time"
+    elseif replay.celebrating() then
+        phase = "goal"
+    elseif replay.active() then
+        phase = "replay"
+    elseif self._kickoff_banner > 0 then
+        phase = "kickoff"
     end
+    local tactic = self._opts.tactic and tactics[self._opts.tactic] or nil
+    local model = match_hud.model(self.state, {
+        home_name = self.home_name,
+        away_name = self.away_name,
+        arena_name = self.arena.name,
+        arena_location = self.arena.location,
+        tactic_name = tactic and tactic.name or "Balanced",
+        formation_name = self._opts.formation or (self._opts.home or teams.nebula).formation,
+        prompt = onboarding.prompt(self._onboarding),
+        phase = phase,
+        scoring_team = self._last_scoring_team,
+    })
+    match_hud_render.draw(model, vp)
 
-    tuning_panel.draw(vp)
-
-    if s.finished then
-        love.graphics.setColor(0, 0, 0, 0.6)
-        love.graphics.rectangle("fill", 0, 0, vp.w, vp.h)
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.printf("FULL TIME", 0, vp.h / 2 - 24, vp.w, "center")
-        love.graphics.printf(
-            "R / Enter — rematch      Esc — quit",
-            0,
-            vp.h / 2 + 4,
-            vp.w,
-            "center"
-        )
+    if self._profile == "playtest" then
+        tuning_panel.draw(vp)
     end
 end
 
@@ -287,15 +379,6 @@ function Match:draw()
     local vp = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
     bloom.draw(function()
         self:draw_frame(s, vp)
-        if replay.celebrating() then
-            love.graphics.setColor(1, 0.85, 0.3)
-            love.graphics.printf("GOAL!", 0, 44, vp.w, "center")
-        elseif replay.active() then
-            love.graphics.setColor(1, 0.45, 0.45)
-            love.graphics.printf("● REPLAY", 0, 48, vp.w, "center")
-            love.graphics.setColor(0.8, 0.85, 0.95)
-            love.graphics.printf("Space — skip", 0, 66, vp.w, "center")
-        end
     end)
 end
 

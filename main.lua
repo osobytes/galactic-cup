@@ -9,6 +9,8 @@
 --                                (warm-started from tuning blob file `start`), exit
 --   love . --eval FILE [n] [REF] -> tuning blob FILE vs REF blob (default: the
 --                                defaults) on held-out seeds, exit
+--   love . --tripwire [write] -> compare the fun signature against the checked-in
+--                                baseline (exit 1 on drift); `write` refreshes it
 
 ---@param a string
 ---@return boolean
@@ -49,6 +51,32 @@ if has_flag("--sim") then
         local headless = require("sim.headless")
         print(headless.report(headless.run_batch({ n = n })))
         os.exit(0)
+    end
+    return
+end
+
+if has_flag("--tripwire") then
+    function love.load()
+        local sub = args_after("--tripwire")
+        local tripwire = require("sim.tripwire")
+        if sub == "write" then
+            local current, n = tripwire.measure()
+            local f = assert(io.open("data/fun_baseline.lua", "w"))
+            f:write(tripwire.serialize(current, n))
+            f:close()
+            print("fun baseline refreshed: data/fun_baseline.lua (" .. n .. " seeds)")
+            os.exit(0)
+        end
+        local ok_load, baseline = pcall(require, "data.fun_baseline")
+        if not ok_load or type(baseline) ~= "table" then
+            print("no baseline: data/fun_baseline.lua missing — create it with:")
+            print("    love . --tripwire write")
+            os.exit(1)
+        end
+        local current, n = tripwire.measure(baseline.n)
+        local ok, rows = tripwire.compare(baseline, current)
+        print(tripwire.report(rows, ok, n))
+        os.exit(ok and 0 or 1)
     end
     return
 end
@@ -168,39 +196,65 @@ if has_flag("--eval") then
     return
 end
 
-local ScreenStack = require("game.screen_stack")
-local Flow = require("game.flow")
+local bootstrap = require("game.bootstrap")
+local runtime_settings = require("game.runtime_settings")
 
----@type ScreenStack
-local stack
+---@type App
+local app
 
 function love.load()
-    stack = ScreenStack.new()
-    local viewport = { w = love.graphics.getWidth(), h = love.graphics.getHeight() }
-    Flow.start(stack, viewport)
+    local width, height = love.graphics.getDimensions()
+    app = bootstrap.new(width, height, {
+        apply_settings = runtime_settings.apply,
+        request_quit = function()
+            love.event.quit()
+        end,
+    })
+    runtime_settings.apply(app.settings)
+    app:resize(love.graphics.getDimensions())
 end
 
 ---@param dt number
 function love.update(dt)
-    stack:update(dt)
+    app:update(dt)
 end
 
 function love.draw()
-    stack:draw()
+    app:draw()
 end
 
 ---@param key string
 function love.keypressed(key)
-    if key == "escape" then
-        love.event.quit()
-        return
-    end
-    stack:event({ kind = "key", key = key })
+    app:event({ kind = "key", key = key })
 end
 
 ---@param x number
 ---@param y number
 ---@param button number
 function love.mousepressed(x, y, button)
-    stack:event({ kind = "click", x = x, y = y, button = button })
+    app:event({ kind = "click", x = x, y = y, button = button })
+end
+
+---@param joystick love.Joystick
+---@param button love.GamepadButton
+function love.gamepadpressed(joystick, button)
+    local _ = joystick
+    app:event({ kind = "gamepad", button = button })
+end
+
+---@param width number
+---@param height number
+function love.resize(width, height)
+    app:resize(width, height)
+end
+
+---@param focused boolean
+function love.focus(focused)
+    app:focus(focused)
+end
+
+---@param joystick love.Joystick
+function love.joystickremoved(joystick)
+    local _ = joystick
+    app:pause_match()
 end

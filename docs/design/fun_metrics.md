@@ -9,11 +9,18 @@ love . --sim [n]          n matches at current defaults, metric report
 love . --sweep [n]        per-knob min/max sensitivity, ranked by fun impact
 love . --search K1,K2 [n] greedy coordinate ascent over the named knobs
 love . --eval FILE [n]    a tuning blob vs defaults on held-out seeds (paired)
+love . --tripwire [write] fun-signature snapshot vs data/fun_baseline.lua
+                          (in check.sh; exit 1 on drift; `write` refreshes)
 ```
 
-**Status (2026-07-09):** phases 1–3 done, phase 4 (tripwire) open. Candidates
-A and B are validated (and re-validated after the keeper fix) and ship as F1
-presets — awaiting a hands-on playtest verdict before any change to
+**Status (2026-07-10):** phases 1–4 done. The tripwire (`sim/tripwire.lua`)
+runs 30 seeded matches in check.sh and fails the gate when any banded-metric
+mean (or the composite) drifts more than 5% from the checked-in baseline —
+the sim is deterministic per seed, so a behavior-neutral change reproduces
+the snapshot exactly. On intended drift: re-run `--sim 100`, log the shift in
+the drift log below, then `love . --tripwire write`. Candidate A is validated
+(re-validated twice); B died in the 2026-07-10 re-validation. A ships as an
+F1 preset — awaiting a hands-on playtest verdict before any change to
 `sim/tuning.lua` defaults.
 
 ## Why
@@ -72,8 +79,17 @@ AI-vs-AI matches measure the AI ecosystem, not the player's hands. The
 controlled slot is driven by `sim/bot.lua`, a deliberately human-ish input
 driver: it re-decides only every ~0.2 s (reaction latency), adds aim noise from
 its own seeded RNG, dribbles/charges/shoots/passes with simple heuristics, and
-chases/jockeys off the ball. It is not a good player; it is a *predictable
-mediocre* player, which is what balance work needs.
+chases/jockeys off the ball. It can also reactively juke a committed defender,
+charge and loft long outlets, chip a shot, and request aerial/acrobatic strikes,
+so the proxy exercises the same verbs available in a hands-on match. It is not
+a good player; it is a *predictable mediocre* player, which is what balance
+work needs.
+
+Dribble diagnostics are reported separately as `controlled_dribble_*` and
+`ai_dribble_*`: carry time, close-control/sprint/juke shares, touch cadence,
+and heavy losses. The AI bucket includes every non-controlled outfield carrier,
+so compare the normalized shares and per-carry-minute rates rather than raw
+action counts.
 
 Consequence: treat all results as **relative** (config A vs config B under the
 same bot), never as absolute predictions of human experience. Big metric swings
@@ -98,8 +114,8 @@ are signal; small ones are bot artifacts until verified by hand with F1.
    knobs; `--eval` re-checks any blob on held-out seeds. Candidates below —
    verified by humans, never auto-shipped (Goodhart's law: an optimizer will
    happily invent coin-flip keepers to farm `decided_late`).
-4. **Tripwire — open.** A tiny-N smoke batch in `scripts/check.sh` that fails
-   loudly when a sim change moves a banded metric outside its band at defaults.
+4. **Tripwire — done.** A 30-seed smoke batch in `scripts/check.sh` fails loudly
+   when a sim change moves a banded metric beyond the checked-in tolerance.
 
 ## Baseline signature (defaults)
 
@@ -247,3 +263,86 @@ until phase 4 automates it).
   held-out seeds (unchanged), goals 3.37, all bands ≥ 0.65. The scoring
   drought at defaults is worse than first measured, which strengthens the
   case for shipping a candidate.
+
+- **2026-07-10 — realistic-mechanics batch** (discrete kick-chase-kick dribble
+  + carrier hook, keeper back-pass with feet reception, faster/closest-man
+  passing, receiver full-pace trap). Baseline moved UP: fun 0.246 → 0.337,
+  goals 0.93 → 1.28, save_rate 0.82 → 0.845, shots_per_goal ~19.5,
+  pass_completion 0.51 (still knob-flat, still just below band). Candidates
+  re-validated on held-out seeds 1001–1060 (paired):
+  **A: ΔFun +0.428 ± 0.068 — still real** (fun 0.30 → 0.73, 2.9 goals,
+  save_rate 0.675 in-band; the ~93 s short-match caveat remains).
+  **B: ΔFun −0.008 ± 0.063 — DEAD.** The mechanics batch erased B's entire
+  edge; AI_SHOOT_RANGE=300 alone no longer beats defaults. B's preset slot
+  should be dropped or re-searched once the mechanics settle. Weak dimensions
+  at defaults are unchanged in kind: scoring scarcity and keeper walls.
+
+- **2026-07-10 — aerial reception and acrobatic finishing.** Added
+  difficulty-resolved chest/leg control, jumping headers and volleys, contested
+  high balls, and bicycle kicks. The 30-seed tripwire moved fun 0.431 -> 0.419,
+  goals 1.467 -> 1.500, shots_per_goal 22.792 -> 20.386, pass completion
+  0.556 -> 0.548, and decided_late 0.611 -> 0.662. The two flagged changes are
+  intended consequences of midfielders controlling routine high balls instead
+  of forcing every contact goalward. A 100-match validation produced fun 0.439,
+  goals 1.69, shots_per_goal 20.93, save_rate 0.858, and pass completion 0.546;
+  the known scoring-scarcity / keeper-wall weaknesses remain, with no new band
+  collapse.
+
+- **2026-07-10 — uninterferable keeper hand throws.** The aerial system had
+  quietly made throws WORSE: a presser could jump-volley the old 34px-arc
+  float mid-flight (scenario harness in `spec/sim/keeper_throw_spec.lua`
+  measured 75–100% retention pre-fix, with mid-air volley steals). Hand
+  throws are now PLANNED (`plan_throw`): a covered receiver gets the ball
+  landed to their safe side, any opponent near the lane raises the arc above
+  `aerial.MAX_TOUCH_Z`, and a designated receiver auto-runs onto the pass
+  when the human gives no input. Scenario retention: 144/144 across every
+  presser spot/aim/charge. Tripwire moved fun 0.419 -> 0.348, goals 1.500 ->
+  1.300, shots_per_goal 20.386 -> 24.313, decided_late 0.662 -> 0.548 —
+  intended: cheap goals off robbed keeper distributions no longer pad the
+  scoring column. 100-match validation: fun 0.285, goals 1.29, save_rate
+  0.870, pass completion 0.558 (in band for the first time). Candidate A
+  re-validated: **ΔFun +0.345 ± 0.069** — smaller than before but still far
+  and away real. Scoring scarcity remains the weak dimension and is now
+  honest (it was partly keeper-robbery goals).
+
+- **2026-07-10 — close control + standing-start inertia.** Two feel levers
+  from Oscar's playtest: DRIBBLE_CLOSE (below ~1.05× move speed the ball is
+  GLUED to the feet — knock-on kicks and their risk only at a sprint) and
+  START_ACCEL (acceleration builds with momentum from 450 px/s² at rest to
+  MOVE_ACCEL at speed; normalized by base speed so sprinting never weakens
+  the push-off). Also fixed: the glue rode `run_vel` (intent), so a
+  body-checked carrier's ball launched itself out of control — it now rides
+  the REALIZED velocity. Tripwire moved fun 0.348 → 0.288 (30 seeds); the
+  100-match run: fun 0.272, goals 1.14, turnovers 2.53, possession_balance
+  0.31 (bot team holds less of the ball with heavier starts — worth watching
+  at the band edge). Candidate A re-validated: **ΔFun +0.275 ± 0.071** —
+  still real, margin shrinking as mechanics absorb what knobs used to buy.
+
+- **2026-07-14 — AI dribble intent + proxy tool parity.** Team-AI carriers now
+  sprint only with a real runway and juke only after a nearby defender has
+  visibly committed; the proxy now covers reactive jukes, charged/lofted
+  outlets, chips, and aerial strikes. A paired sweep selected
+  `AI_SPRINT_SPACE=70`: 60 made sprint use more human-like but reduced held-out
+  fun by 0.181 ± 0.097, while 70 was neutral (+0.002 ± 0.075). The final
+  100-match signature is fun 0.383, goals 1.62, shots/goal 24.96, save rate
+  0.879, pass completion 0.578, turnovers/min 3.56, and possession balance
+  0.420. Controlled vs team-AI dribble was respectively: close-control share
+  0.834 / 0.875, sprint share 0.284 / 0.121, juke-time share 0.027 / 0.037,
+  and touches per carry-minute 89.2 / 81.7. AI still carries more cautiously
+  than the proxy, but it now reaches and uses the risky knock-on branch without
+  turning every possession into a sprint.
+
+- **2026-07-17 — keeper back-pass interception.** Designated back-passes used
+  the same distance-scaled predictive pursuit as loose-ball claims. On a pass
+  travelling toward goal, that projected the ball behind the keeper and sent
+  the keeper backward instead of out to meet it. Designated reception now
+  steers to the current ball; predictive pursuit remains unchanged for loose
+  claims and 1v1 rushes. A 14-scenario regression matrix (seven pass angles,
+  pressure from both shoulders) now resolves 14/14 to the keeper with forward
+  movement, no attacking steals, and no own goals. The 30-seed tripwire moved
+  fun 0.290 → 0.344 and goals 1.467 → 1.633. The required 100-match audit was
+  stable against the latest recorded signature: fun 0.383 → 0.392, goals
+  1.62 → 1.68, shots/goal 24.96 → 24.10, save rate 0.879 → 0.874, pass
+  completion 0.578 → 0.572, turnovers/min 3.56 → 3.45, and possession balance
+  0.420 → 0.418. The larger sample shows no new systemic collapse or keeper
+  overcommitment.

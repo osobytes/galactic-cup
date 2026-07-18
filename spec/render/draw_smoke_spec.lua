@@ -4,6 +4,8 @@
 
 local t = require("spec.support.runner")
 local pitch = require("game.render.pitch")
+local match_hud = require("game.match_hud")
+local match_hud_render = require("game.render.match_hud")
 local ui_draw = require("game.ui.draw")
 local match_sim = require("sim.match")
 local teams = require("data.teams")
@@ -125,5 +127,26 @@ t.describe("renderer smoke", function()
             ui_draw.layout(layout)
         end)
         t.is_true(ok, "ui_draw.layout error: " .. tostring(err))
+    end)
+
+    t.it("draws the product match HUD over a real match state", function()
+        local ok, err = with_stub(function()
+            local s = match_sim.new({
+                home = teams.nebula,
+                away = teams.orion,
+                field = { w = 960, h = 540 },
+            })
+            local model = match_hud.model(s, {
+                home_name = teams.nebula.name,
+                away_name = teams.orion.name,
+                arena_name = "Helios Crown",
+                arena_location = "Kairon-9 Orbit",
+                tactic_name = "Press High",
+                formation_name = "1-2-1",
+                phase = "full_time",
+            })
+            match_hud_render.draw(model, { w = 1280, h = 720 })
+        end)
+        t.is_true(ok, "match HUD draw error: " .. tostring(err))
     end)
 end)

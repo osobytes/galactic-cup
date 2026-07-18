@@ -13,8 +13,13 @@ local bot = {}
 local REACTION = 0.2 -- seconds between decisions (human-ish latency)
 local AIM_NOISE = 0.15 -- radians of uniform aim wobble per decision
 local SHOT_CHARGE_HOLD = 0.35 -- seconds of shoot_held before releasing
+local PASS_CHARGE_HOLD = 0.22 -- short hold reaches a deliberate mid/long outlet
 local SHOOT_EAGERNESS = 1.15 -- shoots a bit outside the AI's own range
 local PRESSURE_PANIC = 1.3 -- passes when pressed at this x the AI's radius
+local JUKE_REACT_DIST = 64 -- sidestep a defender who has committed inside this range
+local LONG_OUTLET_DIST = 240 -- charge and sometimes loft passes beyond this distance
+local AERIAL_STRIKE_Z = 18 -- first-time intent begins above the ground-control band
+local AERIAL_STRIKE_DIST = 84 -- mirrors the match's readable aerial anticipation window
 local DEFEND_JOCKEY_DIST = 70 -- shadow instead of chase inside this range
 local POKE_DIST = 34 -- attempt the standing tackle inside this range
 local SPRINT_MIN_METER = 0.5 -- only sprint on a half-full tank
@@ -28,8 +33,15 @@ local CHASE_LEAD = 0.15 -- seconds of ball-velocity lead when chasing
 ---@field sprint boolean
 ---@field jockey boolean
 ---@field dash boolean  -- one-shot: consumed by the next frame
+---@field dodge boolean  -- one-shot carrier juke
 ---@field pass boolean  -- one-shot
+---@field lob boolean  -- modifier for the queued one-shot action
 ---@field charge_t number  -- >0: holding shoot, release when it expires
+---@field pass_charge_t number  -- >0: holding pass, release when it expires
+---@field pass_lob boolean
+---@field shot_lob boolean
+---@field aerial_strike boolean
+---@field aerial_acrobatic boolean
 
 ---@param opts { seed: number, reaction: number? }?
 ---@return BotState
@@ -43,8 +55,15 @@ function bot.new(opts)
         sprint = false,
         jockey = false,
         dash = false,
+        dodge = false,
         pass = false,
+        lob = false,
         charge_t = 0,
+        pass_charge_t = 0,
+        pass_lob = false,
+        shot_lob = false,
+        aerial_strike = false,
+        aerial_acrobatic = false,
     }
 end
 
@@ -112,7 +131,9 @@ end
 local function decide(b, s)
     local me = s.players[s.controlled]
     local goal = Vec2.new(s.field.w, s.field.h / 2)
-    b.sprint, b.jockey, b.dash, b.pass = false, false, false, false
+    b.sprint, b.jockey, b.dash, b.dodge, b.pass, b.lob = false, false, false, false, false, false
+    b.aerial_strike, b.aerial_acrobatic = false, false
+    b.shot_lob, b.pass_lob = false, false
 
     if s.owner == s.controlled then
         if me.is_keeper then
@@ -121,16 +142,38 @@ local function decide(b, s)
             return
         end
         local to_goal = goal:sub(me.pos)
-        local pressure = nearest_opponent(s, me.pos)
+        local pressure, defender = nearest_opponent(s, me.pos)
+        local defender_committed = defender ~= nil
+            and (defender.tackle_timer > 0 or defender.slide_timer > 0)
+        if
+            defender_committed
+            and pressure <= JUKE_REACT_DIST
+            and me.dodge_cd <= 0
+            and roll(b) < 0.35
+        then
+            -- A tool-using human reacts to the defender, not a random timer:
+            -- sidestep the committed poke, then reconsider on the next beat.
+            b.move = noisy(b, to_goal:normalized())
+            b.dodge = true
+            return
+        end
         if to_goal:length() < TUNE.AI_SHOOT_RANGE * SHOOT_EAGERNESS then
             -- Line up and charge: face the goal while holding the shot.
             b.move = noisy(b, to_goal:normalized())
             b.charge_t = SHOT_CHARGE_HOLD
+            b.shot_lob = roll(b) < 0.15 -- occasional chip keeps the loft verb represented
         elseif pressure < TUNE.AI_PASS_PRESSURE * PRESSURE_PANIC then
             local outlet = best_outlet(s, me)
             if outlet then
                 b.move = noisy(b, outlet.pos:sub(me.pos):normalized())
-                b.pass = true
+                local outlet_dist = me.pos:dist(outlet.pos)
+                b.lob = outlet_dist >= LONG_OUTLET_DIST and roll(b) < 0.35
+                if outlet_dist >= LONG_OUTLET_DIST then
+                    b.pass_charge_t = PASS_CHARGE_HOLD
+                    b.pass_lob = b.lob
+                else
+                    b.pass = true
+                end
             else
                 b.move = noisy(b, to_goal:normalized()) -- nowhere to go: push on
             end
@@ -147,6 +190,14 @@ local function decide(b, s)
         local diff = aim:sub(me.pos)
         b.move = diff:length() > 1 and noisy(b, diff:normalized()) or Vec2.new(0, 0)
         b.sprint = diff:length() > 120 and me.sprint_meter > SPRINT_MIN_METER
+        if
+            s.ball_z >= AERIAL_STRIKE_Z
+            and s.ball_vz < 0
+            and diff:length() <= AERIAL_STRIKE_DIST
+        then
+            b.aerial_strike = true
+            b.aerial_acrobatic = s.ball_z >= 45 and roll(b) < 0.08
+        end
         return
     end
 
@@ -195,9 +246,11 @@ function bot.input(b, s, dt)
                 switch = false,
                 dash = false,
                 dodge = false,
-                lob = false,
+                lob = b.shot_lob,
                 sprint = false,
                 jockey = false,
+                aerial_strike = false,
+                aerial_acrobatic = false,
             }
         else
             b.decide_t = b.reaction -- shot away: give it a beat before reacting
@@ -210,9 +263,56 @@ function bot.input(b, s, dt)
                 switch = false,
                 dash = false,
                 dodge = false,
-                lob = false,
+                lob = b.shot_lob,
                 sprint = false,
                 jockey = false,
+                aerial_strike = false,
+                aerial_acrobatic = false,
+            }
+        end
+    end
+
+    -- Deliberate long pass: hold to select range, then release with the same
+    -- aim and optional loft modifier. Losing the ball aborts the action.
+    if b.pass_charge_t > 0 then
+        b.pass_charge_t = b.pass_charge_t - dt
+        if s.owner ~= s.controlled then
+            b.pass_charge_t = 0
+            b.pass_lob = false
+        elseif b.pass_charge_t > 0 then
+            return {
+                move = b.move,
+                shoot = false,
+                shoot_held = false,
+                pass = false,
+                pass_held = true,
+                switch = false,
+                dash = false,
+                dodge = false,
+                lob = b.pass_lob,
+                sprint = false,
+                jockey = false,
+                aerial_strike = false,
+                aerial_acrobatic = false,
+            }
+        else
+            b.decide_t = b.reaction
+            local lob = b.pass_lob
+            b.pass_lob = false
+            return {
+                move = b.move,
+                shoot = false,
+                shoot_held = false,
+                pass = true,
+                pass_held = false,
+                switch = false,
+                dash = false,
+                dodge = false,
+                lob = lob,
+                sprint = false,
+                jockey = false,
+                aerial_strike = false,
+                aerial_acrobatic = false,
             }
         end
     end
@@ -223,8 +323,8 @@ function bot.input(b, s, dt)
         decide(b, s)
     end
 
-    local pass, dash = b.pass, b.dash
-    b.pass, b.dash = false, false -- one-shot actions fire a single frame
+    local pass, dash, dodge, lob = b.pass, b.dash, b.dodge, b.lob
+    b.pass, b.dash, b.dodge, b.lob = false, false, false, false -- one-frame actions
     return {
         move = b.move,
         shoot = false,
@@ -233,10 +333,12 @@ function bot.input(b, s, dt)
         pass_held = false,
         switch = false,
         dash = dash,
-        dodge = false,
-        lob = false,
+        dodge = dodge,
+        lob = lob,
         sprint = b.sprint,
         jockey = b.jockey,
+        aerial_strike = b.aerial_strike,
+        aerial_acrobatic = b.aerial_acrobatic,
     }
 end
 

@@ -20,6 +20,8 @@
 ---@class TacticData
 ---@field id string
 ---@field name string
+---@field strength string?
+---@field risk string?
 ---@field press integer
 ---@field line_shift number
 ---@field stamina_drain number
@@ -30,6 +32,8 @@ return {
     balanced = {
         id = "balanced",
         name = "Balanced",
+        strength = "Keeps one presser and a compact supporting shape.",
+        risk = "Creates fewer overloads at either end.",
         press = 1,
         line_shift = 0.0,
         stamina_drain = 1.0,
@@ -44,6 +48,8 @@ return {
     press_high = {
         id = "press_high",
         name = "Press High",
+        strength = "Wins the ball closer to the opponent goal.",
+        risk = "A beaten press exposes space behind it.",
         press = 2,
         line_shift = 0.12,
         stamina_drain = 1.4,
@@ -58,6 +64,8 @@ return {
     counter = {
         id = "counter",
         name = "Counter Attack",
+        strength = "Drops compact, then attacks open space quickly.",
+        risk = "Concedes territory and sustained possession.",
         press = 1,
         line_shift = -0.12,
         stamina_drain = 0.9,

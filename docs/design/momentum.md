@@ -1,13 +1,11 @@
-# Design: Player momentum & turning radius (T1)
-
-**Owner:** Mr. White · **Branch scope:** `sim/match.lua`, `spec/sim/match_spec.lua`, `docs/controls.md`
+# Design: Player momentum & turning radius
 
 ## Why
 
-Players currently move at constant speed and can reverse instantly. That kills
-the core feel of a soccer game: beating a man means nothing, tackles have no
-committed moment to punish, sprint carries no risk. This is gap #1 in
-`docs/gameplay-gaps.md`.
+Constant-speed movement and instant reversals kill the core feel of a soccer
+game: beating a player means nothing, tackles have no committed moment to
+punish, and sprint carries no risk. Momentum makes changes of direction
+readable and committed.
 
 ## Player-facing behavior
 
@@ -62,7 +60,3 @@ local MOVE_DECEL = 1500 -- px/s^2 when the desired velocity is zero (stopping)
    longer to travel 40px left than one starting from rest (turn commitment).
 3. All existing specs pass (adjusted only where frame budgets are too tight).
 4. `./scripts/check.sh` green.
-
-## Done signal
-
-Output exactly: `Mr. White ✓ — <one-line summary>`

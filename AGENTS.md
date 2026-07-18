@@ -1,9 +1,10 @@
-# AGENTS.md — Galaticup engineering constitution
+# AGENTS.md — Galactic Cup engineering constitution
 
 This file is the source of truth for **how we write code** in this project. Humans and
 AI agents both follow it. Keep it short, keep it enforced.
 
-Game vision and milestones live in `docs/`. This file is about *practices*, not features.
+Game vision and public product scope live in `docs/`. This file is about
+*practices*, not features.
 
 ---
 
@@ -266,6 +267,7 @@ assert(s2.selected == "1-2-1")
 ## 11. Agent etiquette
 
 - Read this file and `docs/` before writing code.
-- Stay inside the current milestone (`docs/agent_tasks.md`). Don't build ahead.
+- Stay inside the committed scope in `docs/showcase_release.md`. Discuss
+  substantial additions before building ahead.
 - Respect the layer boundaries in §2 — they're the one rule that's expensive to fix later.
 - When unsure about a shape, define the `---@class`/`---@alias` first, then implement.

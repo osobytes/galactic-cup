@@ -119,7 +119,7 @@ t.describe("match.step shooting & passing", function()
         local owner = s.players[s.controlled]
         local mate
         for i, p in ipairs(s.players) do
-            if p.team == "home" and i ~= s.controlled then
+            if p.team == "home" and i ~= s.controlled and not p.is_keeper then
                 mate = p
                 break
             end
@@ -127,7 +127,7 @@ t.describe("match.step shooting & passing", function()
         owner.facing = mate.pos:sub(owner.pos):normalized()
         match.step(s, 0.016, input({ pass = true }))
         t.is_true(s.owner == nil, "ball should be released on a pass")
-        t.near(s.ball_vel:length(), 320, 0.5, "pass speed")
+        t.near(s.ball_vel:length(), 420, 0.5, "pass speed")
     end)
 end)
 
@@ -2628,8 +2628,10 @@ t.describe("match sprint", function()
     end
 
     t.it("sprinting covers more ground and drains the meter", function()
-        local walked = run(30, { move = Vec2.new(1, 0) })
-        local sprinted, me = run(30, { move = Vec2.new(1, 0), sprint = true })
+        -- 60 frames: the standing-start ramp is shared, the sprint advantage
+        -- compounds once both are up to speed.
+        local walked = run(60, { move = Vec2.new(1, 0) })
+        local sprinted, me = run(60, { move = Vec2.new(1, 0), sprint = true })
         t.is_true(sprinted > walked * 1.2, "sprint is meaningfully faster")
         t.is_true(me.sprint_meter < 1, "sprinting drains the meter")
     end)
@@ -3097,5 +3099,276 @@ t.describe("match wind-up telegraphs (T5)", function()
         t.is_true(dx_windup > 0, "but some movement is still allowed")
         -- Suppress unused warning
         t.is_true(pos_before ~= nil)
+    end)
+end)
+
+t.describe("match keeper back-pass (receive with feet)", function()
+    -- Controlled carrier near its own box aiming square at the keeper; the rest
+    -- of the home side pushed far upfield so the aim cone holds only the keeper.
+    ---@param s MatchState
+    local function setup_backpass(s)
+        s.owner = s.controlled
+        local owner = s.players[s.controlled]
+        owner.pos = Vec2.new(220, 270)
+        owner.facing = Vec2.new(-1, 0)
+        s.ball = Vec2.new(214, 270)
+        s.players[1].pos = Vec2.new(70, 270) -- home keeper on its line
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and i ~= s.controlled and not p.is_keeper then
+                p.pos = Vec2.new(700, 60 + i * 40)
+            elseif p.team == "away" then
+                p.pos = Vec2.new(900, 60 + i * 40)
+            end
+        end
+    end
+
+    -- Step until the keeper collects the back-pass; also reports whether any
+    -- hands gather ("claim"/"catch") happened along the way.
+    ---@param s MatchState
+    ---@return boolean handled
+    local function run_until_received(s)
+        local handled = false
+        for _ = 1, 240 do
+            match.step(s, 1 / 60, NO_INPUT)
+            for _, e in ipairs(s.events) do
+                if e.kind == "claim" or e.kind == "catch" then
+                    handled = true
+                end
+            end
+            if s.owner then
+                break
+            end
+        end
+        return handled
+    end
+
+    t.it("an aimed pass picks the keeper as the receiver", function()
+        local s = new_match()
+        setup_backpass(s)
+        match.step(s, 1 / 60, input({ pass = true }))
+        t.is_true(s.owner == nil, "ball released")
+        t.is_true(s.players[1].receive_timer > 0, "keeper is the designated receiver")
+    end)
+
+    t.it("the keeper takes the pass with its feet, never its hands", function()
+        local s = new_match()
+        setup_backpass(s)
+        match.step(s, 1 / 60, input({ pass = true }))
+        local handled = run_until_received(s)
+        t.eq(s.owner, 1)
+        t.is_true(s.players[1].feet_ball, "ball sits at the keeper's feet")
+        t.is_true(not handled, "no dive, claim, or catch on the way in")
+        t.eq(s.players[1].hold_timer, 0, "no six-second clock on a ball at the feet")
+        t.eq(s.controlled, 1, "control hands over to the keeper on the trap")
+    end)
+
+    t.it("from the feet, the keeper passes out like an outfielder", function()
+        local s = new_match()
+        setup_backpass(s)
+        match.step(s, 1 / 60, input({ pass = true }))
+        run_until_received(s)
+        t.eq(s.owner, 1)
+        match.step(s, 1 / 60, input({ pass = true, move = Vec2.new(1, 0) }))
+        t.is_true(s.owner == nil, "kicked pass released immediately")
+        t.is_true(s.ball_vel.x > 0, "played upfield")
+        t.is_true(s.controlled ~= 1, "control follows the outlet")
+        t.is_true(s.players[s.controlled].receive_timer > 0, "an outlet runs onto it")
+    end)
+
+    t.it("from the feet, the keeper can punt long right away", function()
+        local s = new_match()
+        setup_backpass(s)
+        match.step(s, 1 / 60, input({ pass = true }))
+        run_until_received(s)
+        t.eq(s.owner, 1)
+        match.step(s, 1 / 60, input({ shoot = true })) -- commit the punt wind-up
+        step_frames(s, WINDUP_FRAMES)
+        t.is_true(s.owner == nil, "punt released")
+        t.is_true(s.ball_vel.x > 0, "sails upfield")
+        t.is_true(s.ball_vz > 0, "a lofted clearance")
+    end)
+
+    t.it("a blind pass under no aim never dumps the ball at the keeper", function()
+        local s = new_match()
+        setup_backpass(s)
+        -- Face upfield, away from the keeper: the cone finds nobody (mates are
+        -- far), so the openness fallback fires — it must pick an outfielder.
+        s.players[s.controlled].facing = Vec2.new(0, 1)
+        match.step(s, 1 / 60, input({ pass = true }))
+        t.is_true(s.owner == nil, "ball released")
+        t.eq(s.players[1].receive_timer, 0, "keeper never the panic outlet")
+    end)
+
+    t.it("aim square at the keeper beats a nearer mid-lane teammate", function()
+        local s = new_match()
+        setup_backpass(s)
+        -- A defender hovers near the back-pass lane, better aligned under the
+        -- generic scoring (closer, nearly on-axis) — dead-on aim at the keeper
+        -- must still pick the keeper.
+        local defender
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and i ~= s.controlled and not p.is_keeper then
+                defender = i
+                break
+            end
+        end
+        s.players[defender].pos = Vec2.new(150, 255)
+        local at_keeper = match._select_pass_target(s, s.controlled, false, Vec2.new(-1, 0), nil)
+        t.eq(at_keeper, 1, "square aim is a deliberate back-pass")
+        -- Aim at the defender instead: the keeper must not hijack the pass.
+        local aim = s.players[defender].pos:sub(s.players[s.controlled].pos):normalized()
+        local at_defender = match._select_pass_target(s, s.controlled, false, aim, nil)
+        t.eq(at_defender, defender, "aiming at the defender still reaches the defender")
+    end)
+
+    t.it("the keeper chases down an under-hit back-pass and kicks on", function()
+        local s = new_match()
+        setup_backpass(s)
+        -- The pass died short: a dead ball outside the claim zone, with the
+        -- keeper's receive window open (as release_pass leaves it).
+        s.owner = nil
+        s.players[s.controlled].pos = Vec2.new(600, 400) -- passer well away
+        s.ball = Vec2.new(190, 270)
+        s.ball_vel = Vec2.new(-40, 0) -- last of its pace; dies well short
+        s.players[1].receive_timer = 4
+        local received = false
+        for _ = 1, 300 do
+            match.step(s, 1 / 60, NO_INPUT)
+            if s.owner then
+                received = true
+                break
+            end
+        end
+        t.is_true(received, "somebody reached the dying ball")
+        t.eq(s.owner, 1, "the keeper came off its line to meet it")
+        t.is_true(s.players[1].feet_ball, "and took it with the feet")
+        t.is_true(s.players[1].pos.x > 90, "it genuinely left the goal line")
+    end)
+
+    t.it("an interception ends the keeper's receive window", function()
+        local s = new_match()
+        setup_backpass(s)
+        -- Dead ball at an opponent's feet mid-lane while the keeper still
+        -- expects the back-pass: the pickup must snap the window shut so the
+        -- keeper's save reflexes come straight back online.
+        s.owner = nil
+        s.ball = Vec2.new(500, 270)
+        s.ball_vel = Vec2.new(0, 0)
+        s.players[1].receive_timer = 4
+        local raider
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                raider = i
+                break
+            end
+        end
+        s.players[raider].pos = Vec2.new(500, 270)
+        match.step(s, 1 / 60, NO_INPUT)
+        t.eq(s.owner, raider, "the opponent collects the loose pass")
+        t.eq(s.players[1].receive_timer, 0, "keeper stops receiving on the spot")
+    end)
+
+    t.it("a keeper with the ball at its feet can be tackled", function()
+        local s = new_match()
+        setup_backpass(s)
+        match.step(s, 1 / 60, input({ pass = true }))
+        run_until_received(s)
+        t.eq(s.owner, 1)
+        -- Pin an opponent onto the ball: no hands protection, so its poke
+        -- strips the keeper within a few frames.
+        local raider
+        for i, p in ipairs(s.players) do
+            if p.team == "away" and not p.is_keeper then
+                raider = i
+                break
+            end
+        end
+        local stripped = false
+        for _ = 1, 60 do
+            s.players[raider].pos = Vec2.new(s.ball.x, s.ball.y)
+            match.step(s, 1 / 60, NO_INPUT)
+            if s.owner ~= 1 then
+                stripped = true
+                break
+            end
+        end
+        t.is_true(stripped, "the ball is poked off the keeper's feet")
+    end)
+end)
+
+t.describe("match tap-pass proximity (closest along the aim)", function()
+    -- Passer facing +x with a near teammate 45 degrees off the aim and a far
+    -- one dead ahead; everyone else parked, opponents away.
+    local function setup(s)
+        local passer = s.controlled
+        s.players[passer].pos = Vec2.new(300, 270)
+        s.players[passer].facing = Vec2.new(1, 0)
+        s.owner = passer
+        s.ball = Vec2.new(318, 270)
+        local near, far
+        for i, p in ipairs(s.players) do
+            if p.team == "home" and not p.is_keeper and i ~= passer then
+                if not near then
+                    near = i
+                    p.pos = Vec2.new(390, 360) -- 127px away, ~45 deg off the aim
+                elseif not far then
+                    far = i
+                    p.pos = Vec2.new(700, 270) -- 400px away, dead on the aim
+                else
+                    p.pos = Vec2.new(60, 60 + i * 30)
+                end
+            elseif p.team == "away" then
+                p.pos = Vec2.new(900, 40 + i * 40)
+            end
+        end
+        return near, far
+    end
+
+    t.it("a tap picks the near man, even with a far one better aligned", function()
+        local s = new_match()
+        local near = setup(s)
+        local target = match._select_pass_target(s, s.controlled, false, Vec2.new(1, 0), nil)
+        t.eq(target, near, "quick passes go short to the man you point at")
+    end)
+
+    t.it("a charged pass still picks out the far man by range", function()
+        local s = new_match()
+        local _, far = setup(s)
+        local target = match._select_pass_target(s, s.controlled, false, Vec2.new(1, 0), 400)
+        t.eq(target, far, "the charge is how you reach the long option")
+    end)
+end)
+
+t.describe("match standing-start inertia (lever)", function()
+    -- Early displacement from rest under a given START_ACCEL setting.
+    ---@param setting number
+    ---@return number dx
+    local function push_off(setting)
+        local tuning = require("sim.tuning")
+        tuning.set("START_ACCEL", setting)
+        local s = new_match()
+        s.owner = nil
+        s.pickup_cd = 60
+        s.ball = Vec2.new(100, 60) -- parked away: pure movement test
+        local me = s.players[s.controlled]
+        me.pos = Vec2.new(480, 480)
+        me.run_vel = Vec2.new(0, 0)
+        local x0 = me.pos.x
+        for _ = 1, 8 do
+            match.step(s, 1 / 60, input({ move = Vec2.new(1, 0) }))
+        end
+        tuning.reset()
+        return me.pos.x - x0
+    end
+
+    t.it("START_ACCEL scales the push-off from rest", function()
+        local tuning = require("sim.tuning")
+        local heavy = push_off(tuning.by_key.START_ACCEL.min)
+        local light = push_off(tuning.by_key.START_ACCEL.max)
+        t.is_true(heavy > 0, "even a heavy start moves")
+        t.is_true(
+            light > heavy * 1.5,
+            ("the lever is live: max %.1fpx vs min %.1fpx in 8 frames"):format(light, heavy)
+        )
     end)
 end)

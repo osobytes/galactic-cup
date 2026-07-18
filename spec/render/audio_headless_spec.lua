@@ -142,6 +142,23 @@ t.describe("audio headless contract", function()
         t.is_true(ok, "audio.update() kickoff-edge error: " .. tostring(err))
     end)
 
+    t.it("ticks replay ambience and accepts the full-time edge headlessly", function()
+        local ok, err = with_nil_audio(function()
+            local audio = require("game.audio")
+            local state = match_sim.new({
+                home = teams.nebula,
+                away = teams.orion,
+                field = { w = 960, h = 540 },
+            })
+            audio.reset()
+            audio.tick(0.5)
+            state.finished = true
+            audio.update(state, 1 / 60)
+            audio.update(state, 1 / 60)
+        end)
+        t.is_true(ok, "audio full-time edge error: " .. tostring(err))
+    end)
+
     t.it("full load→update→reset cycle no-ops cleanly", function()
         local ok, err = with_nil_audio(function()
             local audio = require("game.audio")

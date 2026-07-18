@@ -8,6 +8,7 @@
 ---@field color number[]  -- {r, g, b} in 0..1
 ---@field formation string  -- key into data/formations.lua
 ---@field roster string[]  -- 5 player ids from data/players.lua
+---@field squad string[]?  -- eligible player ids; defaults to roster
 
 ---@type table<string, TeamData>
 return {
@@ -17,6 +18,16 @@ return {
         color = { 0.3, 0.7, 1.0 },
         formation = "2-1-1",
         roster = { "ozzo", "brakka", "veil_nyx", "rok_tann", "zyro_vex" },
+        squad = {
+            "ozzo",
+            "brakka",
+            "veil_nyx",
+            "rok_tann",
+            "zyro_vex",
+            "mika_olu",
+            "sela_dwin",
+            "tib_quell",
+        },
     },
     orion = {
         id = "orion",

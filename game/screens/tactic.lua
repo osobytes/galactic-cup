@@ -1,72 +1,136 @@
--- Tactic selection screen, ending the pre-match flow with Kick Off. Pure.
-
-local hit = require("game.ui.hit")
+local focus = require("game.ui.focus")
 local tactics = require("data.tactics")
 
-local ORDER = { "balanced", "press_high", "counter" }
+---@class TacticScreenContext
+---@field selected string
+---@field formation_id string
 
-local M = {}
+---@class TacticScreenState
+---@field viewport { w: number, h: number }
+---@field selected string
+---@field formation_id string
+---@field focus string
 
----@param viewport { w: number, h: number }
----@return table
-function M.new_state(viewport)
-    return { viewport = viewport, selected = "balanced" }
+---@class TacticScreenModule
+local tactic = {}
+
+---@return string[]
+local function sorted_tactic_ids()
+    local ids = {}
+    for id in pairs(tactics) do
+        ids[#ids + 1] = id
+    end
+    table.sort(ids)
+    return ids
 end
 
----@param state table
+---@param viewport { w: number, h: number }
+---@param context TacticScreenContext?
+---@return TacticScreenState
+function tactic.new_state(viewport, context)
+    local selected = context and context.selected or "balanced"
+    return {
+        viewport = viewport,
+        selected = selected,
+        formation_id = context and context.formation_id or "2-1-1",
+        focus = "tactic_" .. selected,
+    }
+end
+
+---@param state TacticScreenState
 ---@return Layout
-function M.layout(state)
-    local vp = state.viewport
-    ---@type Layout
+function tactic.layout(state)
     local layout = {
         {
             id = "title",
             kind = "title",
-            text = "Choose Tactic",
-            rect = { x = 0, y = 60, w = vp.w, h = 30 },
+            text = "PLAY THE PLAN",
+            rect = { x = 0, y = 38, w = state.viewport.w, h = 34 },
+            data = { align = "center" },
+        },
+        {
+            id = "shape",
+            kind = "eyebrow",
+            text = "FORMATION  " .. state.formation_id,
+            rect = { x = 0, y = 76, w = state.viewport.w, h = 24 },
             data = { align = "center" },
         },
     }
-
-    local y = 140
-    for _, id in ipairs(ORDER) do
-        local tac = tactics[id]
+    for i, id in ipairs(sorted_tactic_ids()) do
+        local data = tactics[id]
         layout[#layout + 1] = {
             id = "tactic_" .. id,
             kind = "button",
-            text = tac.name,
+            text = data.name:upper()
+                .. "\n+ "
+                .. (data.strength or "A clear team-wide intention.")
+                .. "\n− "
+                .. (data.risk or "Creates a readable tradeoff."),
             selected = state.selected == id,
-            rect = { x = vp.w / 2 - 150, y = y, w = 300, h = 52 },
+            focused = state.focus == "tactic_" .. id,
+            rect = { x = 220, y = 124 + (i - 1) * 104, w = 520, h = 86 },
+            data = { align = "left" },
         }
-        y = y + 64
     end
-
+    layout[#layout + 1] = {
+        id = "back",
+        kind = "button",
+        text = "BACK",
+        focused = state.focus == "back",
+        rect = { x = 254, y = 466, w = 190, h = 42 },
+    }
     layout[#layout + 1] = {
         id = "kickoff",
         kind = "button",
-        text = "Kick Off",
-        rect = { x = vp.w / 2 - 80, y = y + 20, w = 160, h = 44 },
+        text = "KICK OFF",
+        focused = state.focus == "kickoff",
+        rect = { x = 516, y = 466, w = 190, h = 42 },
     }
     return layout
 end
 
----@param state table
+---@param state TacticScreenState
 ---@param event InputEvent
----@return table, table?
-function M.update(state, event)
-    if event.kind == "click" then
-        local id = hit.at(M.layout(state), event.x, event.y)
-        if id then
-            local tid = id:match("^tactic_(.+)$")
-            if tid then
-                state.selected = tid
-                return state
-            elseif id == "kickoff" then
-                return state, { go = "match", tactic = state.selected }
-            end
+---@return TacticScreenState, table?
+function tactic.update(state, event)
+    local layout = tactic.layout(state)
+    local next = {
+        viewport = state.viewport,
+        selected = state.selected,
+        formation_id = state.formation_id,
+        focus = focus.navigate(layout, state.focus, event) or state.focus,
+    }
+    if event.kind == "action" and event.action == "back" then
+        return next,
+            {
+                go = "formation",
+                tactic_id = next.selected,
+                tactic = next.selected,
+            }
+    end
+    local id = focus.activated(layout, next.focus, event)
+    if id then
+        next.focus = id
+        local tactic_id = id:match("^tactic_(.+)$")
+        if tactic_id and tactics[tactic_id] then
+            next.selected = tactic_id
+        elseif id == "back" then
+            return next,
+                {
+                    go = "formation",
+                    tactic_id = next.selected,
+                    tactic = next.selected,
+                }
+        elseif id == "kickoff" then
+            return next,
+                {
+                    go = "match",
+                    tactic_id = next.selected,
+                    tactic = next.selected,
+                }
         end
     end
-    return state
+    return next
 end
 
-return M
+return tactic

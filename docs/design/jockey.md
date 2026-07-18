@@ -1,12 +1,10 @@
-# Design: Defensive jockey / contain (T2)
-
-**Owner:** Mr. Orange · **Branch scope:** `sim/match.lua`, `game/screens/match.lua`, `spec/sim/match_spec.lua`, `spec/screens/match_screen_spec.lua`, `docs/controls.md`
+# Design: Defensive jockey / contain
 
 ## Why
 
 Defending is chase-and-poke only; there is no deliberate stance. Every soccer
 game has "hold to contain": shadow the carrier, stay goal-side, commit with the
-tackle only when you choose. Gap #2 in `docs/gameplay-gaps.md`.
+tackle only when you choose.
 
 ## Player-facing behavior
 
@@ -55,7 +53,3 @@ works with the ball: hold = charge, release = fire):
    `STAND_REACH + 6` away (where a plain poke misses).
 3. Screen specs updated: hold = jockey input, release = dash.
 4. `docs/controls.md` documents the stance. `./scripts/check.sh` green.
-
-## Done signal
-
-Output exactly: `Mr. Orange ✓ — <one-line summary>`

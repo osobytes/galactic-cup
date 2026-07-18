@@ -16,12 +16,31 @@ local BITS = 16
 local CHANNELS = 1
 
 -- Volume levels
-local VOL_SFX = 0.5
-local VOL_CROWD = 0.08
-local VOL_GOAL_SWELL = 0.22 -- crowd swells briefly after a goal
+local BASE_SFX_VOLUME = 0.5
+local BASE_CROWD_VOLUME = 0.08
+local BASE_GOAL_SWELL_VOLUME = 0.22
+local CUE_GAIN = {
+    touch = 0.45,
+    reception = 0.5,
+    pass = 0.62,
+    block = 0.68,
+    catch = 0.7,
+    claim = 0.7,
+    parry = 0.76,
+    tackle = 0.84,
+    header = 0.86,
+    shot = 1.0,
+    volley = 1.0,
+    bicycle = 1.0,
+    kickoff = 0.82,
+    goal = 1.15,
+    full_time = 1.12,
+}
 
 local _muted = false
 local _loaded = false
+local _sfx_mix = 1
+local _crowd_mix = 1
 
 -- Sources (built at load; nil until loaded or when headless)
 ---@type love.Source?
@@ -33,8 +52,24 @@ local _sfx = {}
 -- Goal/kickoff detection
 local _prev_score_home = 0
 local _prev_score_away = 0
+local _prev_finished = false
 local _crowd_swell_t = 0.0 -- countdown for crowd swell (seconds remaining)
 local CROWD_SWELL_DUR = 3.0
+
+---@return number
+local function sfx_volume()
+    return BASE_SFX_VOLUME * _sfx_mix
+end
+
+---@return number
+local function crowd_volume()
+    return BASE_CROWD_VOLUME * _crowd_mix
+end
+
+---@return number
+local function goal_swell_volume()
+    return math.min(1, BASE_GOAL_SWELL_VOLUME * _crowd_mix)
+end
 
 -- ---------------------------------------------------------------------------
 -- Low-level sample builders (all pure, no love calls)
@@ -112,7 +147,7 @@ local function make_source(dur, fill)
     local sd = love.sound.newSoundData(samples, RATE, BITS, CHANNELS)
     fill(sd)
     local src = love.audio.newSource(sd, "static")
-    src:setVolume(VOL_SFX)
+    src:setVolume(sfx_volume())
     return src
 end
 
@@ -253,6 +288,27 @@ local function build_kickoff()
     end)
 end
 
+--- Full-time signal — two whistle bursts over a low closing tone.
+---@return love.Source
+local function build_full_time()
+    return make_source(0.4, function(sd)
+        local n = sd:getSampleCount()
+        local period = RATE / 1040
+        for i = 0, n - 1 do
+            local t = i / RATE
+            local whistle = 0
+            if t < 0.13 or (t >= 0.2 and t < 0.38) then
+                local local_t = t < 0.13 and t or (t - 0.2)
+                local env = math.max(0, 1 - local_t / 0.18)
+                local phase = (i % period) / period
+                whistle = (2 * math.abs(2 * phase - 1) - 1) * env * 0.55
+            end
+            local closing = math.sin(2 * math.pi * 130 * t) * math.exp(-5 * t) * 0.2
+            sd:setSample(i, math.max(-1, math.min(1, whistle + closing)))
+        end
+    end)
+end
+
 --- Quiet crowd bed — low-pass-like filtered noise loop.
 ---@return love.Source
 local function build_crowd()
@@ -270,7 +326,7 @@ local function build_crowd()
     end
     local src = love.audio.newSource(sd, "static")
     src:setLooping(true)
-    src:setVolume(VOL_CROWD)
+    src:setVolume(crowd_volume())
     return src
 end
 
@@ -299,8 +355,11 @@ function audio.load()
     _sfx["parry"] = build_parry()
     _sfx["header"] = build_header()
     _sfx["volley"] = build_volley()
+    _sfx["bicycle"] = build_volley()
+    _sfx["reception"] = build_pass()
     _sfx["goal"] = build_goal()
     _sfx["kickoff"] = build_kickoff()
+    _sfx["full_time"] = build_full_time()
 
     _crowd_src = build_crowd()
     if not _muted then
@@ -320,8 +379,28 @@ local function play(name)
         return
     end
     local clone = src:clone()
-    clone:setVolume(VOL_SFX)
+    clone:setVolume(math.min(1, sfx_volume() * (CUE_GAIN[name] or 1)))
     clone:play()
+end
+
+--- Advance continuous ambience without consuming or replaying match events.
+---@param dt number
+function audio.tick(dt)
+    if not love.audio or not love.sound then
+        return
+    end
+    if _crowd_swell_t > 0 then
+        _crowd_swell_t = _crowd_swell_t - dt
+        if _crowd_swell_t <= 0 then
+            _crowd_swell_t = 0
+            if _crowd_src and not _muted then
+                _crowd_src:setVolume(crowd_volume())
+            end
+        end
+    end
+    if _crowd_src and not _muted and not _crowd_src:isPlaying() then
+        _crowd_src:play()
+    end
 end
 
 --- Drain state.events and play the matching SFX. Also handles score-edge
@@ -348,6 +427,8 @@ function audio.update(state, dt)
             or kind == "parry"
             or kind == "header"
             or kind == "volley"
+            or kind == "bicycle"
+            or kind == "reception"
         then
             play(kind)
         end
@@ -365,9 +446,14 @@ function audio.update(state, dt)
         play("goal")
         _crowd_swell_t = CROWD_SWELL_DUR
         if _crowd_src and not _muted then
-            _crowd_src:setVolume(VOL_GOAL_SWELL)
+            _crowd_src:setVolume(goal_swell_volume())
         end
     end
+
+    if state.finished and not _prev_finished then
+        play("full_time")
+    end
+    _prev_finished = state.finished
 
     -- Kickoff detection: state.time_left near full and no owner (initial or
     -- post-goal restart). We fire the whistle once per kickoff via a simple
@@ -375,21 +461,7 @@ function audio.update(state, dt)
     -- We track the previous time_left to catch a rising edge.
     -- (Kickoff is signalled separately; see _prev_time_left tracking below.)
 
-    -- Crowd swell countdown
-    if _crowd_swell_t > 0 then
-        _crowd_swell_t = _crowd_swell_t - dt
-        if _crowd_swell_t <= 0 then
-            _crowd_swell_t = 0
-            if _crowd_src and not _muted then
-                _crowd_src:setVolume(VOL_CROWD)
-            end
-        end
-    end
-
-    -- Keep crowd loop alive
-    if _crowd_src and not _muted and not _crowd_src:isPlaying() then
-        _crowd_src:play()
-    end
+    audio.tick(dt)
 end
 
 -- Track previous time_left for kickoff edge detection (module-level).
@@ -418,6 +490,7 @@ function audio.reset()
     _prev_score_away = 0
     _crowd_swell_t = 0
     _prev_time_left = -1
+    _prev_finished = false
 
     if not love.audio or not love.sound then
         return
@@ -425,7 +498,7 @@ function audio.reset()
 
     -- Return crowd to quiet level
     if _crowd_src then
-        _crowd_src:setVolume(_muted and 0 or VOL_CROWD)
+        _crowd_src:setVolume(_muted and 0 or crowd_volume())
         if not _muted and not _crowd_src:isPlaying() then
             _crowd_src:play()
         end
@@ -435,10 +508,10 @@ function audio.reset()
     play("kickoff")
 end
 
---- Toggle mute. Returns the new muted state.
+---@param value boolean
 ---@return boolean muted
-function audio.toggle_mute()
-    _muted = not _muted
+function audio.set_muted(value)
+    _muted = value
     if not love.audio then
         return _muted
     end
@@ -446,13 +519,29 @@ function audio.toggle_mute()
         if _muted then
             _crowd_src:setVolume(0)
         else
-            _crowd_src:setVolume(_crowd_swell_t > 0 and VOL_GOAL_SWELL or VOL_CROWD)
+            _crowd_src:setVolume(_crowd_swell_t > 0 and goal_swell_volume() or crowd_volume())
             if not _crowd_src:isPlaying() then
                 _crowd_src:play()
             end
         end
     end
     return _muted
+end
+
+--- Toggle mute. Returns the new muted state.
+---@return boolean muted
+function audio.toggle_mute()
+    return audio.set_muted(not _muted)
+end
+
+---@param settings GameSettings
+function audio.configure(settings)
+    _sfx_mix = settings.sfx_volume / 0.8
+    _crowd_mix = settings.crowd_volume / 0.55
+    for _, source in pairs(_sfx) do
+        source:setVolume(sfx_volume())
+    end
+    audio.set_muted(settings.muted)
 end
 
 return audio

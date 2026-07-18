@@ -11,11 +11,11 @@ declarations live next to their data; this file is the human-readable overview.
 ---@alias Position "keeper"|"defender"|"midfielder"|"forward"
 
 ---@class StatBlock
----@field pace integer       -- movement speed on the pitch
----@field strength integer   -- shot speed / physical duels
----@field technique integer  -- ball control, passing (M4)
----@field stamina integer    -- fatigue resistance (M4)
----@field mental integer     -- composure / positioning; defensive ability is derived
+---@field pace integer       -- movement speed, acceleration, sprint expression
+---@field strength integer   -- shot speed and physical duels
+---@field technique integer  -- passing, ball control, and aerial reception
+---@field stamina integer    -- sprint-tank capacity and recovery
+---@field mental integer     -- positioning, composure, and keeper reading
 
 ---@class PlayerData
 ---@field id string          -- stable unique key
@@ -23,7 +23,7 @@ declarations live next to their data; this file is the human-readable overview.
 ---@field planet string
 ---@field position Position
 ---@field stats StatBlock
----@field trait string       -- trait id (M4)
+---@field trait string       -- reserved post-showcase trait id
 ```
 
 ### Derived quantities (`sim/stats.lua`)
@@ -33,7 +33,7 @@ declarations live next to their data; this file is the human-readable overview.
 - `keeper_reach(stats)` derives defensive reach from `mental` + `pace`; defensive
   ability is not a sixth authored attribute.
 
-These are the M1 bridge from manager stats to pitch behavior. Tune constants here.
+These formulas bridge manager-facing stats to pitch behavior. Tune constants here.
 
 ### TeamData (`data/teams.lua`)
 
@@ -53,7 +53,8 @@ owner, score, timer), and per-step input. See the `---@class` annotations in the
 ### TacticData (`data/tactics.lua`)
 
 `id, name, press` (how many off-ball players hunt the ball), `line_shift` (anchor depth
-bias along the attack axis, fraction of pitch), `stamina_drain` (multiplier; stub for M4).
+bias along the attack axis, fraction of pitch), `stamina_drain` (a currently unused,
+post-showcase multiplier).
 Applied in `sim/match.lua`: `line_shift` adjusts outfield anchors at build time, `press`
 sets `MatchState.press` which drives how many players chase per team.
 
@@ -63,8 +64,10 @@ A `Layout` is an ordered `Widget[]` (`id, rect, kind, text, selected, data`). Pu
 (`game/screens/squad|formation|tactic.lua`) build a Layout from state; `game/ui/draw.lua`
 renders it; `hit.at`/`hit.find` do pure hit-testing. See AGENTS.md §9.
 
-## Planned (not yet built)
+## Parked after the showcase
 
 - `data/traits.lua` — `TraitData` (id, name, trigger, effect)
 - RPG fields layered onto a runtime `PlayerState` (xp, level, morale, fatigue) — kept separate
   from immutable `PlayerData`.
+
+These shapes are not part of the active showcase scope. See `docs/showcase_release.md`.

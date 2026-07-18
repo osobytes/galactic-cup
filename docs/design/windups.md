@@ -1,12 +1,10 @@
-# Design: Wind-up telegraphs for shots & punts (T5)
-
-**Owner:** Mr. Blue · **Branch scope:** `sim/match.lua`, `spec/sim/match_spec.lua`, `game/render/pitch.lua`, `game/render/player_renderer.lua`
+# Design: Wind-up telegraphs for shots & punts
 
 ## Why
 
 Shots resolve the same frame the input lands: nothing is readable, nothing can
 be anticipated or blocked on reaction. Real games give strikes a short wind-up
-that telegraphs them. Gap #4 in `docs/gameplay-gaps.md`.
+that telegraphs them.
 
 ## Player-facing behavior
 
@@ -61,7 +59,3 @@ that telegraphs them. Gap #4 in `docs/gameplay-gaps.md`.
    possession lost, no ball launch).
 3. Spec: AI shots also wind up (telegraph is universal).
 4. Full `./scripts/check.sh` green.
-
-## Done signal
-
-Output exactly: `Mr. Blue ✓ — <one-line summary>`

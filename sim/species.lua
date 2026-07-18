@@ -49,6 +49,12 @@ end
 
 ---@param owned_verb SimVerb
 ---@return number pixels
+function species.jump_lift(owned_verb)
+    return neutral_hook(owned_verb, "jump")
+end
+
+---@param owned_verb SimVerb
+---@return number pixels
 function species.collision_reach(owned_verb)
     return neutral_hook(owned_verb, "collision")
 end

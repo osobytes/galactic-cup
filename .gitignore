@@ -1,5 +1,12 @@
 # LÖVE build artifacts
 *.love
+*.AppImage
+*.exe
+*.dll
+*.msi
+*.dmg
+*.zip
+*.tar.gz
 build/
 dist/
 
@@ -8,15 +15,48 @@ dist/
 lua_modules/
 *.rock
 
-# OS / editor
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS / editor / local tools
 .DS_Store
+Thumbs.db
+Desktop.ini
 .vscode/
 .idea/
 *.swp
+*.swo
+*.swn
+*~
+.codex/
+.claude/
 
-# Logs
+# Logs, coverage, profiling, and scratch output
 *.log
+.cache/
+.tmp/
+tmp/
+coverage/
+*.lcov
+*.prof
+*.trace
 
 # Vendored type definitions (re-fetched by scripts/setup.sh)
 types/
-.claude/
+
+# Private planning and work-management material
+/docs/issues/
+/docs/agent_tasks.md
+/docs/gameplay-gaps.md
+/docs/mvp_implementation_plan.md
+/docs/slice.md
+/docs/design/orchestration.md
+/docs/design/manager-mode.md
+/docs/design/manager-mode-council-review.md
+/docs/design/season_metrics.md

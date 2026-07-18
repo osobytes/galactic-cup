@@ -7,6 +7,7 @@
 ---@field kind string?  -- "button" | "label" | "card" | "formation_preview" | ...
 ---@field text string?
 ---@field selected boolean?
+---@field focused boolean?
 ---@field data any?
 
 ---@alias Layout Widget[]

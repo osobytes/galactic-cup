@@ -6,7 +6,7 @@
 ---@field event fun(self: Screen, evt: InputEvent)?
 ---@field draw fun(self: Screen)?
 
----@alias InputEvent { kind: "key", key: string } | { kind: "click", x: number, y: number, button: number }
+---@alias InputEvent ActionEvent | { kind: "key", key: string } | { kind: "click", x: number, y: number, button: number } | RawGamepadEvent
 
 ---@class ScreenStack
 ---@field screens Screen[]
@@ -21,6 +21,15 @@ end
 ---@param screen Screen
 function ScreenStack:push(screen)
     self.screens[#self.screens + 1] = screen
+end
+
+---@param screen Screen
+function ScreenStack:replace(screen)
+    self.screens[#self.screens] = screen
+end
+
+function ScreenStack:clear()
+    self.screens = {}
 end
 
 ---@return Screen?

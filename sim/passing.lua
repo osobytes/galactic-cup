@@ -3,13 +3,14 @@
 local passing = {}
 
 local CONE_COS = 0.5 -- accept teammates within ~60 degrees of the aim direction
-local ALIGN_WEIGHT = 4 -- how strongly alignment beats proximity
-local DIST_NORM = 300 -- px of distance that costs one point of score
+local ALIGN_WEIGHT = 2 -- alignment breaks ties among comparable distances
+local DIST_NORM = 100 -- px of distance that costs one point of score
 
--- Pick the index of the best teammate to pass to. Alignment with the aim
--- direction dominates — pointing at a far, well-lined-up teammate beats a near
--- one off to the side — with a mild preference for the closer of two equally
--- aligned options. With `range` (a charged pass), the teammate whose distance
+-- Pick the index of the best teammate to pass to. A tap pass goes to the
+-- CLOSEST teammate along the aim direction — proximity dominates, with
+-- alignment deciding between comparable distances — so a quick pass reliably
+-- finds the near man you are pointing at. Reaching a far teammate is what the
+-- charge is for: with `range` (hold-to-charge), the teammate whose distance
 -- best matches the charged range wins instead. Returns nil if nobody is
 -- inside the aim cone.
 ---@param from Vec2

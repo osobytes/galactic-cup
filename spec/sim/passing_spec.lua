@@ -10,12 +10,20 @@ t.describe("passing.target", function()
         t.eq(passing.target(from, Vec2.new(1, 0), mates), 2)
     end)
 
-    t.it("a far teammate on the aim line beats a near one off to the side", function()
+    t.it("a tap goes short: the near man beats a far one dead on the line", function()
         local mates = {
             Vec2.new(60, 55), -- near, ~42 degrees off the aim
             Vec2.new(350, 0), -- far, dead on the aim line
         }
-        t.eq(passing.target(from, Vec2.new(1, 0), mates), 2)
+        t.eq(passing.target(from, Vec2.new(1, 0), mates), 1)
+    end)
+
+    t.it("a charged range picks out the far man on the line", function()
+        local mates = {
+            Vec2.new(60, 55), -- near, ~42 degrees off the aim
+            Vec2.new(350, 0), -- far, dead on the aim line
+        }
+        t.eq(passing.target(from, Vec2.new(1, 0), mates, 350), 2)
     end)
 
     t.it("ignores teammates behind the aim direction", function()

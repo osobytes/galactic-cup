@@ -6,6 +6,44 @@
 
 local renderer = {}
 
+---@class PlayerRenderOptions
+---@field facing Vec2
+---@field is_keeper boolean
+---@field controlled boolean
+---@field dashing boolean?
+---@field dive number?
+---@field dive_dir Vec2?
+---@field holding boolean?
+---@field grab number?
+---@field throw number?
+---@field windup number?
+---@field aerial number?
+---@field aerial_style AerialStyle?
+---@field aerial_outcome AerialOutcome?
+---@field aerial_jump number?
+---@field species_shape "round"|"broad"|"angular"|"cluster"?
+---@field species_color number[]?
+---@field team "home"|"away"?
+
+---@class PlayerSilhouetteProfile
+---@field torso_scale number
+---@field limb_scale number
+---@field head_kind "round"|"broad"|"angular"|"cluster"
+
+---@type table<string, PlayerSilhouetteProfile>
+local SILHOUETTES = {
+    round = { torso_scale = 1.1, limb_scale = 1, head_kind = "round" },
+    broad = { torso_scale = 1.5, limb_scale = 1.22, head_kind = "broad" },
+    angular = { torso_scale = 0.82, limb_scale = 0.82, head_kind = "angular" },
+    cluster = { torso_scale = 0.76, limb_scale = 1, head_kind = "cluster" },
+}
+
+---@param shape "round"|"broad"|"angular"|"cluster"
+---@return PlayerSilhouetteProfile
+function renderer.silhouette(shape)
+    return assert(SILHOUETTES[shape], "unknown player silhouette")
+end
+
 -- Global alpha multiplier for the current figure pass. Dash afterimages set this
 -- below 1 to draw faded ghosts; `set` honours it so every body part fades at once
 -- without threading an alpha through each call.
@@ -32,13 +70,15 @@ end
 ---@param r number
 ---@param color number[]
 ---@param v PlayerView?
----@param opts table
+---@param opts PlayerRenderOptions
 local function figure(bx, gy, r, color, v, opts)
     local sp = v and v.speed or 0
     local ph = v and v.phase or 0
     local run = clamp(sp / 90, 0, 1) -- 0 idle .. 1 full sprint
     local lean = v and v.lean or 0
-    local accent = lighten(color, 0.55)
+    local accent = opts.species_color or lighten(color, 0.55)
+    local shape = opts.species_shape or "round"
+    local silhouette = renderer.silhouette(shape)
 
     local swing = math.sin(ph) -- fore/aft limb phase
     -- Whole-body bounce: a gentle idle breath plus a run bob that peaks twice
@@ -50,8 +90,16 @@ local function figure(bx, gy, r, color, v, opts)
     local wu = opts.windup or 0
     local fx = opts.facing and opts.facing.x or 0
     local windup_lean = -fx * wu * r * 0.6 -- leans back opposite facing
+    local aerial = opts.aerial or 0
+    local aerial_style = opts.aerial_style
+    local action_lean = 0
+    if aerial_style == "header" then
+        action_lean = fx * aerial * r * 0.45
+    elseif aerial_style == "chest_control" then
+        action_lean = -fx * aerial * r * 0.25
+    end
 
-    local cx = bx + lean * r * 0.5 + windup_lean
+    local cx = bx + lean * r * 0.5 + windup_lean + action_lean
     local foot_y = gy
     local hip_y = gy - r * 1.35 - bounce - breath
     local sh_y = gy - r * 2.15 - bounce - breath
@@ -61,51 +109,128 @@ local function figure(bx, gy, r, color, v, opts)
     local hip_dx = r * 0.34
 
     -- Legs (pump in opposite phase). Boots are chunky blocks at the feet.
-    love.graphics.setLineWidth(math.max(1.5, r * 0.34))
+    local limb_scale = silhouette.limb_scale
+    love.graphics.setLineWidth(math.max(1.5, r * 0.34 * limb_scale))
     set(color, opts.is_keeper and 0.8 or 1)
     local lfx = cx - hip_dx + swing * stride
     local rfx = cx + hip_dx - swing * stride
-    love.graphics.line(cx - hip_dx, hip_y, lfx, foot_y)
-    love.graphics.line(cx + hip_dx, hip_y, rfx, foot_y)
+    local lfy, rfy = foot_y, foot_y
+    if aerial_style == "volley" or aerial_style == "leg_control" then
+        local strike_sign = (fx >= 0) and 1 or -1
+        lfx = cx + strike_sign * r * 1.45 * aerial
+        lfy = foot_y - r * 0.85 * aerial
+    end
+    love.graphics.line(cx - hip_dx, hip_y, lfx, lfy)
+    love.graphics.line(cx + hip_dx, hip_y, rfx, rfy)
     set(accent, 1)
     love.graphics.setLineWidth(math.max(1.5, r * 0.42))
-    love.graphics.line(lfx - r * 0.12, foot_y, lfx + r * 0.18, foot_y)
-    love.graphics.line(rfx - r * 0.12, foot_y, rfx + r * 0.18, foot_y)
+    love.graphics.line(lfx - r * 0.12, lfy, lfx + r * 0.18, lfy)
+    love.graphics.line(rfx - r * 0.12, rfy, rfx + r * 0.18, rfy)
 
     -- Arms (opposite the legs, swinging the other way).
-    love.graphics.setLineWidth(math.max(1.5, r * 0.26))
+    love.graphics.setLineWidth(math.max(1.5, r * 0.26 * limb_scale))
     set(color, opts.is_keeper and 0.8 or 1)
-    love.graphics.line(cx - r * 0.5, sh_y, cx - r * 0.55 - swing * stride * 0.6, hip_y + r * 0.2)
-    love.graphics.line(cx + r * 0.5, sh_y, cx + r * 0.55 + swing * stride * 0.6, hip_y + r * 0.2)
+    if aerial_style == "chest_control" then
+        love.graphics.line(cx - r * 0.5, sh_y, cx - r * (0.55 + 0.55 * aerial), sh_y + r * 0.2)
+        love.graphics.line(cx + r * 0.5, sh_y, cx + r * (0.55 + 0.55 * aerial), sh_y + r * 0.2)
+    else
+        love.graphics.line(
+            cx - r * 0.5,
+            sh_y,
+            cx - r * 0.55 - swing * stride * 0.6,
+            hip_y + r * 0.2
+        )
+        love.graphics.line(
+            cx + r * 0.5,
+            sh_y,
+            cx + r * 0.55 + swing * stride * 0.6,
+            hip_y + r * 0.2
+        )
+    end
 
     -- Torso (capsule: rounded rect from hips to shoulders).
-    local tw = r * 1.1
+    local tw = r * silhouette.torso_scale
     set(color, opts.is_keeper and 0.7 or 1)
-    love.graphics.rectangle("fill", cx - tw / 2, sh_y, tw, hip_y - sh_y, r * 0.45, r * 0.45)
+    if shape == "angular" then
+        love.graphics.polygon(
+            "fill",
+            cx - tw * 0.62,
+            sh_y,
+            cx + tw * 0.62,
+            sh_y,
+            cx + tw * 0.38,
+            hip_y,
+            cx - tw * 0.38,
+            hip_y
+        )
+    else
+        local roundness = shape == "broad" and r * 0.18 or r * 0.45
+        love.graphics.rectangle("fill", cx - tw / 2, sh_y, tw, hip_y - sh_y, roundness, roundness)
+    end
     -- Team joint band across the chest.
     set(accent, 0.9)
     love.graphics.setLineWidth(math.max(1, r * 0.18))
-    love.graphics.line(
-        cx - tw / 2,
-        sh_y + (hip_y - sh_y) * 0.4,
-        cx + tw / 2,
-        sh_y + (hip_y - sh_y) * 0.4
-    )
+    local band_y = sh_y + (hip_y - sh_y) * 0.4
+    if opts.team == "away" then
+        love.graphics.line(cx - tw / 2, band_y, cx - tw * 0.12, band_y)
+        love.graphics.line(cx + tw * 0.12, band_y, cx + tw / 2, band_y)
+    else
+        love.graphics.line(cx - tw / 2, band_y, cx + tw / 2, band_y)
+    end
 
     -- Helmet + visor. The visor sits on the side the player aims toward (its
     -- ground-plane x), giving a readable facing cue without rotating the body.
     local hr = r * 0.62
     set(color, 1)
-    love.graphics.circle("fill", cx, head_y, hr)
+    if shape == "broad" then
+        love.graphics.rectangle(
+            "fill",
+            cx - hr * 1.15,
+            head_y - hr * 0.65,
+            hr * 2.3,
+            hr * 1.3,
+            hr * 0.25,
+            hr * 0.25
+        )
+    elseif shape == "angular" then
+        love.graphics.polygon(
+            "fill",
+            cx,
+            head_y - hr * 1.35,
+            cx + hr * 0.9,
+            head_y + hr * 0.7,
+            cx,
+            head_y + hr,
+            cx - hr * 0.9,
+            head_y + hr * 0.7
+        )
+    elseif shape == "cluster" then
+        love.graphics.circle("fill", cx - hr * 0.7, head_y + hr * 0.2, hr * 0.68)
+        love.graphics.circle("fill", cx + hr * 0.7, head_y + hr * 0.2, hr * 0.68)
+        love.graphics.circle("fill", cx, head_y - hr * 0.55, hr * 0.72)
+    else
+        love.graphics.circle("fill", cx, head_y, hr)
+    end
     set(accent, 0.95)
-    love.graphics.arc(
-        "fill",
-        cx,
-        head_y,
-        hr * 0.82,
-        math.rad(-40) + fx * 0.6,
-        math.rad(90) + fx * 0.6
-    )
+    if shape == "round" then
+        love.graphics.arc(
+            "fill",
+            cx,
+            head_y,
+            hr * 0.82,
+            math.rad(-40) + fx * 0.6,
+            math.rad(90) + fx * 0.6
+        )
+    elseif shape == "cluster" then
+        love.graphics.circle("fill", cx + fx * hr * 0.3, head_y, hr * 0.22)
+    else
+        love.graphics.line(
+            cx - hr * 0.45,
+            head_y + fx * hr * 0.14,
+            cx + hr * 0.45,
+            head_y + fx * hr * 0.14
+        )
+    end
 end
 
 -- Draw one player.
@@ -114,11 +239,29 @@ end
 ---@param r number   -- projected body radius (px)
 ---@param color number[]
 ---@param v PlayerView?  -- nil = idle fallback
----@param opts { facing: Vec2, is_keeper: boolean, controlled: boolean, dashing: boolean?, dive: number?, dive_dir: Vec2?, holding: boolean?, grab: number?, throw: number?, windup: number? }
+---@param opts PlayerRenderOptions
 function renderer.draw(sx, gy, r, color, v, opts)
     -- Ground shadow (kept here so it tracks the figure).
     love.graphics.setColor(0, 0, 0, 0.35)
     love.graphics.ellipse("fill", sx, gy, r * 1.15, r * 0.5)
+
+    -- Selection is geometry-first: two rings and a downward chevron remain
+    -- readable in grayscale, during aerial poses, and during keeper dives.
+    if opts.controlled then
+        set({ 1, 1, 1 }, 0.92)
+        love.graphics.setLineWidth(math.max(1, r * 0.12))
+        love.graphics.ellipse("line", sx, gy, r * 1.25, r * 0.6)
+        love.graphics.ellipse("line", sx, gy, r * 1.48, r * 0.72)
+        love.graphics.polygon(
+            "fill",
+            sx,
+            gy - r * 3.75,
+            sx - r * 0.42,
+            gy - r * 4.25,
+            sx + r * 0.42,
+            gy - r * 4.25
+        )
+    end
 
     -- Keeper dive: pivot the whole body at the feet toward the dive side and
     -- shove it laterally, so the figure lunges horizontally for the save. `dive`
@@ -137,11 +280,25 @@ function renderer.draw(sx, gy, r, color, v, opts)
         return
     end
 
-    -- Selection ring on the ground, under everything.
-    if opts.controlled then
-        set({ 1, 1, 1 }, 0.9)
-        love.graphics.setLineWidth(math.max(1, r * 0.12))
-        love.graphics.ellipse("line", sx, gy, r * 1.25, r * 0.6)
+    -- Aerial actions use the ground point for sorting/shadow but lift the
+    -- billboard. A bicycle rotates the whole figure into a readable overhead
+    -- silhouette; other styles pose individual limbs in figure().
+    if opts.aerial and opts.aerial > 0 and opts.aerial_style then
+        local amount = clamp(opts.aerial, 0, 1)
+        local lift = r * (0.35 + 1.65 * (opts.aerial_jump or 0)) * amount
+        if opts.aerial_style == "bicycle" then
+            local fx = (opts.facing and opts.facing.x) or 1
+            local sign = (fx >= 0) and -1 or 1
+            love.graphics.push()
+            love.graphics.translate(sx, gy - lift - r * 0.7)
+            love.graphics.rotate(sign * math.rad(78) * amount)
+            love.graphics.translate(-sx, -gy)
+            figure(sx, gy, r, color, v, opts)
+            love.graphics.pop()
+        else
+            figure(sx, gy - lift, r, color, v, opts)
+        end
+        return
     end
 
     -- Dash afterimage: faded copies trailing backward along the facing direction

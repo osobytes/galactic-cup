@@ -30,7 +30,7 @@ local TAIL_CROSSBAR = 70 -- roof net height; a scored ball stays under the bar (
 local CELEBRATE_SECONDS = 1.6 -- the "brief delay" before playback begins
 local MATE_DELAY = 0.25 -- teammates set off this fraction into the run (scorer leads)
 local MOB_RADIUS = 30 -- how tightly teammates ring the scorer when they arrive
-local STRIKE = { shot = true, header = true, volley = true } -- events that score
+local STRIKE = { shot = true, header = true, volley = true, bicycle = true } -- events that score
 
 local buf, head, count = {}, 0, 0
 local phase = nil -- nil | "celebrate" | "playback"
@@ -101,6 +101,10 @@ function replay.record(s)
             grab_timer = p.grab_timer,
             throw_timer = p.throw_timer,
             windup_timer = p.windup_timer,
+            aerial_timer = p.aerial_timer,
+            aerial_style = p.aerial_style,
+            aerial_outcome = p.aerial_outcome,
+            aerial_jump = p.aerial_jump,
             sprint_meter = 1, -- keeps the HUD meter hidden during playback
             jockey_timer = 0,
         }

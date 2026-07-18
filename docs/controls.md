@@ -1,23 +1,26 @@
 # Controls
 
-## Match (current)
+## Match
 
-Two contextual action keys + sprint. The same key does the natural thing for the moment.
+Two contextual action buttons plus sprint. The same button does the natural
+thing for the moment, and the first fixture teaches the essential contexts
+without pausing play.
 
-| Action | Keys |
-|--------|------|
-| Move   | Arrow keys or WASD |
-| **Act** — shoot (with ball) / tackle (without) | Space |
-| **Play** — pass (with ball) / switch player (without) | K |
-| Sprint | Shift (hold) |
-| Lob / chip modifier | L (hold) |
-| Juke / Dodge | C |
-| Skip goal replay | Space or Enter |
-| Rematch (after full time) | R or Enter |
-| Tuning panel (playtest) | F1 (pauses; F2 save, F3 load) |
-| Toggle bloom | B (debug) |
-| Toggle mute | M |
-| Quit   | Esc |
+| Action | Keyboard | Gamepad |
+|--------|----------|---------|
+| Move | WASD or arrows | Left stick or D-pad |
+| **ACTION** — shoot / tackle | Space | A |
+| **PLAY** — pass / switch | K | X |
+| Sprint | Shift (hold) | LB (hold) |
+| Lob / chip modifier | L (hold) | Y (hold) |
+| Juke / dodge | C | L3 |
+| Pause | P or Esc | Start |
+| Skip replay / advance full time | Space or Enter | A |
+| Toggle mute | M | — |
+| Toggle fullscreen | F11 | — |
+
+Rematches are chosen on the dedicated result screen. Full time owns the pitch
+for a brief broadcast beat before that screen appears.
 
 - **Shooting** (Space with the ball) aims at the goal; hold up/down to place it into a corner.
   Hold Space to **charge** a harder shot; holding left/right at release **curves** it.
@@ -50,11 +53,16 @@ Two contextual action keys + sprint. The same key does the natural thing for the
   pass you make**: the moment the ball leaves your foot you're driving the receiver, so run
   onto the cross and meet it with Space — holding a direction at contact **aims the header or
   volley** wherever you point (undirected strikes go at goal).
-- **Aerial play**: an airborne ball at head height can be met first-time — press **Space**
-  under it. Above the waist it's a **header** (safe, placed); lower it's a **volley** — much
-  harder, but with a real chance of skying it. The arena is a **cage**: a skied ball bounces
-  off the ceiling and rains back into play. AI attackers head crosses at goal; AI defenders
-  head danger clear.
+- **Aerial reception**: do not press Space under a descending lob to control it. The player
+  automatically chooses an extended-leg or chest touch, jumping when needed, and cushions the
+  real ball toward their feet. Technique, mental, distance, ball pace, drop speed, required
+  jump, body alignment, movement, and pressure decide whether the touch is clean, heavy, or
+  missed. Hold a direction to cushion into that space.
+- **Aerial finishing**: hold **Space** under a dropping ball for a standing or jumping header /
+  volley. Hold **L + Space** to request a **bicycle kick** when the ball is overhead or behind;
+  invalid bicycle geometry safely falls back to a conventional strike. Bicycles are powerful
+  but difficult and leave the player recovering on the ground. The arena is a **cage**: a skied
+  strike bounces off the ceiling and rains back into play.
 - **The keeper is protected**: while a keeper holds the ball, everyone backs well off its ring
   (laws of the game — a keeper in possession can't be challenged), and markers drop off the
   outlets to guard the passing lanes instead of standing on the receiver's boots. Read the
@@ -92,12 +100,14 @@ simulation step), so taps don't get lost between frames.
 Every goal rolls an automatic **slow-motion replay** of the last few seconds
 from the broadcast camera — the buffer is recorded live every frame and played
 back through the normal renderer with interpolation, ending with the ball in
-the net. **Space/Enter** skips. Replay speed and length are on the tuning
-panel (F1 → Replay).
+the net. **Space/Enter or gamepad A** skips. Replay speed and length are on the
+direct-playtest tuning panel (F1 → Replay).
 
-## Tuning panel (playtesting)
+## Tuning panel (direct playtest profile only)
 
-Press **F1** during a match to pause and open the live tuning panel — the
+The default product shell hides tuning, bloom, and internal rematch controls.
+When the match screen is mounted directly with the `playtest` profile, press
+**F1** to pause and open the live tuning panel — the
 gameplay knobs from `sim/tuning.lua` (movement, attacking, defending, keeper,
 AI), editable mid-session the way studio balance tools work:
 
@@ -111,8 +121,5 @@ AI), editable mid-session the way studio balance tools work:
 
 ## Menus (pre-match flow)
 
-Mouse click to select formations/tactics and advance (Squad → Formation → Tactic → Match).
-
-## Planned
-
-- Keyboard navigation for menus
+Use the mouse, arrows/WASD plus Enter, or D-pad plus A. Every setup screen has
+a visible Back action. The flow is Squad → Formation → Tactic → Match.

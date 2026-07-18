@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Project quality gate: format-check, type-check, tests.
+# Project quality gate: format-check, type-check, tests, fun tripwire.
 # Each step is skipped (with a warning) if its tool isn't installed, so the
 # script is usable during bootstrap and strict once everything is present.
 set -uo pipefail
@@ -24,6 +24,13 @@ fi
 echo "==> Tests (love . --test)"
 if command -v love >/dev/null 2>&1; then
     love . --test || fail=1
+else
+    echo "   ! love not installed — skipping"
+fi
+
+echo "==> Fun tripwire (love . --tripwire)"
+if command -v love >/dev/null 2>&1; then
+    love . --tripwire || fail=1
 else
     echo "   ! love not installed — skipping"
 fi

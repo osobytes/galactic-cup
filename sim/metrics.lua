@@ -3,18 +3,29 @@
 -- MatchState after each step, never mutates it. The collector is driven by
 -- the headless runner (sim/headless.lua) but works against any stepped match.
 
+local TUNE = require("sim.tuning").values
+
 local metrics = {}
 
 -- Seconds a team must hold the ball before its possession is "settled" —
 -- the unit turnovers are counted in (see observe).
 metrics.SETTLE_HOLD = 0.7
 
+---@class DribbleMetricCollector
+---@field carry_s number
+---@field close_s number
+---@field sprint_s number
+---@field juke_s number
+---@field touches integer
+---@field heavy_losses integer
+---@field jukes integer
+
 ---@class MetricsCollector
 ---@field t number  -- seconds observed so far
 ---@field goals { t: number, team: "home"|"away" }[]
 ---@field prev_home integer
 ---@field prev_away integer
----@field shots integer  -- outfield strikes at goal (shot/header/volley)
+---@field shots integer  -- outfield strikes at goal (shot/header/volley/bicycle)
 ---@field saves integer  -- keeper catches + parries
 ---@field passes integer
 ---@field passes_completed integer
@@ -28,6 +39,10 @@ metrics.SETTLE_HOLD = 0.7
 ---@field longest_drought number
 ---@field team_of table<string, "home"|"away">  -- player id -> team
 ---@field keeper table<string, boolean>  -- player id -> is_keeper
+---@field index_of table<string, integer>  -- player id -> MatchState index
+---@field prev_owner_id string?
+---@field prev_owner_role "controlled"|"ai"|nil
+---@field dribble { controlled: DribbleMetricCollector, ai: DribbleMetricCollector }
 
 -- Per-match results. Rate metrics are nil when their denominator never
 -- happened (e.g. save_rate with zero on-target shots) and are skipped by the
@@ -48,6 +63,20 @@ metrics.SETTLE_HOLD = 0.7
 ---@field turnovers_per_min number
 ---@field possession_balance number?  -- home share of owned time
 ---@field longest_drought_s number
+---@field controlled_dribble_carry_s number
+---@field controlled_dribble_close_share number?
+---@field controlled_dribble_sprint_share number?
+---@field controlled_dribble_juke_share number?
+---@field controlled_dribble_touches_per_min number
+---@field controlled_dribble_heavy_losses_per_min number
+---@field controlled_jukes integer
+---@field ai_dribble_carry_s number
+---@field ai_dribble_close_share number?
+---@field ai_dribble_sprint_share number?
+---@field ai_dribble_juke_share number?
+---@field ai_dribble_touches_per_min number
+---@field ai_dribble_heavy_losses_per_min number
+---@field ai_jukes integer
 ---@field fun number?  -- composite score, stamped on by the headless runner
 
 -- Trapezoid desirability bands {zero_lo, good_lo, good_hi, zero_hi}: worth 1
@@ -72,10 +101,27 @@ metrics.bands = {
 ---@param s MatchState
 ---@return MetricsCollector
 function metrics.new(s)
-    local team_of, keeper = {}, {}
-    for _, p in ipairs(s.players) do
+    local team_of, keeper, index_of = {}, {}, {}
+    for i, p in ipairs(s.players) do
         team_of[p.id] = p.team
         keeper[p.id] = p.is_keeper or false
+        index_of[p.id] = i
+    end
+    local prev_owner = s.owner and s.players[s.owner] or nil
+    local prev_role = nil
+    if prev_owner and not prev_owner.is_keeper then
+        prev_role = s.human_controlled and s.owner == s.controlled and "controlled" or "ai"
+    end
+    local function dribble_bucket()
+        return {
+            carry_s = 0,
+            close_s = 0,
+            sprint_s = 0,
+            juke_s = 0,
+            touches = 0,
+            heavy_losses = 0,
+            jukes = 0,
+        }
     end
     return {
         t = 0,
@@ -96,7 +142,25 @@ function metrics.new(s)
         longest_drought = 0,
         team_of = team_of,
         keeper = keeper,
+        index_of = index_of,
+        prev_owner_id = prev_owner and prev_owner.id or nil,
+        prev_owner_role = prev_role,
+        dribble = { controlled = dribble_bucket(), ai = dribble_bucket() },
     }
+end
+
+---@param s MatchState
+---@param player_id string
+---@return "controlled"|"ai"
+local function dribble_role(s, player_id)
+    local index = nil
+    for i, p in ipairs(s.players) do
+        if p.id == player_id then
+            index = i
+            break
+        end
+    end
+    return s.human_controlled and index == s.controlled and "controlled" or "ai"
 end
 
 -- Observe one frame, AFTER match.step(s, dt, ...) for the same dt (so
@@ -115,11 +179,26 @@ function metrics.observe(c, s, dt)
             c.pending_pass = team
         elseif e.kind == "catch" or e.kind == "parry" then
             c.saves = c.saves + 1
-        elseif (e.kind == "shot" or e.kind == "header" or e.kind == "volley") and not is_keeper then
+        elseif
+            (e.kind == "shot" or e.kind == "header" or e.kind == "volley" or e.kind == "bicycle")
+            and not is_keeper
+        then
             -- Keeper "shot" events are punts/clearances, not strikes at goal.
             c.shots = c.shots + 1
             c.longest_drought = math.max(c.longest_drought, c.t - c.last_chance_t)
             c.last_chance_t = c.t
+        elseif e.kind == "touch" and e.player and c.prev_owner_id == e.player then
+            local role = c.prev_owner_role or "ai"
+            local bucket = c.dribble[role]
+            local owner = s.owner and s.players[s.owner] or nil
+            if owner and owner.id == e.player then
+                bucket.touches = bucket.touches + 1
+            elseif not owner then
+                bucket.heavy_losses = bucket.heavy_losses + 1
+            end
+        elseif e.kind == "juke" and e.player then
+            local role = dribble_role(s, e.player)
+            c.dribble[role].jukes = c.dribble[role].jukes + 1
         end
     end
 
@@ -157,6 +236,31 @@ function metrics.observe(c, s, dt)
             end
             c.settled_team = owner_team
         end
+    end
+
+    if s.owner then
+        local owner = s.players[s.owner]
+        if not owner.is_keeper then
+            local role = s.human_controlled and s.owner == s.controlled and "controlled" or "ai"
+            local bucket = c.dribble[role]
+            bucket.carry_s = bucket.carry_s + dt
+            if owner.vel:length() < owner.move_speed * TUNE.DRIBBLE_CLOSE then
+                bucket.close_s = bucket.close_s + dt
+            end
+            if owner.sprinting then
+                bucket.sprint_s = bucket.sprint_s + dt
+            end
+            if owner.dodge_timer > 0 then
+                bucket.juke_s = bucket.juke_s + dt
+            end
+            c.prev_owner_role = role
+        else
+            c.prev_owner_role = nil
+        end
+        c.prev_owner_id = owner.id
+    else
+        c.prev_owner_id = nil
+        c.prev_owner_role = nil
     end
 end
 
@@ -221,6 +325,8 @@ function metrics.finish(c, s)
     local gh, ga = s.score.home, s.score.away
     local owned = c.own_time.home + c.own_time.away
     local on_target = c.saves + gh + ga
+    local controlled = c.dribble.controlled
+    local ai_dribble = c.dribble.ai
     return {
         duration = c.t,
         goals_home = gh,
@@ -237,6 +343,38 @@ function metrics.finish(c, s)
         turnovers_per_min = c.t > 0 and c.turnovers / (c.t / 60) or 0,
         possession_balance = owned > 0 and c.own_time.home / owned or nil,
         longest_drought_s = c.longest_drought,
+        controlled_dribble_carry_s = controlled.carry_s,
+        controlled_dribble_close_share = controlled.carry_s > 0
+                and controlled.close_s / controlled.carry_s
+            or nil,
+        controlled_dribble_sprint_share = controlled.carry_s > 0
+                and controlled.sprint_s / controlled.carry_s
+            or nil,
+        controlled_dribble_juke_share = controlled.carry_s > 0
+                and controlled.juke_s / controlled.carry_s
+            or nil,
+        controlled_dribble_touches_per_min = controlled.carry_s > 0
+                and controlled.touches / (controlled.carry_s / 60)
+            or 0,
+        controlled_dribble_heavy_losses_per_min = controlled.carry_s > 0
+                and controlled.heavy_losses / (controlled.carry_s / 60)
+            or 0,
+        controlled_jukes = controlled.jukes,
+        ai_dribble_carry_s = ai_dribble.carry_s,
+        ai_dribble_close_share = ai_dribble.carry_s > 0 and ai_dribble.close_s / ai_dribble.carry_s
+            or nil,
+        ai_dribble_sprint_share = ai_dribble.carry_s > 0
+                and ai_dribble.sprint_s / ai_dribble.carry_s
+            or nil,
+        ai_dribble_juke_share = ai_dribble.carry_s > 0 and ai_dribble.juke_s / ai_dribble.carry_s
+            or nil,
+        ai_dribble_touches_per_min = ai_dribble.carry_s > 0
+                and ai_dribble.touches / (ai_dribble.carry_s / 60)
+            or 0,
+        ai_dribble_heavy_losses_per_min = ai_dribble.carry_s > 0
+                and ai_dribble.heavy_losses / (ai_dribble.carry_s / 60)
+            or 0,
+        ai_jukes = ai_dribble.jukes,
     }
 end
 

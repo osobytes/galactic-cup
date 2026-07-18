@@ -1,16 +1,59 @@
 local t = require("spec.support.runner")
 local metrics = require("sim.metrics")
+local Vec2 = require("core.vec2")
 
 -- A minimal MatchState-shaped table: enough surface for the collector.
 local function fake_state()
     return {
         players = {
-            { id = "h_keeper", team = "home", is_keeper = true },
-            { id = "h1", team = "home", is_keeper = false },
-            { id = "h2", team = "home", is_keeper = false },
-            { id = "a_keeper", team = "away", is_keeper = true },
-            { id = "a1", team = "away", is_keeper = false },
+            {
+                id = "h_keeper",
+                team = "home",
+                is_keeper = true,
+                vel = Vec2.new(0, 0),
+                move_speed = 180,
+                sprinting = false,
+                dodge_timer = 0,
+            },
+            {
+                id = "h1",
+                team = "home",
+                is_keeper = false,
+                vel = Vec2.new(0, 0),
+                move_speed = 180,
+                sprinting = false,
+                dodge_timer = 0,
+            },
+            {
+                id = "h2",
+                team = "home",
+                is_keeper = false,
+                vel = Vec2.new(0, 0),
+                move_speed = 180,
+                sprinting = false,
+                dodge_timer = 0,
+            },
+            {
+                id = "a_keeper",
+                team = "away",
+                is_keeper = true,
+                vel = Vec2.new(0, 0),
+                move_speed = 180,
+                sprinting = false,
+                dodge_timer = 0,
+            },
+            {
+                id = "a1",
+                team = "away",
+                is_keeper = false,
+                vel = Vec2.new(0, 0),
+                move_speed = 180,
+                sprinting = false,
+                dodge_timer = 0,
+            },
         },
+        human_controlled = true,
+        controlled = 2,
         score = { home = 0, away = 0 },
         owner = nil,
         events = {},
@@ -88,6 +131,35 @@ t.describe("metrics.observe", function()
         t.eq(m.goals_home, 1)
         t.near(c.goals[1].t, 31, 1e-9)
         t.near(m.longest_drought_s, 50, 1e-9, "the post-goal tail is a drought")
+    end)
+
+    t.it("separates controlled and team-AI dribble usage", function()
+        local s = fake_state()
+        local c = metrics.new(s)
+        frame(c, s, { owner = 2, dt = 1 }) -- controlled close control
+        s.players[2].vel = Vec2.new(260, 0)
+        s.players[2].sprinting = true
+        s.players[2].dodge_timer = 0.1
+        frame(c, s, {
+            owner = 2,
+            dt = 1,
+            events = {
+                { kind = "touch", player = "h1" },
+                { kind = "juke", player = "h1" },
+            },
+        })
+        frame(c, s, { owner = nil, events = { { kind = "touch", player = "h1" } } })
+        s.players[5].vel = Vec2.new(-180, 0)
+        frame(c, s, { owner = 5, dt = 2 }) -- team AI, close control
+        local m = metrics.finish(c, s)
+        t.near(m.controlled_dribble_carry_s, 2, 1e-9)
+        t.near(m.controlled_dribble_close_share, 0.5, 1e-9)
+        t.near(m.controlled_dribble_sprint_share, 0.5, 1e-9)
+        t.eq(m.controlled_jukes, 1)
+        t.near(m.controlled_dribble_touches_per_min, 30, 1e-9)
+        t.near(m.controlled_dribble_heavy_losses_per_min, 30, 1e-9)
+        t.near(m.ai_dribble_carry_s, 2, 1e-9)
+        t.near(m.ai_dribble_close_share, 1, 1e-9)
     end)
 end)
 

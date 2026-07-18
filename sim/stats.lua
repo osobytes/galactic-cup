@@ -35,6 +35,33 @@ function stats.dribble(s)
     return math.min(1, BASE_DRIBBLE + s.technique * DRIBBLE_PER_TECH)
 end
 
+-- Aerial actions reuse the authored five-stat vocabulary. Pace determines
+-- whether a player reaches the ball; these factors resolve contact quality.
+
+---@param s StatBlock
+---@return number  -- 0..1 reception quality
+function stats.first_touch(s)
+    return math.min(1, (s.technique * 0.75 + s.mental * 0.25) / 10)
+end
+
+---@param s StatBlock
+---@return number  -- 0..1 header contact quality
+function stats.header(s)
+    return math.min(1, (s.technique * 0.35 + s.mental * 0.35 + s.strength * 0.30) / 10)
+end
+
+---@param s StatBlock
+---@return number  -- 0..1 volley contact quality
+function stats.volley(s)
+    return math.min(1, (s.technique * 0.65 + s.mental * 0.20 + s.strength * 0.15) / 10)
+end
+
+---@param s StatBlock
+---@return number  -- 0..1 bicycle-kick contact quality
+function stats.bicycle(s)
+    return math.min(1, (s.technique * 0.70 + s.mental * 0.20 + s.strength * 0.10) / 10)
+end
+
 -- Sprint: the hold-to-run burst. Stamina sets how long a full tank lasts.
 local BASE_SPRINT = 2.2 -- seconds of sprint at stamina 0
 local SPRINT_PER_STAMINA = 0.25 -- extra seconds per stamina point

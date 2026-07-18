@@ -76,9 +76,9 @@ t.describe("lever_metrics.lever_liveness", function()
     end)
 
     t.it("registers outcome and banded-metric movement for a real tactic lever", function()
-        -- Thirty full matches per option make this fixture-level integration
-        -- assertion resistant to a single anomalous seed while staying cheap.
-        local result = lever_metrics.lever_liveness(press, counter, seed_set(30))
+        -- Sixty full matches per option keep the discrete win-rate assertion
+        -- stable when gameplay tuning changes a handful of seed outcomes.
+        local result = lever_metrics.lever_liveness(press, counter, seed_set(60))
         t.is_true(math.abs(result.dwin_pts) > 0, "different tactics must move home win share")
         t.is_true(#result.moved_metrics > 0, "different tactics must move a banded metric")
     end)

@@ -14,6 +14,8 @@
 ---@class FormationData
 ---@field id string
 ---@field name string
+---@field strength string?
+---@field risk string?
 ---@field keeper Anchor
 ---@field outfield Anchor[]  -- exactly 4
 
@@ -24,6 +26,8 @@ return {
     ["2-1-1"] = {
         id = "2-1-1",
         name = "Balanced",
+        strength = "Two defenders protect the middle.",
+        risk = "The lone forward can become isolated.",
         keeper = GK,
         outfield = {
             { x = 0.28, y = 0.30 }, -- defender
@@ -35,6 +39,8 @@ return {
     ["1-2-1"] = {
         id = "1-2-1",
         name = "Control",
+        strength = "Two midfielders create passing angles.",
+        risk = "Only one defender guards counterattacks.",
         keeper = GK,
         outfield = {
             { x = 0.26, y = 0.50 }, -- defender
@@ -46,6 +52,8 @@ return {
     ["1-1-2"] = {
         id = "1-1-2",
         name = "Aggressive",
+        strength = "Two forwards keep constant goal pressure.",
+        risk = "Large spaces open behind the first press.",
         keeper = GK,
         outfield = {
             { x = 0.26, y = 0.50 }, -- defender

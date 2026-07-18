@@ -34,6 +34,14 @@ t.describe("match screen rematch (tier 2)", function()
         m:event({ kind = "key", key = "k" })
         t.is_true(not m._pass, "pass input does not buffer on the full-time screen")
     end)
+
+    t.it("leaves rematch ownership to the result screen in product mode", function()
+        local m = Match.new({ profile = "product" })
+        m.state.finished = true
+        m:event({ kind = "key", key = "r" })
+        m:event({ kind = "action", action = "confirm" })
+        t.is_true(m.state.finished)
+    end)
 end)
 
 t.describe("match screen contextual controls (tier 2)", function()
@@ -150,8 +158,8 @@ t.describe("match screen lob latch (tier 2)", function()
         with_keys(function(down)
             local m = Match.new()
             down.k = true
-            for _ = 1, 30 do -- half a second of holding K
-                m:update(1 / 60)
+            for _ = 1, 20 do -- a third of a second of holding K
+                m:update(1 / 60) -- (a full meter would auto-fire and reset)
             end
             t.is_true(m.state.pass_charge > 0.5, "the pass range charged up")
         end)
