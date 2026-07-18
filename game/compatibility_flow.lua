@@ -29,8 +29,9 @@ end
 
 ---@param app App
 ---@param id string
+---@param before_click fun()?
 ---@return boolean
-local function click_widget(app, id)
+local function click_widget(app, id, before_click)
     local screen = app.stack:current()
     ---@cast screen Menu
     if not screen or not screen.def or not screen.def.layout or not screen.state then
@@ -45,6 +46,9 @@ local function click_widget(app, id)
         widget.rect.x + widget.rect.w / 2,
         widget.rect.y + widget.rect.h / 2
     )
+    if before_click then
+        before_click()
+    end
     app:event({ kind = "click", x = x, y = y, button = 1 })
     return true
 end
@@ -65,10 +69,14 @@ function CompatibilityFlow:update(app, now)
     if route == "match" and app.adapter.kind == "fake" then
         widget = "complete"
     end
-    if widget and click_widget(app, widget) then
-        if self.record_input then
-            self.record_input("compat_click_" .. widget)
-        end
+    if
+        widget
+        and click_widget(app, widget, function()
+            if self.record_input then
+                self.record_input("compat_click_" .. widget)
+            end
+        end)
+    then
         self.next_action_at = now + self.action_delay
     end
 end

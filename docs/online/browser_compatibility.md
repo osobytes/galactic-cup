@@ -91,16 +91,7 @@ and reviewed before public deployment.
 | Clean Result transition | Match was live in the captured run; result transition pending | Missing |
 | 10-minute stability and memory | No task-manager/heap capture in this worker | Unavailable |
 
-No follow-up issue is proposed from this worker: the missing rows are
-environment/evidence acquisition blockers rather than a reproducible browser
-compatibility defect. The parent decision should keep them inconclusive per the
-fixed acceptance rules.
-
-## Shared-file rebase note for issue #4
-
-Issue #3 changes only the authored `BROWSER_LOADER` string in
-`scripts/web_build.py` (the `browser_compat` object, `mark` helper, loader
-asset/runtime/error markers) and the corresponding marker/package assertions
-in `scripts/web_smoke.sh`. The transport bridge should be rebased by replaying
-its own hunks around those sections; no transport code or filesystem behavior
-was changed here.
+Required stable-browser, Windows, lifecycle, gamepad, and memory evidence is
+tracked in issue #16. Those missing rows are environment/evidence acquisition
+blockers rather than reproducible browser compatibility defects. The parent
+decision remains inconclusive until #16 satisfies the fixed acceptance rules.
