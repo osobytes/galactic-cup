@@ -80,6 +80,17 @@ for marker in ("GalacticCupWebRTCProof", "RTCPeerConnection", "GC_WEBRTC"):
     if marker not in loader:
         raise SystemExit(f"browser loader is missing WebRTC proof marker: {marker}")
 
+style = (artifact / "style.css").read_text(encoding="utf-8")
+for marker in (
+    "Galactic Cup preserves its 960x540 canvas aspect ratio",
+    "#canvas:not(:fullscreen)",
+    "width: min(100vw, 177.7777777778vh) !important",
+    "height: min(100vh, 56.25vw) !important",
+    "transform: translate(-50%, -50%)",
+):
+    if marker not in style:
+        raise SystemExit(f"browser stylesheet is missing aspect-ratio rule: {marker}")
+
 proof_page = (artifact / "webrtc-proof.html").read_text(encoding="utf-8")
 proof_runner = (artifact / "webrtc-proof.js").read_text(encoding="utf-8")
 for marker in ("signal-input", "signal-output", "start-traffic", "diagnostics"):
