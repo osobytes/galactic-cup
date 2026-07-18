@@ -18,6 +18,7 @@
     network_profile: profile
   }, profileOptions));
   var runStartedAt = null;
+  var runCompletedAt = null;
   var runCompleted = false;
 
   var status = document.getElementById("status");
@@ -51,7 +52,9 @@
     var report = proof.diagnostics();
     report.run_completed = runCompleted;
     report.requested_duration_ms = duration;
-    report.runner_elapsed_ms = runStartedAt === null ? 0 : Date.now() - runStartedAt;
+    report.runner_elapsed_ms = runStartedAt === null
+      ? 0
+      : (runCompletedAt || Date.now()) - runStartedAt;
     diagnostics.textContent = JSON.stringify(report, null, 2);
     startTraffic.disabled = !proof.handshake_complete || proof.input_timer !== null;
     stopTraffic.disabled = proof.input_timer === null;
@@ -100,9 +103,11 @@
 
   function beginTraffic() {
     runStartedAt = Date.now();
+    runCompletedAt = null;
     runCompleted = false;
     var result = proof.start_input({ hz: 60, duration_ms: duration });
     window.setTimeout(function () {
+      runCompletedAt = Date.now();
       runCompleted = true;
       refresh();
     }, duration + 100);
@@ -112,6 +117,7 @@
 
   function endTraffic() {
     proof.stop_input();
+    runCompletedAt = Date.now();
     return refresh();
   }
 

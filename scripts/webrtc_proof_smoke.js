@@ -78,6 +78,13 @@ async function main() {
   if (baselineHost.received === 0 || baselineGuest.received === 0) {
     throw new Error("baseline input was not exchanged");
   }
+  if (
+    baselineHost.input_duration_s <= 0 ||
+    baselineHost.queue_p95 === null ||
+    baselineGuest.queue_p95 === null
+  ) {
+    throw new Error("traffic-window rate or queue percentiles are missing");
+  }
   stop(baseline);
 
   const shapedOptions = {
@@ -111,10 +118,29 @@ async function main() {
 
   const mismatch = proofPair({}, { build_id: "mismatch" });
   await delay(25);
-  if (!mismatch.host.last_error || mismatch.host.last_error.code !== "build_mismatch") {
+  if (
+    !mismatch.host.last_error ||
+    mismatch.host.last_error.code !== "build_mismatch" ||
+    !mismatch.guest.last_error ||
+    mismatch.guest.last_error.code !== "build_mismatch"
+  ) {
     throw new Error("build mismatch was not rejected");
   }
   stop(mismatch);
+
+  const malformed = api.create({ role: "host", build_id: "same" });
+  malformed.control = { readyState: "open", bufferedAmount: 0, send() {} };
+  malformed.receiveControl(api.encode("event", 0, null, JSON.stringify({ kind: "unknown" })));
+  if (!malformed.last_error || malformed.last_error.code !== "malformed") {
+    throw new Error("unknown control message was not rejected");
+  }
+
+  const oversized = api.create({ role: "host", build_id: "same" });
+  oversized.control = { readyState: "open", bufferedAmount: 0, send() {} };
+  oversized.receiveControl("x".repeat(513));
+  if (!oversized.last_error || oversized.last_error.code !== "message_too_large") {
+    throw new Error("oversized control message was not rejected");
+  }
 
   console.log("WebRTC proof smoke: OK");
 }

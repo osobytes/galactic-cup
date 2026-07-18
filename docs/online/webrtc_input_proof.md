@@ -127,8 +127,10 @@ variables; reload both contexts before a repeat.
 The expected report includes handshake/build identity, role, send and receive
 rates, unique ticks, history retransmits, sequence gaps, out-of-order samples,
 drops, shaper drops, current and maximum queue depth, RTT p50/p95/max, jitter
-p50/p95/max, and disconnect reason. `GC_WEBRTC|...` console markers provide a
-line-oriented capture alongside the JSON diagnostics.
+p50/p95/max, and disconnect reason. Send/receive rates use only the bounded
+traffic window; queue diagnostics include p50, p95, and maximum depth sampled
+once per input tick. `GC_WEBRTC|...` console markers provide a line-oriented
+capture alongside the JSON diagnostics.
 
 ## Mismatch proof
 

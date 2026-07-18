@@ -4,6 +4,7 @@
 
   var VERSION = 1;
   var MAX_HISTORY = 6;
+  var MAX_MESSAGE_BYTES = 512;
   var MAX_INPUT_BYTES = 128;
   var MAX_QUEUE_DEPTH = 64;
   var INPUT_SIZE_ESTIMATE = 160;
@@ -112,6 +113,8 @@
     this.tick = 0;
     this.history = [];
     this.input_timer = null;
+    this.input_started_at = null;
+    this.input_stopped_at = null;
     this.ping_timer = null;
     this.started_at = now();
     this.events = [];
@@ -131,6 +134,7 @@
     this.rtt_samples = [];
     this.jitter_samples = [];
     this.pending_pings = Object.create(null);
+    this.queue_depth_samples = [];
     this.max_queue_depth = 0;
     this.last_error = null;
     this._handshake_sent = false;
@@ -156,7 +160,9 @@
   };
 
   Proof.prototype.fail = function (code, detail) {
-    this.last_error = { code: code, detail: detail };
+    if (!this.last_error) {
+      this.last_error = { code: code, detail: detail };
+    }
     this.state = "error";
     this.record("error", { code: code, detail: detail });
     if (this.pc && this.pc.connectionState !== "closed") {
@@ -308,7 +314,13 @@
       this.record("queue_overflow", { channel: "control" });
       return false;
     }
-    this.sendShaped(this.control, wire("event", this.control_seq++, null, JSON.stringify(message)), false);
+    var value = wire("event", this.control_seq++, null, JSON.stringify(message));
+    if (byteLength(value) > MAX_MESSAGE_BYTES) {
+      this.dropped += 1;
+      this.record("control_rejected", { reason: "message_too_large" });
+      return false;
+    }
+    this.sendShaped(this.control, value, false);
     return true;
   };
 
@@ -352,6 +364,10 @@
   };
 
   Proof.prototype.receiveControl = function (value) {
+    if (typeof value !== "string" || byteLength(value) > MAX_MESSAGE_BYTES) {
+      this.reject("message_too_large", "control message exceeds 512 bytes");
+      return;
+    }
     var message = parseWire(value);
     if (message.code) {
       this.reject(message.code, message.detail);
@@ -403,12 +419,18 @@
       this.record("rtt", { rtt_ms: rtt.toFixed(3) });
     } else if (payload.kind === "reject") {
       this.fail(payload.code || "rejected", payload.detail || "peer rejected the handshake");
+    } else {
+      this.reject("malformed", "control message kind is unsupported");
     }
   };
 
   Proof.prototype.receiveInput = function (value) {
     if (!this.handshake_complete) {
       this.record("input_rejected", { reason: "handshake_incomplete" });
+      return;
+    }
+    if (typeof value !== "string" || byteLength(value) > MAX_MESSAGE_BYTES) {
+      this.record("input_rejected", { reason: "message_too_large" });
       return;
     }
     var message = parseWire(value);
@@ -480,6 +502,9 @@
       return this.fail("not_connected", "input traffic requires an open handshaken channel");
     }
     this.stopInput();
+    this.input_started_at = now();
+    this.input_stopped_at = null;
+    this.queue_depth_samples = [];
     var period = 1000 / hz;
     var next_tick_at = now() + period;
     var schedule_next = function () {
@@ -492,9 +517,11 @@
     var send_tick = function () {
       if (!this.input || this.input.readyState !== "open") {
         this.input_timer = null;
+        this.input_stopped_at = now();
         return;
       }
       var queue_depth = Math.ceil(this.input.bufferedAmount / INPUT_SIZE_ESTIMATE) + this.shaper_pending;
+      this.queue_depth_samples.push(queue_depth);
       this.max_queue_depth = Math.max(this.max_queue_depth, queue_depth);
       if (queue_depth >= this.queue_limit || queue_depth >= MAX_QUEUE_DEPTH) {
         this.dropped += 1;
@@ -535,6 +562,7 @@
     if (this.input_timer) {
       window.clearTimeout(this.input_timer);
       this.input_timer = null;
+      this.input_stopped_at = now();
       this.record("input_stopped", {});
     }
   };
@@ -560,6 +588,9 @@
 
   Proof.prototype.diagnostics = function () {
     var elapsed = Math.max((now() - this.started_at) / 1000, 0.001);
+    var input_elapsed = this.input_started_at === null
+      ? 0
+      : Math.max(((this.input_stopped_at || now()) - this.input_started_at) / 1000, 0.001);
     var queue_depth = this.input
       ? Math.ceil(this.input.bufferedAmount / INPUT_SIZE_ESTIMATE) + this.shaper_pending
       : this.shaper_pending;
@@ -574,8 +605,9 @@
       input_loss_percent: this.input_loss_percent,
       handshake_complete: this.handshake_complete,
       duration_s: elapsed,
-      send_rate: this.sent / elapsed,
-      receive_rate: this.received / elapsed,
+      input_duration_s: input_elapsed,
+      send_rate: input_elapsed > 0 ? this.sent / input_elapsed : 0,
+      receive_rate: input_elapsed > 0 ? this.received / input_elapsed : 0,
       sent: this.sent,
       received: this.received,
       unique_ticks: this.unique_ticks,
@@ -587,6 +619,8 @@
       shaper_pending: this.shaper_pending,
       max_shaper_pending: this.max_shaper_pending,
       queue_depth: queue_depth,
+      queue_p50: percentile(this.queue_depth_samples, 0.50),
+      queue_p95: percentile(this.queue_depth_samples, 0.95),
       max_queue_depth: Math.max(this.max_queue_depth, queue_depth),
       rtt_p50_ms: percentile(this.rtt_samples, 0.50),
       rtt_p95_ms: percentile(this.rtt_samples, 0.95),

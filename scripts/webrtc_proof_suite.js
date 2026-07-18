@@ -72,7 +72,8 @@
       await waitFor(function () {
         var hostReport = host.diagnostics();
         var guestReport = guest.diagnostics();
-        return hostReport.last_error || guestReport.last_error;
+        return hostReport.last_error && hostReport.last_error.code === "build_mismatch" &&
+          guestReport.last_error && guestReport.last_error.code === "build_mismatch";
       }, 10000);
       return;
     }
