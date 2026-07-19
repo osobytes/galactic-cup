@@ -91,8 +91,9 @@ end
 ---@param value MatchObserver
 ---@param state MatchState
 ---@param dt number
-function observer.observe(value, state, dt)
-    for _, event in ipairs(state.events) do
+---@param events MatchEvent[]?
+function observer.observe(value, state, dt, events)
+    for _, event in ipairs(events or state.events) do
         local team = event_team(state, event)
         if event.kind == "pass" and team then
             value.passes[team] = value.passes[team] + 1

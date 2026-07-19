@@ -73,9 +73,11 @@ function effects.reset()
     last_sample = nil
 end
 
+-- Consume one simulated state's events and position sample. This is separate
+-- from `tick` so a render frame that produces zero simulation ticks can still
+-- animate existing particles.
 ---@param s MatchState
----@param dt number
-function effects.update(s, dt)
+function effects.consume(s)
     -- Spawn from this frame's events.
     for _, e in ipairs(s.events) do
         if e.kind == "shot" then
@@ -143,7 +145,11 @@ function effects.update(s, dt)
     else
         last_sample = nil
     end
+end
 
+-- Advance renderer-owned particles at display cadence.
+---@param dt number
+function effects.tick(dt)
     for i = #trail, 1, -1 do
         trail[i].life = trail[i].life - dt
         if trail[i].life <= 0 then
@@ -163,6 +169,15 @@ function effects.update(s, dt)
             table.remove(particles, i)
         end
     end
+end
+
+-- Compatibility helper for callers that have one simulation step per render
+-- frame. Fixed-clock callers consume each tick then animate once per render.
+---@param s MatchState
+---@param dt number
+function effects.update(s, dt)
+    effects.consume(s)
+    effects.tick(dt)
 end
 
 -- Ball trail. Draw under the ball (call before the depth-sorted entities).

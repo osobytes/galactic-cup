@@ -5,6 +5,10 @@ simulation. It does not gather keyboard/gamepad input, send packets, predict a
 remote player, or step `sim.match`. Those adapters are deliberately deferred
 to later OMP-1 and OMP-2 work.
 
+The 60 Hz authority, tick numbering, and overload policy are documented in
+[`fixed_tick.md`](fixed_tick.md). This record defines the data supplied to that
+tick boundary; it does not own the render-time accumulator.
+
 ## Stable outfield ownership
 
 A fixture has exactly eight human-input slots. Their order is canonical and
