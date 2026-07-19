@@ -2,6 +2,13 @@
 
 Status: baseline criteria fixed before browser implementation.
 
+This file remains the historical predeclared OMP-0 contract. On 2026-07-19 the
+repository owner accepted a narrower current support scope so gameplay work
+could proceed: browser-first for online development, native LÖVE on Linux as
+the maintained fallback, and Windows/macOS support deferred. That decision
+does not turn missing rows into passes or change the thresholds below; see
+[`platform_decision.md`](platform_decision.md).
+
 OMP-0 answers one question: can the existing Galactic Cup product run as a
 desktop browser client and carry the input traffic needed for a later
 multiplayer slice? It does not prove rollback, production rooms, signaling,

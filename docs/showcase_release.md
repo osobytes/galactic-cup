@@ -128,7 +128,7 @@ ending and closes the loop.
 - One-command setup and one-command quality gate.
 - CI for format, types, tests, and gameplay tripwire.
 - Architecture and contribution guidance.
-- Explicit open-source license, release notes, and downloadable builds.
+- Explicit open-source license, release notes, and a downloadable Linux build.
 
 Why it stays: for a portfolio project, setup quality and engineering
 communication are part of the product.
@@ -207,8 +207,10 @@ The showcase is ready only when all of the following are true.
 - Pure state transitions cover the complete screen flow in headless tests.
 - Input mappings are centralized rather than duplicated per screen.
 - Release and debug behavior are separated explicitly.
-- Linux and Windows release artifacts launch without the source tree or
-  developer tools.
+- The Linux release artifact launches without the source tree or developer
+  tools.
+- The browser artifact remains buildable and smoke-tested as a parallel
+  delivery path.
 
 ### Open-source and portfolio
 
@@ -219,7 +221,8 @@ The showcase is ready only when all of the following are true.
   present.
 - The README explains the pure-sim architecture, testing strategy, and
   balance tooling without overwhelming the game pitch.
-- A tagged release contains downloadable builds and a concise changelog.
+- A tagged release contains the downloadable Linux build and a concise
+  changelog.
 
 ## Release order
 
