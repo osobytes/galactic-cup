@@ -1,7 +1,7 @@
 # OMP-0 platform decision
 
 Status: **inconclusive**. This record applies the unchanged rules in
-[`omp0_acceptance.md`](omp0_acceptance.md) to evidence available on 2026-07-18.
+[`omp0_acceptance.md`](omp0_acceptance.md) to evidence available on 2026-07-19.
 Unavailable evidence is not a pass.
 
 ## Decision
@@ -21,7 +21,7 @@ cannot select native from an incomplete comparison.
 | Browser artifact | [PR #8](https://github.com/osobytes/galactic-cup/pull/8), [`browser_build.md`](browser_build.md) | Reproducible and pinned |
 | Browser matrix | [Issue #16](https://github.com/osobytes/galactic-cup/issues/16), [`browser_compatibility.md`](browser_compatibility.md) | Linux automated gates pass; external controls/heap and Windows missing |
 | Linux remediations | [#20 persistence](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-20-evidence-d2b175b), [#21 pacing/input](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-21-evidence-d7fc8cf), [#22 Chrome heap](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-22-evidence-dab866b), [#24 letterboxing](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-24-evidence-5813c53) | Pass |
-| Corrected audio | [Chrome/Firefox source `ee56d8a`](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-pr29-ee56d8a) | Pass on Linux |
+| Corrected audio | [Focused Chrome 151/Firefox 152 source `c451727`](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-pr29-final-c451727) | Pass on Linux; audio scope only |
 | Transport seam | [PR #10](https://github.com/osobytes/galactic-cup/pull/10), [`transport_bridge.md`](transport_bridge.md) | Bounded asynchronous contract available |
 | WebRTC proof | [Issue #5](https://github.com/osobytes/galactic-cup/issues/5), [PR #14](https://github.com/osobytes/galactic-cup/pull/14), [`webrtc_input_proof.md`](webrtc_input_proof.md) | Both 10-minute network profiles pass |
 | Native comparison | [Issue #3](https://github.com/osobytes/galactic-cup/issues/3) | Complete product-flow comparison missing |
@@ -30,12 +30,12 @@ cannot select native from an incomplete comparison.
 
 | Criterion | Current evidence | Result |
 | --- | --- | --- |
-| Artifact boot and product flow | Linux Chrome/Firefox boot and complete Title → Result at all required viewports | Pass on Linux; Windows missing |
-| Update/draw/frame/input | All six final Linux rows pass unchanged thresholds; long rows retain stability/liveness | Pass on Linux; Windows missing |
+| Artifact boot and product flow | Linux Chrome 150/Firefox 152 remediation packets boot and complete Title → Result at all required viewports | Pass on Linux; Windows missing |
+| Update/draw/frame/input | All six Linux Chrome 150/Firefox 152 remediation rows pass unchanged thresholds; long rows retain stability/liveness | Pass on Linux; Windows missing |
 | Console and lifecycle | Clean page runtime, terminal health, focus recovery, fullscreen, keyboard, and clean Result | Pass on Linux |
 | Persistence and letterboxing | Reload/populate, recoverable storage failure, tall/wide geometry, and pointer mapping pass in Chrome/Firefox | Pass on Linux |
-| Audio and gamepad | Corrected-source Chrome/Firefox audio passes; physical standard-mapped A/B is unavailable | Audio pass; gamepad incomplete |
-| Memory | Authoritative Chrome post-GC heap -0.27%; Firefox RSS is supplemental and Firefox JS heap is unavailable | Chrome pass; Firefox incomplete |
+| Audio and gamepad | Focused source `c451727` passes Chrome 151/Firefox 152 audio; physical standard-mapped A/B is unavailable | Audio pass; gamepad incomplete |
+| Memory | Authoritative Chrome 150 post-GC heap -0.27%; Firefox RSS is supplemental and Firefox JS heap is unavailable | Chrome pass; Firefox incomplete |
 | Transport | Both fixed issue #5 profiles pass bounded queue/input/latency requirements | Pass |
 | Native comparison | Existing machine baseline is not the complete issue #3 product-flow comparison | Incomplete |
 
@@ -43,13 +43,19 @@ cannot select native from an incomplete comparison.
 
 | Environment | 960×540 | 1280×720 | 1920×1080 | Decision status |
 | --- | --- | --- | --- | --- |
-| Linux Chrome 151 | Automated flow/performance/memory pass | Automated flow/performance pass | Automated flow/performance pass | Gamepad missing |
+| Linux Chrome 150 | Automated flow/performance/memory pass | Automated flow/performance pass | Automated flow/performance pass | Gamepad missing |
 | Linux Firefox 152 | Automated flow/performance/stability pass | Automated flow/performance pass | Automated flow/performance pass | Gamepad and JS heap missing |
 | Windows 11 Chrome | Unavailable | Unavailable | Unavailable | Required environment missing |
 | Windows 11 Firefox | Unavailable | Unavailable | Unavailable | Required environment and heap missing |
 
 The optional macOS confidence row remains unmeasured and does not replace a
 required environment.
+
+The matrix and 600-second claims retain the browser versions and sources of the
+full remediation packets: Chrome 150 and Firefox 152, including pacing source
+`d7fc8cf` and the separate authoritative #22 Chrome heap packet. The later
+Chrome 151/Firefox 152 source `c451727` is a focused zero-stability audio probe
+and is cited only for audio.
 
 ## Blocking work
 

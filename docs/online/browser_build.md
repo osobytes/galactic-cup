@@ -106,33 +106,50 @@ an eligible repository runner.
 
 Firefox process-tree RSS remains useful supplemental process memory, but it is
 not JavaScript heap. `performance.memory` is a non-standard Chromium-only API.
-The PowerShell campaign therefore keeps the exact artifact server alive,
-launches a separate clean Firefox profile, and guides an attended companion:
+The Firefox 960×540 runner therefore keeps the exact artifact server alive,
+launches a second clean WebDriver-controlled Firefox profile with the same
+Selenium Manager-resolved browser and driver, verifies the inner viewport
+before and after every checkpoint, and guides an attended companion:
 
-1. Reach stable Result and open that tab's Firefox DevTools **Memory** panel in
-   Aggregate view.
+1. Let the runner reach stable Result, then open that tab's Firefox DevTools
+   **Memory** panel in an undocked window.
 2. At t0, t5, and t10, use `about:memory` **Minimize memory usage** to force
    GC/CC and save `about-memory-<label>.json.gz`. Immediately take and save the
    tab snapshot as `heap-<label>.fxsnapshot`.
-3. Record the Memory panel's whole-tab heap **Total Bytes** value—not RSS or
-   snapshot file size. The script computes `(t10 - t0) / t0 * 100`, reports
-   whether t0 ≤ t5 ≤ t10, and applies the unchanged 25% threshold.
+3. After t10, paste the packet's generated `firefox-heap-extractor.js` into
+   that isolated profile's Browser Console. Firefox itself reopens each saved
+   snapshot and runs a root `{ by: "count" }` heap census. The runner accepts
+   `report.bytes` only when each generated census JSON matches the wrapper's
+   independent snapshot SHA-256 and size.
 
-All six non-empty files plus `firefox-heap-summary.json` are required. The
-summary records checkpoint times and file hashes and ties the scalar series to
-the source revision, package hash, Firefox capabilities, and browser binary
-hash before the containing packet is archived.
+The embedded snapshot creation times must put t5/t10 within 15 seconds of
+300/600 seconds after t0. Six non-empty raw files (three `about:memory` reports
+and three snapshots), the three generated census outputs, the exact extractor
+source and hash, session metadata, and `firefox-heap-summary.json` are
+required. The summary computes `(t10 - t0) / t0 * 100`, reports whether
+t0 ≤ t5 ≤ t10, applies the unchanged 25% threshold, and records the actual
+companion session/profile, Firefox `appBuildID`/`platformBuildID` and
+capabilities, browser/driver hashes, source and package revisions, exact
+viewport/Result checks, and authoritative snapshot timing. The Firefox long
+row and campaign cannot pass unless this companion passes.
 
 Mozilla documents
 [`about:memory` GC/CC and reports](https://firefox-source-docs.mozilla.org/performance/memory/about_colon_memory.html),
 the [Firefox Memory tool](https://firefox-source-docs.mozilla.org/devtools-user/memory/index.html),
 and [snapshot save/diff operations](https://firefox-source-docs.mozilla.org/performance/memory/basic_operations.html).
+Mozilla's
+[`HeapSnapshot` interface](https://searchfox.org/firefox-main/source/dom/chrome-webidl/HeapSnapshot.webidl)
+defines offline snapshot loading, embedded creation time, and census
+collection; the
+[`Debugger.Memory` census reference](https://searchfox.org/firefox-main/source/js/src/doc/Debugger/Debugger.Memory.md)
+defines the root byte count used here.
 MDN documents
 [`performance.memory` as non-standard and Chromium-only](https://developer.mozilla.org/en-US/docs/Web/API/Performance/memory).
-This remains a manual handoff: geckodriver's
+The Browser Console extractor is enabled only in the disposable campaign
+profile and reads only the named local snapshots. Geckodriver's
 [`--allow-system-access`](https://firefox-source-docs.mozilla.org/testing/geckodriver/Flags.html)
-grants browser-UI-process privileges and full system access, so it is not
-enabled without a separate validated automation design.
+grants browser-UI-process privileges and full system access, so it remains
+disabled.
 
 ## Reproducibility and provenance
 

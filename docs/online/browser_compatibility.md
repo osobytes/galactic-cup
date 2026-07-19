@@ -14,7 +14,9 @@ are still missing. Missing evidence is not treated as a pass.
 - Reviewed Chrome audio/geometry probe:
   [source `806f7a3`](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-review-evidence-806f7a3).
 - Corrected exact-source Chrome/Firefox audio probes:
-  [source `ee56d8a`](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-pr29-ee56d8a).
+  [source `c451727`](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-pr29-final-c451727)
+  (supersedes the
+  [intermediate `ee56d8a` packet](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-pr29-ee56d8a)).
 - Persistence remediation:
   [#20 evidence](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-20-evidence-d2b175b).
 - Letterboxing and pointer remediation:
@@ -34,7 +36,7 @@ capabilities, screenshots, console/service logs, memory samples, and summaries.
 
 | Row | 960×540 | 1280×720 | 1920×1080 | Remaining |
 | --- | --- | --- | --- | --- |
-| Linux Chrome 151 | Flow/pacing/input pass; 600 s stability and Chrome heap pass | Flow/pacing/input pass | Flow/pacing/input pass | Physical gamepad |
+| Linux Chrome 150 | Flow/pacing/input pass; 600 s stability and Chrome heap pass | Flow/pacing/input pass | Flow/pacing/input pass | Physical gamepad |
 | Linux Firefox 152 | Flow/pacing/input pass; 600 s stability pass | Flow/pacing/input pass | Flow/pacing/input pass | Physical gamepad, JS heap |
 | Windows 11 Chrome | Unavailable | Unavailable | Unavailable | Attended hardware campaign |
 | Windows 11 Firefox | Unavailable | Unavailable | Unavailable | Attended hardware campaign plus manual JS heap |
@@ -61,12 +63,19 @@ activation, no autoplay warning, positive master volume, and at least one
 active source. Malformed, missing, non-finite, duplicate, or out-of-order
 samples fail the check without aborting evidence capture.
 
+The full matrix, 600-second stability, and Chrome heap claims above are from
+Chrome 150 remediation packets, including clean pacing source `d7fc8cf` and
+the authoritative #22 heap packet. They are not attributed to the later
+focused audio run.
+
 The positive Chrome packet at source `806f7a3` is historical evidence.
 Pre-fix source `4b446ceb` left the persistence probe's `muted=true` setting in
 place, so its otherwise complete Chrome and Firefox probes correctly observed
-zero sources. Corrected source `ee56d8a` persists `muted=false` before the
-product flow; its clean Chrome 151 and Firefox 152 packets each pass with all
-11 samples positive, volume 1, user activation, and no autoplay warning.
+zero sources. Corrected source `c451727` persists `muted=false` before the
+product flow; its focused zero-stability Chrome 151 and Firefox 152 packets
+each pass with all 11 samples positive, volume 1, user activation, and no
+autoplay warning. Those focused packets prove audio only; they do not replace
+the Chrome 150 full-matrix, stability, or heap provenance.
 
 No physical standard-mapped controller was available for the Linux packets.
 The attended operator must expose `mapping="standard"` and produce both

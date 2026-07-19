@@ -2,11 +2,7 @@
 param(
     [string]$Python = "",
     [int]$Port = 8000,
-    [string]$OutputRoot = "",
-    [string]$ChromeBinary = "",
-    [string]$ChromeDriver = "",
-    [string]$FirefoxBinary = "",
-    [string]$FirefoxDriver = ""
+    [string]$OutputRoot = ""
 )
 
 Set-StrictMode -Version Latest
@@ -76,18 +72,6 @@ function Read-Decision {
     }
 }
 
-function Read-PositiveInteger {
-    param([Parameter(Mandatory = $true)][string]$Prompt)
-    while ($true) {
-        $RawValue = (Read-Host $Prompt).Trim()
-        $ParsedValue = [long]0
-        if ([long]::TryParse($RawValue, [ref]$ParsedValue) -and $ParsedValue -gt 0) {
-            return $ParsedValue
-        }
-        Write-Warning "Enter a positive integer number of bytes."
-    }
-}
-
 function Get-OnlyPacket {
     param([Parameter(Mandatory = $true)][string]$RowRoot)
     $Packets = @(Get-ChildItem -LiteralPath $RowRoot -Directory)
@@ -111,50 +95,6 @@ function Get-FileEvidence {
     }
 }
 
-function Wait-ForCheckpoint {
-    param(
-        [Parameter(Mandatory = $true)][datetime]$Deadline,
-        [Parameter(Mandatory = $true)][string]$Label
-    )
-    while ((Get-Date) -lt $Deadline) {
-        $Remaining = [math]::Ceiling(($Deadline - (Get-Date)).TotalSeconds)
-        Write-Host "$Label checkpoint in $Remaining seconds..." -NoNewline
-        Start-Sleep -Seconds ([math]::Min(30, [math]::Max(1, $Remaining)))
-        Write-Host "`r" -NoNewline
-    }
-    Write-Host ""
-}
-
-function Capture-FirefoxHeapCheckpoint {
-    param(
-        [Parameter(Mandatory = $true)][string]$HeapRoot,
-        [Parameter(Mandatory = $true)][string]$Label,
-        [Parameter(Mandatory = $true)][datetime]$BaselineAt
-    )
-    $AboutMemoryName = "about-memory-$Label.json.gz"
-    $SnapshotName = "heap-$Label.fxsnapshot"
-    Write-Host ""
-    Write-Host "CHECKPOINT $Label"
-    Write-Host "1. In about:memory, click Minimize memory usage, then Measure and save as:"
-    Write-Host "   $(Join-Path $HeapRoot $AboutMemoryName)"
-    Write-Host "2. Immediately return to the game tab's Memory panel, take a tab snapshot,"
-    Write-Host "   switch to Aggregate view, and save it as:"
-    Write-Host "   $(Join-Path $HeapRoot $SnapshotName)"
-    Write-Host "3. Record the tab snapshot's whole-heap Total Bytes value (not file size or RSS)."
-    $TotalBytes = Read-PositiveInteger "Whole-tab heap Total Bytes at $Label"
-    Read-Host "Press Enter after both files are fully saved" | Out-Null
-    $AboutMemory = Get-FileEvidence (Join-Path $HeapRoot $AboutMemoryName)
-    $Snapshot = Get-FileEvidence (Join-Path $HeapRoot $SnapshotName)
-    return [ordered]@{
-        about_memory = $AboutMemory
-        captured_at = (Get-Date).ToUniversalTime().ToString("o")
-        elapsed_seconds = [math]::Round(((Get-Date) - $BaselineAt).TotalSeconds, 3)
-        heap_snapshot = $Snapshot
-        label = $Label
-        tab_heap_total_bytes = $TotalBytes
-    }
-}
-
 if ($Python) {
     $BootstrapPython = $Python
     $BootstrapArguments = @()
@@ -170,7 +110,6 @@ if ($Python) {
 }
 
 $Server = $null
-$ManualFirefox = $null
 $LocationPushed = $false
 $CampaignRows = @()
 $CampaignExitCode = 0
@@ -232,7 +171,8 @@ try {
     Write-Host "ATTENDED CAMPAIGN"
     Write-Host "Keep this unlocked hardware-accelerated desktop foregrounded at 100% scaling."
     Write-Host "Each browser/viewport uses a fresh profile. During Match, listen and press"
-    Write-Host "physical standard-mapped A then B. Six rows take about 25-30 minutes."
+    Write-Host "physical standard-mapped A then B. Include about 45 minutes for six rows"
+    Write-Host "and the attended Firefox heap-snapshot companion."
     Write-Host ""
 
     foreach ($Browser in @("chrome", "firefox")) {
@@ -257,20 +197,13 @@ try {
                 "--require-gamepad",
                 "--output", $RowRoot
             )
-            if ($Browser -eq "chrome") {
-                if ($ChromeBinary) {
-                    $MatrixArguments += @("--binary", $ChromeBinary)
-                }
-                if ($ChromeDriver) {
-                    $MatrixArguments += @("--driver", $ChromeDriver)
-                }
-            } else {
-                if ($FirefoxBinary) {
-                    $MatrixArguments += @("--binary", $FirefoxBinary)
-                }
-                if ($FirefoxDriver) {
-                    $MatrixArguments += @("--driver", $FirefoxDriver)
-                }
+            $RunMemoryCompanion = (
+                $Browser -eq "firefox" -and
+                $Viewport -eq "960x540" -and
+                $StabilitySeconds -gt 0
+            )
+            if ($RunMemoryCompanion) {
+                $MatrixArguments += "--external-memory-companion"
             }
 
             & $VenvPython @MatrixArguments
@@ -317,72 +250,20 @@ try {
     if (-not $FirefoxLongRow) {
         throw "The Firefox 960x540 packet is required before heap capture."
     }
-    $FirefoxEnvironmentPath = Join-Path $FirefoxLongRow.packet "environment.json"
-    $FirefoxEnvironment = Get-Content -Raw -LiteralPath $FirefoxEnvironmentPath |
+    $FirefoxPacketSummary = Get-Content -Raw -LiteralPath (
+        Join-Path $FirefoxLongRow.packet "summary.json"
+    ) |
         ConvertFrom-Json
-    $FirefoxBinaryPath = [string]$FirefoxEnvironment.browser_binary.path
-    if (-not (Test-Path -LiteralPath $FirefoxBinaryPath -PathType Leaf)) {
-        throw "Firefox packet did not retain a usable browser binary path."
+    if (
+        $FirefoxPacketSummary.memory_companion.status -ne "pass" -or
+        -not $FirefoxPacketSummary.memory_companion.summary
+    ) {
+        throw "The Firefox 960x540 packet did not complete its attended heap companion."
     }
-    $HeapRoot = Join-Path $FirefoxLongRow.packet "firefox-heap-companion"
-    New-Item -ItemType Directory -Path $HeapRoot | Out-Null
-    $HeapProfile = Join-Path $OutputRoot "firefox-heap-profile"
-    New-Item -ItemType Directory -Path $HeapProfile | Out-Null
-    $FlowArgument = [uri]::EscapeDataString('["--compat-flow"]')
-    $HeapUrl = "${BaseUrl}?arg=$FlowArgument"
-
-    Write-Host ""
-    Write-Host "FIREFOX TAB-HEAP COMPANION"
-    Write-Host "The server remains live. A new clean Firefox profile will open the exact artifact."
-    Write-Host "Click the canvas once, let the flow reach stable Result, then open that tab's"
-    Write-Host "DevTools Memory panel in Aggregate view. Do not use process RSS or snapshot file size."
-    $ManualFirefox = Start-Process -FilePath $FirefoxBinaryPath -ArgumentList @(
-        "-no-remote", "-profile", $HeapProfile, $HeapUrl
-    ) -PassThru
-    Read-Host "Press Enter when Result is stable and the Memory panel is ready" | Out-Null
-
-    $BaselineAt = Get-Date
-    $HeapCheckpoints = @()
-    $HeapCheckpoints += Capture-FirefoxHeapCheckpoint $HeapRoot "t0" $BaselineAt
-    Wait-ForCheckpoint ($BaselineAt.AddSeconds(300)) "t5"
-    $HeapCheckpoints += Capture-FirefoxHeapCheckpoint $HeapRoot "t5" $BaselineAt
-    Wait-ForCheckpoint ($BaselineAt.AddSeconds(600)) "t10"
-    $HeapCheckpoints += Capture-FirefoxHeapCheckpoint $HeapRoot "t10" $BaselineAt
-
-    $T0 = [double]$HeapCheckpoints[0].tab_heap_total_bytes
-    $T5 = [double]$HeapCheckpoints[1].tab_heap_total_bytes
-    $T10 = [double]$HeapCheckpoints[2].tab_heap_total_bytes
-    $GrowthPercent = (($T10 - $T0) / $T0) * 100
-    $MonotonicNonDecreasing = $T0 -le $T5 -and $T5 -le $T10
-    $HeapPass = $GrowthPercent -le 25
-    if (-not $HeapPass) {
-        $CampaignExitCode = 1
-    }
-    $Manifest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot "build\web\manifest.json") |
+    $FirefoxHeap = Get-Content -Raw -LiteralPath (
+        [string]$FirefoxPacketSummary.memory_companion.summary
+    ) |
         ConvertFrom-Json
-    $FirefoxHeap = [ordered]@{
-        browser_binary = $FirefoxEnvironment.browser_binary
-        browser_capabilities = (
-            Get-Content -Raw -LiteralPath (Join-Path $FirefoxLongRow.packet "summary.json") |
-                ConvertFrom-Json
-        ).results[0].browser.capabilities
-        captured_at = (Get-Date).ToUniversalTime().ToString("o")
-        checkpoints = $HeapCheckpoints
-        formula = "(t10 - t0) / t0 * 100"
-        growth_percent = [math]::Round($GrowthPercent, 6)
-        manifest_sha256 = (
-            Get-FileHash -Algorithm SHA256 -LiteralPath (
-                Join-Path $ProjectRoot "build\web\manifest.json"
-            )
-        ).Hash.ToLowerInvariant()
-        monotonic_non_decreasing = $MonotonicNonDecreasing
-        package_sha256 = [string]($Manifest.game_package.sha256)
-        pass = $HeapPass
-        source_revision = [string]($Manifest.source_revision)
-        threshold_percent = 25
-        whole_tab_metric = "Firefox DevTools Memory Aggregate whole-heap Total Bytes"
-    }
-    Write-JsonFile (Join-Path $HeapRoot "firefox-heap-summary.json") $FirefoxHeap
 
     foreach ($Row in $CampaignRows) {
         $Packet = Get-Item -LiteralPath $Row.packet
@@ -403,12 +284,6 @@ try {
         type = $_.Exception.GetType().FullName
     }
 } finally {
-    if ($ManualFirefox -and -not $ManualFirefox.HasExited) {
-        $null = $ManualFirefox.CloseMainWindow()
-        if (-not $ManualFirefox.WaitForExit(10000)) {
-            Stop-Process -Id $ManualFirefox.Id -ErrorAction SilentlyContinue
-        }
-    }
     if ($Server -and -not $Server.HasExited) {
         Stop-Process -Id $Server.Id -ErrorAction SilentlyContinue
         if (-not $Server.WaitForExit(10000)) {
@@ -425,6 +300,7 @@ try {
         $null -eq $CampaignFailure -and
         $null -eq $CleanupFailure -and
         $CampaignRows.Count -eq $ExpectedRows -and
+        @($CampaignRows | Where-Object { $_.pass -ne $true }).Count -eq 0 -and
         $null -ne $FirefoxHeap -and
         $FirefoxHeap.pass -eq $true
     )
