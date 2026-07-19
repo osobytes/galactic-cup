@@ -1148,6 +1148,36 @@ def console_gate(
     }
 
 
+def terminal_runtime_health(
+    entries: list[dict[str, Any]],
+    final_state: dict[str, Any],
+) -> dict[str, Any]:
+    error_markers = []
+    for entry in entries:
+        message = entry.get("message")
+        if not isinstance(message, str):
+            continue
+        marker = parse_marker(message)
+        if not marker or marker.get("source") != "GC_BROWSER" or marker.get("kind") != "error":
+            continue
+        error_markers.append(
+            {
+                "entry": {
+                    key: entry.get(key)
+                    for key in ("at_ms", "level", "message", "phase", "timestamp")
+                    if entry.get(key) is not None
+                },
+                "marker": marker,
+            }
+        )
+    status = final_state.get("status")
+    return {
+        "error_markers": error_markers,
+        "pass": status == "running" and not error_markers,
+        "status": status,
+    }
+
+
 def evidence_checks(
     browser_name: str,
     entries: list[dict[str, Any]],
@@ -1358,6 +1388,7 @@ def evidence_checks(
             "pass": preflight.get("storage_unavailable_boot_recoverable") is True,
             "state": preflight.get("storage_unavailable_state"),
         },
+        "terminal_runtime_health": terminal_runtime_health(runtime_console, final_state),
         "runtime_stability": {
             "late_input": late_input,
             "late_settings_change": late_setting,
@@ -1980,6 +2011,14 @@ def run_viewport(
                     ],
                     warning_classifications,
                 ),
+                "terminal_runtime_health": terminal_runtime_health(
+                    [
+                        entry
+                        for entry in entries
+                        if entry.get("phase") != "webdriver_teardown"
+                    ],
+                    failure_state,
+                ),
             },
             "dimensions": None,
             "duration_seconds": None,
@@ -2105,6 +2144,7 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
         "performance",
         "persistence",
         "storage_unavailable",
+        "terminal_runtime_health",
     ]
     if require_stability:
         required.extend(
@@ -2557,6 +2597,93 @@ def self_test() -> int:
     assert console_gate([warning], [])["pass"] is False
     fatal = {"level": "error", "message": "FATAL ERROR: causing a crash"}
     assert console_gate([fatal], [re.compile("FATAL")])["pass"] is False
+    terminal_error = {
+        "level": "error",
+        "message": "GC_BROWSER|error|message=synthetic terminal failure|code=42",
+        "phase": "flow_final",
+        "timestamp": 123,
+    }
+    assert console_gate([terminal_error], [])["pass"] is True
+    error_health = terminal_runtime_health([terminal_error], {"status": "running"})
+    assert error_health["pass"] is False
+    assert error_health["error_markers"] == [
+        {
+            "entry": terminal_error,
+            "marker": {
+                "source": "GC_BROWSER",
+                "kind": "error",
+                "message": "synthetic terminal failure",
+                "code": "42",
+            },
+        }
+    ]
+    non_running_health = terminal_runtime_health([], {"status": "failed"})
+    assert console_gate([], [])["pass"] is True
+    assert non_running_health == {
+        "error_markers": [],
+        "pass": False,
+        "status": "failed",
+    }
+    healthy_health = terminal_runtime_health(
+        [{"level": "log", "message": "GC_BROWSER|first_frame|at_ms=12"}],
+        {"status": "running"},
+    )
+    assert healthy_health == {
+        "error_markers": [],
+        "pass": True,
+        "status": "running",
+    }
+    healthy_short_checks = {
+        name: {"pass": True}
+        for name in (
+            "artifact_boot",
+            "audio_after_gesture",
+            "clean_console",
+            "complete_flow",
+            "fullscreen",
+            "hardware_acceleration",
+            "keyboard",
+            "letterboxing",
+            "lifecycle",
+            "performance",
+            "persistence",
+            "storage_unavailable",
+        )
+    }
+    healthy_short_result = {
+        "checks": {
+            **healthy_short_checks,
+            "terminal_runtime_health": healthy_health,
+        },
+        "web_report_exit_code": 0,
+    }
+    assert result_passes(healthy_short_result, require_stability=False) is True
+    assert (
+        result_passes(
+            {
+                **healthy_short_result,
+                "checks": {
+                    **healthy_short_checks,
+                    "terminal_runtime_health": error_health,
+                },
+            },
+            require_stability=False,
+        )
+        is False
+    )
+    assert (
+        result_passes(
+            {
+                **healthy_short_result,
+                "checks": {
+                    **healthy_short_checks,
+                    "terminal_runtime_health": non_running_health,
+                },
+            },
+            require_stability=False,
+        )
+        is False
+    )
     print("browser matrix self-test: OK")
     return 0
 
