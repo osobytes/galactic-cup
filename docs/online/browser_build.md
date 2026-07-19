@@ -120,7 +120,9 @@ before and after every checkpoint, and guides an attended companion:
    that isolated profile's Browser Console. Firefox itself reopens each saved
    snapshot and runs a root `{ by: "count" }` heap census. The runner accepts
    `report.bytes` only when each generated census JSON matches the wrapper's
-   independent snapshot SHA-256 and size.
+   independent snapshot SHA-256 and size. If Firefox shows its first-paste
+   protection prompt, follow that prompt in this disposable profile, then
+   paste the unchanged generated file.
 
 The embedded snapshot creation times must put t5/t10 within 15 seconds of
 300/600 seconds after t0. Six non-empty raw files (three `about:memory` reports

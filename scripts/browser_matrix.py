@@ -2237,7 +2237,14 @@ def run_viewport(
     failure_state: dict[str, Any] = {}
     chrome_entries: list[dict[str, Any]] = []
     service_runtime_bytes = 0
-    quit_error = None
+    preflight_cleanup: dict[str, Any] = {
+        "pass": not dedicated_flow_browser,
+        "required": dedicated_flow_browser,
+    }
+    flow_cleanup: dict[str, Any] = {
+        "pass": False,
+        "reason": "flow browser did not launch",
+    }
     try:
         validate_manifest(base_url, expected_manifest)
         driver = launch_browser(
@@ -2257,8 +2264,12 @@ def run_viewport(
             )
         if dedicated_flow_browser:
             preflight_session_id = driver.session_id
-            driver.quit()
+            preflight_cleanup = quit_browser_bounded(driver)
             driver = None
+            if preflight_cleanup.get("pass") is not True:
+                raise RuntimeError(
+                    f"preflight browser cleanup failed: {preflight_cleanup}"
+                )
             active_driver_log = driver_log
             driver = launch_browser(
                 browser_name,
@@ -2317,21 +2328,27 @@ def run_viewport(
         if driver:
             if active_driver_log.is_file():
                 service_runtime_bytes = active_driver_log.stat().st_size
-            try:
-                driver.quit()
-            except Exception as error:
-                quit_error = error
+            flow_cleanup = quit_browser_bounded(driver)
+            driver = None
 
     service_entries = (
         service_console(active_driver_log, service_runtime_bytes)
         if browser_name == "firefox"
         else []
     )
-    if quit_error:
+    browser_cleanup = {
+        "flow": flow_cleanup,
+        "pass": (
+            preflight_cleanup.get("pass") is True
+            and flow_cleanup.get("pass") is True
+        ),
+        "preflight": preflight_cleanup,
+    }
+    if browser_cleanup["pass"] is not True:
         service_entries.append(
             {
                 "level": "error",
-                "message": f"WebDriver quit failed: {quit_error}",
+                "message": f"WebDriver cleanup failed: {browser_cleanup}",
                 "phase": "webdriver_teardown",
             }
         )
@@ -2363,6 +2380,7 @@ def run_viewport(
             },
             "captured_at": utc_now(),
             "checks": {
+                "browser_cleanup": browser_cleanup,
                 "browser_teardown": console_gate(
                     [
                         entry
@@ -2435,6 +2453,7 @@ def run_viewport(
         stability_seconds,
         warning_classifications,
     )
+    checks["browser_cleanup"] = browser_cleanup
     report = subprocess.run(
         [
             sys.executable,
@@ -2878,6 +2897,7 @@ def run_firefox_heap_companion(
         and len(platform_build_ids) == 1
         and next(iter(firefox_versions), None) == capabilities.get("browserVersion")
     )
+    session_metadata_pass = bool(session_id and profile)
     timing = firefox_heap_snapshot_timing(creation_times)
     timing_offsets_seconds = timing["offsets_seconds"]
     timing_pass = timing["pass"]
@@ -2924,6 +2944,7 @@ def run_firefox_heap_companion(
         "pass": (
             asset_match
             and build_metadata_pass
+            and session_metadata_pass
             and flow_routes[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW
             and hardware_acceleration_pass
             and timing_pass
@@ -2933,6 +2954,7 @@ def run_firefox_heap_companion(
         ),
         "profile": profile,
         "quit": cleanup,
+        "session_metadata_pass": session_metadata_pass,
         "session_id": session_id,
         "source_revision": manifest.get("source_revision"),
         "threshold_percent": 25,
@@ -2955,6 +2977,7 @@ def result_passes(
     required = [
         "artifact_boot",
         "audio_after_gesture",
+        "browser_cleanup",
         "clean_console",
         "complete_flow",
         "fullscreen",
@@ -3708,6 +3731,7 @@ def self_test() -> int:
         for name in (
             "artifact_boot",
             "audio_after_gesture",
+            "browser_cleanup",
             "clean_console",
             "complete_flow",
             "fullscreen",
@@ -3728,6 +3752,19 @@ def self_test() -> int:
         "web_report_exit_code": 0,
     }
     assert result_passes(healthy_short_result, require_stability=False) is True
+    assert (
+        result_passes(
+            {
+                **healthy_short_result,
+                "checks": {
+                    **healthy_short_result["checks"],
+                    "browser_cleanup": {"pass": False},
+                },
+            },
+            require_stability=False,
+        )
+        is False
+    )
     assert (
         result_passes(
             healthy_short_result,
