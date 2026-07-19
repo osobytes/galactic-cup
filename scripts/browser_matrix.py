@@ -7,12 +7,14 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import os
 import platform
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -54,6 +56,15 @@ HARD_RUNTIME_PATTERN = re.compile(
 )
 HEAP_CROSSCHECK_TOLERANCE_PERCENT = 5
 FIREFOX_FLOW_WAIT_CHUNK_SECONDS = 90
+AUDIO_PROBE_SECONDS = 5
+AUDIO_PROBE_INTERVAL_SECONDS = 0.5
+AUDIO_PROBE_MAX_OBSERVATIONS = int(AUDIO_PROBE_SECONDS / AUDIO_PROBE_INTERVAL_SECONDS) + 1
+AUDIO_PROBE_WAIT_SLACK_SECONDS = 0.75
+WINDOWS_GPU_MAX_ADAPTERS = 8
+WINDOWS_GPU_MAX_FIELD_LENGTH = 512
+FIREFOX_HEAP_CHECKPOINTS = (("t0", 0), ("t5", 300), ("t10", 600))
+FIREFOX_HEAP_PROMPT_LEAD_SECONDS = 15
+FIREFOX_HEAP_TIMING_TOLERANCE_SECONDS = 15
 
 
 def utc_now() -> str:
@@ -70,6 +81,50 @@ def write_gzip_json(path: Path, value: Any) -> None:
     with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as stream:
         json.dump(value, stream, separators=(",", ":"), sort_keys=True)
         stream.write("\n")
+
+
+def file_evidence(path: Path, not_before_ns: int | None = None) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"required evidence file does not exist: {path}")
+    stat = path.stat()
+    if stat.st_size <= 0:
+        raise RuntimeError(f"required evidence file is empty: {path}")
+    if not_before_ns is not None and stat.st_mtime_ns < not_before_ns:
+        raise RuntimeError(f"evidence file predates its checkpoint prompt: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+        "name": path.name,
+        "path": str(path.resolve()),
+        "sha256": digest.hexdigest(),
+        "size_bytes": stat.st_size,
+    }
+
+
+def firefox_heap_snapshot_timing(creation_times_us: list[int]) -> dict[str, Any]:
+    if (
+        len(creation_times_us) != 3
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in creation_times_us
+        )
+    ):
+        return {"offsets_seconds": [], "pass": False}
+    offsets = [
+        round((created - creation_times_us[0]) / 1_000_000, 6)
+        for created in creation_times_us
+    ]
+    return {
+        "offsets_seconds": offsets,
+        "pass": (
+            creation_times_us[0] < creation_times_us[1] < creation_times_us[2]
+            and abs(offsets[1] - 300) <= FIREFOX_HEAP_TIMING_TOLERANCE_SECONDS
+            and abs(offsets[2] - 600) <= FIREFOX_HEAP_TIMING_TOLERANCE_SECONDS
+        ),
+    }
 
 
 def parse_viewport(value: str) -> tuple[int, int]:
@@ -252,6 +307,97 @@ def command_output(command: list[str]) -> str | None:
     return output if result.returncode == 0 and output else None
 
 
+def executable_metadata(path: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    version = None
+    try:
+        result = subprocess.run(
+            [str(resolved), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = (result.stdout or result.stderr).strip()
+        if output:
+            version = output
+    except (OSError, subprocess.SubprocessError):
+        pass
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(resolved),
+        "sha256": digest.hexdigest(),
+        "size_bytes": resolved.stat().st_size,
+        "version_output": version,
+    }
+
+
+def selenium_metadata() -> dict[str, Any]:
+    try:
+        import selenium
+        from selenium.webdriver.common.selenium_manager import SeleniumManager
+    except ImportError as error:
+        raise RuntimeError("Selenium is required: python3 -m pip install selenium") from error
+    return {
+        "cache_path": os.environ.get("SE_CACHE_PATH"),
+        "manager": executable_metadata(SeleniumManager._get_binary()),
+        "python": executable_metadata(Path(sys.executable)),
+        "selenium_version": selenium.__version__,
+    }
+
+
+def parse_windows_gpu_output(output: str | None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "adapters": [],
+        "available": False,
+        "truncated": False,
+    }
+    if not output:
+        return result
+    try:
+        rows = json.loads(output)
+    except json.JSONDecodeError:
+        return result
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        return result
+    adapters = []
+    fields = {
+        "AdapterCompatibility": "adapter_compatibility",
+        "DriverVersion": "driver_version",
+        "Name": "name",
+        "PNPDeviceID": "pnp_device_id",
+        "VideoProcessor": "video_processor",
+    }
+    for row in rows[:WINDOWS_GPU_MAX_ADAPTERS]:
+        if not isinstance(row, dict):
+            continue
+        adapter = {}
+        for source, target in fields.items():
+            value = row.get(source)
+            if value is not None:
+                adapter[target] = str(value)[:WINDOWS_GPU_MAX_FIELD_LENGTH]
+        if adapter:
+            adapters.append(adapter)
+    result["adapters"] = adapters
+    result["available"] = bool(adapters)
+    result["truncated"] = len(rows) > WINDOWS_GPU_MAX_ADAPTERS
+    return result
+
+
+def windows_gpu_metadata() -> dict[str, Any]:
+    script = (
+        "Get-CimInstance Win32_VideoController | "
+        "Select-Object Name,DriverVersion,AdapterCompatibility,PNPDeviceID,VideoProcessor | "
+        "ConvertTo-Json -Compress"
+    )
+    return parse_windows_gpu_output(command_output(["powershell", "-NoProfile", "-Command", script]))
+
+
 def os_metadata() -> dict[str, Any]:
     value: dict[str, Any] = {
         "platform": platform.platform(),
@@ -273,6 +419,11 @@ def os_metadata() -> dict[str, Any]:
             "--query-gpu=name,driver_version",
             "--format=csv,noheader",
         ]
+    )
+    value["windows_video_controllers"] = (
+        windows_gpu_metadata()
+        if os.name == "nt"
+        else {"adapters": [], "available": False, "truncated": False}
     )
     return value
 
@@ -351,11 +502,15 @@ def resolve_assets(browser_name: str, binary: Path | None, driver: Path | None) 
     if binary and driver:
         return binary.resolve(), driver.resolve()
 
-    args = ["--browser", browser_name, "--skip-driver-in-path"]
+    args = [
+        "--browser",
+        browser_name,
+        "--browser-version",
+        "stable",
+        "--skip-driver-in-path",
+    ]
     if binary:
         args.extend(["--browser-path", str(binary.resolve())])
-    elif browser_name == "firefox":
-        args.extend(["--browser-version", "stable"])
     result = SeleniumManager().binary_paths(args)
     resolved_binary = binary or Path(result["browser_path"])
     resolved_driver = driver or Path(result["driver_path"])
@@ -370,6 +525,7 @@ def launch_browser(
     driver_path: Path,
     driver_log: Path,
     trace_enabled: bool,
+    browser_console_enabled: bool = False,
 ) -> Any:
     try:
         from selenium import webdriver
@@ -416,6 +572,8 @@ def launch_browser(
     options.set_preference("extensions.autoDisableScopes", 15)
     options.set_preference("extensions.enabledScopes", 0)
     options.set_preference("devtools.console.stdout.content", True)
+    if browser_console_enabled:
+        options.set_preference("devtools.chrome.enabled", True)
     service = Service(str(driver_path), log_output=str(driver_log))
     return webdriver.Firefox(service=service, options=options)
 
@@ -427,6 +585,62 @@ def profile_directory(capabilities: dict[str, Any]) -> str | None:
         return str(value) if value else None
     value = capabilities.get("moz:profile")
     return str(value) if value else None
+
+
+def quit_browser_bounded(driver: Any, timeout_seconds: float = 15) -> dict[str, Any]:
+    service_process = getattr(getattr(driver, "service", None), "process", None)
+    service_pid = getattr(service_process, "pid", None)
+    quit_error: list[Exception] = []
+
+    def quit_driver() -> None:
+        try:
+            driver.quit()
+        except Exception as error:
+            quit_error.append(error)
+
+    thread = threading.Thread(target=quit_driver, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    timed_out = thread.is_alive()
+    forced_cleanup = False
+    cleanup_error = None
+    if timed_out or (service_process and service_process.poll() is None):
+        forced_cleanup = True
+        try:
+            if os.name == "nt" and service_pid:
+                subprocess.run(
+                    ["taskkill", "/PID", str(service_pid), "/T", "/F"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            elif service_process:
+                service_process.terminate()
+                try:
+                    service_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    service_process.kill()
+                    service_process.wait(timeout=5)
+        except Exception as error:
+            cleanup_error = str(error)
+    thread.join(5)
+    service_stopped = not service_process or service_process.poll() is not None
+    return {
+        "error": str(quit_error[0]) if quit_error else cleanup_error,
+        "forced_cleanup": forced_cleanup,
+        "pass": (
+            not timed_out
+            and not quit_error
+            and cleanup_error is None
+            and not forced_cleanup
+            and service_stopped
+        ),
+        "service_pid": service_pid,
+        "service_stopped": service_stopped,
+        "timed_out": timed_out,
+        "timeout_seconds": timeout_seconds,
+    }
 
 
 def set_viewport(driver: Any, width: int, height: int) -> dict[str, Any]:
@@ -1178,6 +1392,136 @@ def terminal_runtime_health(
     }
 
 
+def audio_probe_check(
+    entries: list[dict[str, Any]],
+    final_state: dict[str, Any],
+) -> dict[str, Any]:
+    match_times: list[float] = []
+    observations: list[tuple[float, int, float, dict[str, str]]] = []
+    invalid_observations: list[dict[str, Any]] = []
+    settings_observations: list[tuple[float, dict[str, str]]] = []
+    autoplay_warnings = 0
+    for entry in entries:
+        if "AudioContext was not allowed to start" in str(entry.get("message", "")):
+            autoplay_warnings += 1
+    for index, entry in enumerate(entries):
+        message = entry.get("message")
+        record = parse_marker(message) if isinstance(message, str) else None
+        if not record:
+            continue
+        try:
+            at_ms = float(record.get("at_ms", ""))
+        except (TypeError, ValueError):
+            if record.get("kind") == "audio":
+                invalid_observations.append(
+                    {"index": index, "reason": "invalid at_ms", "record": record}
+                )
+            continue
+        if not math.isfinite(at_ms):
+            if record.get("kind") == "audio":
+                invalid_observations.append(
+                    {"index": index, "reason": "non-finite at_ms", "record": record}
+                )
+            continue
+        if record.get("kind") == "route" and record.get("route") == "match":
+            match_times.append(at_ms)
+        elif record.get("kind") == "audio":
+            try:
+                active_sources = int(record["active_sources"])
+                volume = float(record["volume"])
+                if active_sources < 0 or not math.isfinite(volume) or volume < 0:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                invalid_observations.append(
+                    {
+                        "index": index,
+                        "reason": "invalid active_sources or volume",
+                        "record": record,
+                    }
+                )
+                continue
+            observations.append((at_ms, active_sources, volume, record))
+        elif record.get("kind") == "settings" and str(entry.get("phase", "")).startswith(
+            ("flow", "match_focus")
+        ):
+            settings_observations.append(
+                (at_ms, {**record, "phase": str(entry.get("phase"))})
+            )
+    match_at_ms = match_times[0] if match_times else None
+    offsets_ms = (
+        [at_ms - match_at_ms for at_ms, _, _, _ in observations]
+        if match_at_ms is not None
+        else []
+    )
+    ordered = all(
+        later > earlier for earlier, later in zip(offsets_ms, offsets_ms[1:])
+    )
+    bounded = (
+        len(observations) == AUDIO_PROBE_MAX_OBSERVATIONS
+        and not invalid_observations
+        and all(
+            -100 <= offset <= (AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS) * 1000
+            for offset in offsets_ms
+        )
+    )
+    complete = (
+        len(offsets_ms) == AUDIO_PROBE_MAX_OBSERVATIONS
+        and not invalid_observations
+        and ordered
+        and offsets_ms[0] <= (AUDIO_PROBE_INTERVAL_SECONDS + 0.25) * 1000
+        and offsets_ms[-1] >= (AUDIO_PROBE_SECONDS - AUDIO_PROBE_INTERVAL_SECONDS) * 1000
+    )
+    positive = any(
+        active_sources > 0 and volume > 0
+        for _, active_sources, volume, _ in observations
+    )
+    settings_before_match = (
+        [
+            record
+            for at_ms, record in settings_observations
+            if match_at_ms is not None and at_ms <= match_at_ms
+        ][-1]
+        if match_at_ms is not None
+        and any(at_ms <= match_at_ms for at_ms, _ in settings_observations)
+        else None
+    )
+    audible_settings = (
+        settings_before_match is not None
+        and settings_before_match.get("muted") == "false"
+        and bool(observations)
+        and all(volume > 0 for _, _, volume, _ in observations)
+    )
+    user_activated = bool(final_state.get("user_activation", {}).get("has_been_active"))
+    return {
+        "audible_settings": {
+            "pass": audible_settings,
+            "settings_before_match": settings_before_match,
+            "volumes": [volume for _, _, volume, _ in observations],
+        },
+        "autoplay_warnings": autoplay_warnings,
+        "bounded": bounded,
+        "complete": complete,
+        "duration_seconds": AUDIO_PROBE_SECONDS,
+        "invalid_observations": invalid_observations,
+        "match_at_ms": match_at_ms,
+        "max_observations": AUDIO_PROBE_MAX_OBSERVATIONS,
+        "observation_offsets_ms": offsets_ms,
+        "observations": [record for _, _, _, record in observations],
+        "ordered": ordered,
+        "pass": (
+            user_activated
+            and match_at_ms is not None
+            and audible_settings
+            and bounded
+            and complete
+            and positive
+            and autoplay_warnings == 0
+        ),
+        "positive_source_observed": positive,
+        "user_activation": user_activated,
+    }
+
+
 def evidence_checks(
     browser_name: str,
     entries: list[dict[str, Any]],
@@ -1197,11 +1541,6 @@ def evidence_checks(
     ]
     renderer = str(final_state.get("renderer") or "")
     software = any(name in renderer.lower() for name in SOFTWARE_RENDERERS)
-    audio_warnings = [
-        entry
-        for entry in entries
-        if "AudioContext was not allowed to start" in str(entry.get("message", ""))
-    ]
     first_memory = memories[0] if memories else {}
     last_memory = memories[-1] if memories else {}
     first_rss = first_memory.get("process_tree", {}).get("rss_kib")
@@ -1273,12 +1612,6 @@ def evidence_checks(
     teardown_console = [
         entry for entry in entries if entry.get("phase") == "webdriver_teardown"
     ]
-    audio_records = [record for record in parsed if record.get("kind") == "audio"]
-    audio_playing = any(
-        int(record.get("active_sources", "0")) > 0
-        and float(record.get("volume", "0")) > 0
-        for record in audio_records
-    )
     return {
         "acceptance_isolation": {
             **acceptance_isolation,
@@ -1293,15 +1626,7 @@ def evidence_checks(
                 )
             ),
         },
-        "audio_after_gesture": {
-            "observations": audio_records,
-            "autoplay_warnings": len(audio_warnings),
-            "pass": (
-                bool(final_state.get("user_activation", {}).get("has_been_active"))
-                and audio_playing
-                and not audio_warnings
-            ),
-        },
+        "audio_after_gesture": audio_probe_check(entries, final_state),
         "artifact_boot": {
             "navigation_to_title_ms": preflight.get("navigation_to_title_ms"),
             "pass": preflight.get("title_state", {}).get("status") == "running",
@@ -1374,11 +1699,15 @@ def evidence_checks(
         "performance": sample_gate(entries),
         "stability_performance": stability_performance,
         "persistence": {
+            "flush_after_restore": preflight.get("flush_after_restore"),
             "flush_after_save": preflight.get("flush_after_save"),
             "muted_after_reload": preflight.get("muted_after_reload"),
+            "muted_after_restore": preflight.get("muted_after_restore"),
             "pass": (
                 preflight.get("flush_after_save") is True
                 and preflight.get("muted_after_reload") == "true"
+                and preflight.get("flush_after_restore") is True
+                and preflight.get("muted_after_restore") == "false"
                 and preflight.get("storage_after_reload", {}).get("state") == "ready"
                 and preflight.get("storage_after_reload", {}).get("populate_count", 0) >= 1
             ),
@@ -1500,6 +1829,22 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     values = settings_values(after_reload, "muted")
     muted_after_reload = values[-1] if values else None
     after_reload.extend(webdriver_console(driver, "persistence_reload"))
+    restore_flush_count = int(storage_after_reload.get("flush_count") or 0)
+    send_key(driver, "m")
+    wait_for_setting(driver, "muted", "false")
+    storage_after_restore = wait_until(
+        lambda: (
+            page_state(driver).get("storage")
+            if int((page_state(driver).get("storage") or {}).get("flush_count") or 0)
+            > restore_flush_count
+            else None
+        ),
+        10,
+        "audible settings flush",
+    )
+    flush_after_restore = (
+        int(storage_after_restore.get("flush_count") or 0) > restore_flush_count
+    )
 
     driver.get(with_query(url, {"storage": "unavailable"}))
     wait_until(
@@ -1540,9 +1885,11 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     return {
         "console": console,
         "flush_after_save": flush_after_save,
+        "flush_after_restore": flush_after_restore,
         "fullscreen_observed": fullscreen_observed,
         "letterboxing": letterboxing,
         "muted_after_reload": muted_after_reload,
+        "muted_after_restore": "false",
         "navigation_to_title_ms": navigation_to_title_ms,
         "storage_after_reload": storage_after_reload,
         "storage_unavailable_boot_recoverable": storage_unavailable_boot_recoverable,
@@ -1612,6 +1959,7 @@ def run_flow(
     flow_completed = False
     match_focus_recovery = False
     match_focus_attempted = False
+    audio_probe_wait_until = None
     native_log_drains_before_flow = 0
     post_flow_actions = []
     screenshot_saved = False
@@ -1634,6 +1982,9 @@ def run_flow(
         routes = route_sequence(current_entries)
         if not match_focus_attempted and normalized_routes(routes)[-1:] == ["match"]:
             match_focus_attempted = True
+            audio_probe_wait_until = (
+                time.monotonic() + AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS
+            )
             route_count = len(routes)
             current = driver.current_window_handle
             driver.switch_to.new_window("tab")
@@ -1655,10 +2006,18 @@ def run_flow(
             match_focus_recovery = True
         if normalized_routes(routes)[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW:
             flow_completed = True
-            if not stability_seconds and not screenshot_saved:
-                driver.save_screenshot(str(output / "result.png"))
-                screenshot_saved = True
-            break
+            if audio_probe_wait_until is None:
+                audio_probe_wait_until = (
+                    now + AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS
+                )
+            if stability_seconds or (
+                audio_probe_wait_until is not None
+                and now >= audio_probe_wait_until
+            ):
+                if not stability_seconds and not screenshot_saved:
+                    driver.save_screenshot(str(output / "result.png"))
+                    screenshot_saved = True
+                break
         if not flow_completed and now > flow_deadline:
             raise RuntimeError(f"flow did not reach Result within {flow_timeout} seconds")
         if now >= keyboard_probe_at:
@@ -1724,6 +2083,9 @@ def run_flow(
         "measurement_collection": {
             "mode": "chrome_native_log_until_flow_scheduled_terminal_capture",
             "native_log_drains_before_flow": native_log_drains_before_flow,
+            "short_run_audio_probe_waited": (
+                not stability_seconds and audio_probe_wait_until is not None
+            ),
             "periodic_native_log_drains_after_flow": 0,
             "periodic_page_state_probes": 0,
             "post_flow_scheduled_actions": [
@@ -1755,6 +2117,9 @@ def run_firefox_flow(
     screenshot_saved = False
 
     wait_for_route(driver, "match", min(15, flow_timeout))
+    audio_probe_wait_until = (
+        time.monotonic() + AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS
+    )
     routes = route_sequence(browser_console(driver, "match_focus"))
     route_count = len(routes)
     current = driver.current_window_handle
@@ -1811,6 +2176,8 @@ def run_firefox_flow(
             )
 
     observe_flow_until(flow_deadline)
+    if not stability_seconds:
+        sleep_until(audio_probe_wait_until)
     if stability_seconds:
         sleep_until(end_at)
         if not screenshot_saved:
@@ -1832,6 +2199,7 @@ def run_firefox_flow(
             "periodic_console_drains": 0,
             "periodic_page_state_probes": 0,
             "scheduled_memory_probes": len(memories),
+            "short_run_audio_probe_waited": not stability_seconds,
         },
         "memory": memories,
         "performance_log": [],
@@ -1869,7 +2237,14 @@ def run_viewport(
     failure_state: dict[str, Any] = {}
     chrome_entries: list[dict[str, Any]] = []
     service_runtime_bytes = 0
-    quit_error = None
+    preflight_cleanup: dict[str, Any] = {
+        "pass": not dedicated_flow_browser,
+        "required": dedicated_flow_browser,
+    }
+    flow_cleanup: dict[str, Any] = {
+        "pass": False,
+        "reason": "flow browser did not launch",
+    }
     try:
         validate_manifest(base_url, expected_manifest)
         driver = launch_browser(
@@ -1889,8 +2264,12 @@ def run_viewport(
             )
         if dedicated_flow_browser:
             preflight_session_id = driver.session_id
-            driver.quit()
+            preflight_cleanup = quit_browser_bounded(driver)
             driver = None
+            if preflight_cleanup.get("pass") is not True:
+                raise RuntimeError(
+                    f"preflight browser cleanup failed: {preflight_cleanup}"
+                )
             active_driver_log = driver_log
             driver = launch_browser(
                 browser_name,
@@ -1949,21 +2328,27 @@ def run_viewport(
         if driver:
             if active_driver_log.is_file():
                 service_runtime_bytes = active_driver_log.stat().st_size
-            try:
-                driver.quit()
-            except Exception as error:
-                quit_error = error
+            flow_cleanup = quit_browser_bounded(driver)
+            driver = None
 
     service_entries = (
         service_console(active_driver_log, service_runtime_bytes)
         if browser_name == "firefox"
         else []
     )
-    if quit_error:
+    browser_cleanup = {
+        "flow": flow_cleanup,
+        "pass": (
+            preflight_cleanup.get("pass") is True
+            and flow_cleanup.get("pass") is True
+        ),
+        "preflight": preflight_cleanup,
+    }
+    if browser_cleanup["pass"] is not True:
         service_entries.append(
             {
                 "level": "error",
-                "message": f"WebDriver quit failed: {quit_error}",
+                "message": f"WebDriver cleanup failed: {browser_cleanup}",
                 "phase": "webdriver_teardown",
             }
         )
@@ -1995,6 +2380,7 @@ def run_viewport(
             },
             "captured_at": utc_now(),
             "checks": {
+                "browser_cleanup": browser_cleanup,
                 "browser_teardown": console_gate(
                     [
                         entry
@@ -2031,10 +2417,12 @@ def run_viewport(
                 key: preflight.get(key)
                 for key in (
                     "fullscreen_observed",
+                    "flush_after_restore",
                     "flush_after_save",
                     "acceptance_isolation",
                     "letterboxing",
                     "muted_after_reload",
+                    "muted_after_restore",
                     "navigation_to_title_ms",
                     "storage_after_reload",
                     "storage_unavailable_boot_recoverable",
@@ -2065,6 +2453,7 @@ def run_viewport(
         stability_seconds,
         warning_classifications,
     )
+    checks["browser_cleanup"] = browser_cleanup
     report = subprocess.run(
         [
             sys.executable,
@@ -2109,11 +2498,13 @@ def run_viewport(
             key: preflight.get(key)
             for key in (
                 "fullscreen_observed",
+                "flush_after_restore",
                 "flush_after_save",
                 "acceptance_isolation",
                 "letterboxing",
                 "match_focus_recovery",
                 "muted_after_reload",
+                "muted_after_restore",
                 "navigation_to_title_ms",
                 "storage_after_reload",
                 "storage_unavailable_boot_recoverable",
@@ -2130,10 +2521,463 @@ def run_viewport(
     return result
 
 
-def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
+def wait_for_firefox_heap_checkpoint(baseline: float, target_seconds: int, label: str) -> None:
+    deadline = baseline + max(0, target_seconds - FIREFOX_HEAP_PROMPT_LEAD_SECONDS)
+    while time.monotonic() < deadline:
+        remaining = max(0, math.ceil(deadline - time.monotonic()))
+        print(f"{label} checkpoint in {remaining} seconds...", flush=True)
+        time.sleep(min(30, max(1, remaining)))
+
+
+def capture_firefox_heap_checkpoint(
+    driver: Any,
+    game_handle: str,
+    output: Path,
+    label: str,
+    target_seconds: int,
+    baseline: float | None,
+    expected_build_id: str,
+) -> dict[str, Any]:
+    if baseline is not None:
+        wait_for_firefox_heap_checkpoint(baseline, target_seconds, label)
+    driver.switch_to.window(game_handle)
+    dimensions_before = set_viewport(driver, CANVAS_WIDTH, CANVAS_HEIGHT)
+    state_before = page_state(driver)
+    routes_before = normalized_routes(
+        route_sequence(browser_console(driver, "firefox_heap_checkpoint"))
+    )
+    expected_viewport = {"height": CANVAS_HEIGHT, "width": CANVAS_WIDTH}
+    before_pass = (
+        state_before.get("status") == "running"
+        and state_before.get("build_id") == expected_build_id
+        and state_before.get("viewport") == expected_viewport
+        and routes_before[-1:] == ["result"]
+    )
+    if not before_pass:
+        raise RuntimeError(
+            f"game tab failed its pre-{label} state/viewport/Result gate"
+        )
+
+    about_memory_path = output / f"about-memory-{label}.json.gz"
+    snapshot_path = output / f"heap-{label}.fxsnapshot"
+    for path in (about_memory_path, snapshot_path):
+        if path.exists():
+            raise RuntimeError(f"refusing reused Firefox heap evidence file: {path}")
+
+    print("", flush=True)
+    print(f"FIREFOX HEAP CHECKPOINT {label}", flush=True)
+    print(
+        "Keep DevTools undocked. In about:memory, click Minimize memory usage, "
+        "then Measure and save:",
+        flush=True,
+    )
+    print(f"  {about_memory_path}", flush=True)
+    print(
+        "Immediately return to the game tab's Memory panel, take a snapshot, "
+        "and save:",
+        flush=True,
+    )
+    print(f"  {snapshot_path}", flush=True)
+    prompt_started_at = utc_now()
+    prompt_started_ns = time.time_ns()
+    prompt_started_monotonic = time.monotonic()
+    input("Press Enter after both evidence files are fully saved: ")
+    about_memory = file_evidence(about_memory_path, prompt_started_ns)
+    snapshot = file_evidence(snapshot_path, prompt_started_ns)
+    completed_monotonic = time.monotonic()
+    elapsed_seconds = (
+        0.0 if baseline is None else round(completed_monotonic - baseline, 3)
+    )
+    prompt_elapsed_seconds = (
+        0.0 if baseline is None else round(prompt_started_monotonic - baseline, 3)
+    )
+
+    driver.switch_to.window(game_handle)
+    dimensions_after = set_viewport(driver, CANVAS_WIDTH, CANVAS_HEIGHT)
+    state_after = page_state(driver)
+    routes_after = normalized_routes(
+        route_sequence(browser_console(driver, "firefox_heap_checkpoint"))
+    )
+    viewport_pass = (
+        state_after.get("status") == "running"
+        and state_after.get("build_id") == expected_build_id
+        and state_after.get("viewport") == expected_viewport
+        and routes_after[-1:] == ["result"]
+    )
+    return {
+        "about_memory": about_memory,
+        "captured_at": utc_now(),
+        "completed_elapsed_seconds": elapsed_seconds,
+        "dimensions_after": dimensions_after,
+        "dimensions_before": dimensions_before,
+        "game_state_after": {
+            "build_id": state_after.get("build_id"),
+            "status": state_after.get("status"),
+            "viewport": state_after.get("viewport"),
+        },
+        "game_state_before": {
+            "build_id": state_before.get("build_id"),
+            "status": state_before.get("status"),
+            "viewport": state_before.get("viewport"),
+        },
+        "heap_snapshot": snapshot,
+        "label": label,
+        "pre_checkpoint_pass": before_pass,
+        "prompt_elapsed_seconds": prompt_elapsed_seconds,
+        "prompt_started_at": prompt_started_at,
+        "routes_after": routes_after,
+        "routes_before": routes_before,
+        "timing_target_seconds": target_seconds,
+        "timing_tolerance_seconds": FIREFOX_HEAP_TIMING_TOLERANCE_SECONDS,
+        "viewport_pass": viewport_pass,
+    }
+
+
+def firefox_heap_extractor_source(
+    checkpoints: list[dict[str, Any]],
+    output: Path,
+) -> str:
+    specifications = [
+        {
+            "label": checkpoint["label"],
+            "outputPath": str(
+                (output / f"heap-{checkpoint['label']}-census.json").resolve()
+            ),
+            "snapshotPath": checkpoint["heap_snapshot"]["path"],
+        }
+        for checkpoint in checkpoints
+    ]
+    specs_json = json.dumps(specifications, ensure_ascii=True)
+    return f"""// OMP-0 Firefox heap extractor schema 1.
+// Paste this entire file into the isolated campaign profile's Browser Console.
+(async () => {{
+  const {{ Services }} = ChromeUtils.importESModule(
+    "resource://gre/modules/Services.sys.mjs"
+  );
+  const specs = {specs_json};
+  const results = [];
+  for (const spec of specs) {{
+    const snapshot = ChromeUtils.readHeapSnapshot(spec.snapshotPath);
+    const report = snapshot.takeCensus({{
+      breakdown: {{ by: "count", count: true, bytes: true }},
+    }});
+    const stat = await IOUtils.stat(spec.snapshotPath);
+    const result = {{
+      app_build_id: Services.appinfo.appBuildID,
+      census_bytes: report.bytes,
+      census_count: report.count,
+      extractor_schema: 1,
+      firefox_version: Services.appinfo.version,
+      label: spec.label,
+      platform_build_id: Services.appinfo.platformBuildID,
+      snapshot_creation_time_us: snapshot.creationTime,
+      snapshot_path: spec.snapshotPath,
+      snapshot_sha256: await IOUtils.computeHexDigest(spec.snapshotPath, "sha256"),
+      snapshot_size_bytes: stat.size,
+    }};
+    await IOUtils.writeJSON(spec.outputPath, result);
+    results.push(result);
+  }}
+  return results;
+}})();
+"""
+
+
+def read_firefox_heap_census(
+    checkpoints: list[dict[str, Any]],
+    output: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    extractor_path = output / "firefox-heap-extractor.js"
+    extractor_path.write_text(
+        firefox_heap_extractor_source(checkpoints, output),
+        encoding="utf-8",
+    )
+    extractor = file_evidence(extractor_path)
+    expected_outputs = [
+        output / f"heap-{checkpoint['label']}-census.json"
+        for checkpoint in checkpoints
+    ]
+    if any(path.exists() for path in expected_outputs):
+        raise RuntimeError("refusing reused Firefox heap census output")
+    print("", flush=True)
+    print("FIREFOX HEAP SNAPSHOT CENSUS", flush=True)
+    print(
+        "Open Firefox Browser Console (Ctrl+Shift+J) in this isolated profile, "
+        "paste the entire extractor file below, and run it:",
+        flush=True,
+    )
+    print(f"  {extractor_path}", flush=True)
+    extractor_started_ns = time.time_ns()
+    input("Press Enter after the console reports the three census results: ")
+
+    results = []
+    for checkpoint, result_path in zip(checkpoints, expected_outputs, strict=True):
+        result_evidence = file_evidence(result_path, extractor_started_ns)
+        try:
+            value = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"invalid Firefox heap census output: {result_path}") from error
+        snapshot = checkpoint["heap_snapshot"]
+        census_bytes = value.get("census_bytes")
+        census_count = value.get("census_count")
+        if (
+            value.get("extractor_schema") != 1
+            or value.get("label") != checkpoint["label"]
+            or value.get("snapshot_path") != snapshot["path"]
+            or str(value.get("snapshot_sha256", "")).lower() != snapshot["sha256"]
+            or value.get("snapshot_size_bytes") != snapshot["size_bytes"]
+            or isinstance(census_bytes, bool)
+            or not isinstance(census_bytes, int)
+            or census_bytes <= 0
+            or isinstance(census_count, bool)
+            or not isinstance(census_count, int)
+            or census_count <= 0
+            or not isinstance(value.get("snapshot_creation_time_us"), int)
+            or not isinstance(value.get("app_build_id"), str)
+            or not value["app_build_id"]
+            or not isinstance(value.get("platform_build_id"), str)
+            or not value["platform_build_id"]
+            or not isinstance(value.get("firefox_version"), str)
+            or not value["firefox_version"]
+        ):
+            raise RuntimeError(
+                f"Firefox heap census provenance mismatch at {checkpoint['label']}"
+            )
+        checkpoint["census"] = value
+        checkpoint["census_output"] = result_evidence
+        checkpoint["tab_heap_snapshot_census_bytes"] = census_bytes
+        results.append(value)
+    return results, extractor
+
+
+def run_firefox_heap_companion(
+    binary: Path,
+    driver_path: Path,
+    base_url: str,
+    packet_root: Path,
+    manifest: dict[str, Any],
+    flow_timeout: int,
+    expected_environment: dict[str, Any],
+) -> dict[str, Any]:
+    output = packet_root / "firefox-heap-companion"
+    output.mkdir(parents=True, exist_ok=False)
+    driver_log = output / "webdriver.log"
+    binary_metadata = executable_metadata(binary)
+    driver_metadata = executable_metadata(driver_path)
+    expected_binary = expected_environment.get("browser_binary", {})
+    expected_driver = expected_environment.get("browser_driver", {})
+    asset_match = (
+        binary_metadata.get("sha256") == expected_binary.get("sha256")
+        and driver_metadata.get("sha256") == expected_driver.get("sha256")
+    )
+    if not asset_match:
+        raise RuntimeError(
+            "Firefox heap companion browser/driver assets do not match the automated row"
+        )
+
+    browser = None
+    cleanup = {"pass": False, "reason": "browser did not launch"}
+    flow: dict[str, Any] | None = None
+    checkpoints: list[dict[str, Any]] = []
+    capabilities: dict[str, Any] = {}
+    session_id = None
+    profile = None
+    try:
+        validate_manifest(base_url, manifest)
+        browser = launch_browser(
+            "firefox",
+            binary,
+            driver_path,
+            driver_log,
+            False,
+            browser_console_enabled=True,
+        )
+        capabilities = browser.capabilities
+        session_id = browser.session_id
+        profile = profile_directory(capabilities)
+        game_handle = browser.current_window_handle
+        flow = run_flow(
+            browser,
+            "firefox",
+            base_url,
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT,
+            output,
+            flow_timeout,
+            0,
+            False,
+            [],
+        )
+        flow_routes = normalized_routes(route_sequence(flow["console"]))
+        if flow_routes[-len(EXPECTED_FLOW) :] != EXPECTED_FLOW:
+            raise RuntimeError("Firefox heap companion did not reach stable Result")
+        final_state = flow["final_state"]
+        if final_state.get("build_id") != manifest.get("source_revision"):
+            raise RuntimeError("Firefox heap companion build ID does not match the packet")
+        if final_state.get("viewport") != {
+            "height": CANVAS_HEIGHT,
+            "width": CANVAS_WIDTH,
+        }:
+            raise RuntimeError("Firefox heap companion did not establish a 960x540 viewport")
+        write_json(output / "flow-console.json", flow["console"])
+        write_json(
+            output / "session.json",
+            {
+                "browser_binary": binary_metadata,
+                "browser_capabilities": capabilities,
+                "browser_driver": driver_metadata,
+                "clean_profile": True,
+                "flow_final_state": final_state,
+                "flow_routes": flow_routes,
+                "profile": profile,
+                "session_id": session_id,
+                "viewport": {"height": CANVAS_HEIGHT, "width": CANVAS_WIDTH},
+            },
+        )
+
+        print("", flush=True)
+        print("ATTENDED FIREFOX TAB-HEAP COMPANION", flush=True)
+        print(
+            "The exact game tab is at stable Result in a fresh WebDriver profile with "
+            "a verified 960x540 inner viewport.",
+            flush=True,
+        )
+        print(
+            "Open that tab's DevTools Memory panel in a separate undocked window. "
+            "The runner will save each snapshot now and reduce it afterward with "
+            "Firefox's own offline heap census.",
+            flush=True,
+        )
+        input("Press Enter when the undocked Memory panel is ready: ")
+
+        t0 = capture_firefox_heap_checkpoint(
+            browser,
+            game_handle,
+            output,
+            "t0",
+            0,
+            None,
+            str(manifest.get("source_revision")),
+        )
+        checkpoints.append(t0)
+        baseline = time.monotonic()
+        for label, target_seconds in FIREFOX_HEAP_CHECKPOINTS[1:]:
+            checkpoints.append(
+                capture_firefox_heap_checkpoint(
+                    browser,
+                    game_handle,
+                    output,
+                    label,
+                    target_seconds,
+                    baseline,
+                    str(manifest.get("source_revision")),
+                )
+            )
+        census_results, extractor = read_firefox_heap_census(checkpoints, output)
+        validate_manifest(base_url, manifest)
+    finally:
+        if browser:
+            cleanup = quit_browser_bounded(browser)
+
+    assert flow is not None
+    totals = [
+        float(checkpoint["tab_heap_snapshot_census_bytes"])
+        for checkpoint in checkpoints
+    ]
+    growth_percent = ((totals[-1] - totals[0]) / totals[0]) * 100
+    creation_times = [
+        int(result["snapshot_creation_time_us"]) for result in census_results
+    ]
+    firefox_versions = {result["firefox_version"] for result in census_results}
+    app_build_ids = {result["app_build_id"] for result in census_results}
+    platform_build_ids = {result["platform_build_id"] for result in census_results}
+    build_metadata_pass = (
+        len(firefox_versions) == 1
+        and len(app_build_ids) == 1
+        and len(platform_build_ids) == 1
+        and next(iter(firefox_versions), None) == capabilities.get("browserVersion")
+    )
+    session_metadata_pass = bool(session_id and profile)
+    timing = firefox_heap_snapshot_timing(creation_times)
+    timing_offsets_seconds = timing["offsets_seconds"]
+    timing_pass = timing["pass"]
+    viewport_pass = len(checkpoints) == 3 and all(
+        checkpoint["viewport_pass"] is True for checkpoint in checkpoints
+    )
+    flow_routes = normalized_routes(route_sequence(flow["console"]))
+    renderer = str(flow["final_state"].get("renderer") or "")
+    hardware_acceleration_pass = bool(renderer) and not any(
+        name in renderer.lower() for name in SOFTWARE_RENDERERS
+    )
+    driver_log_evidence = file_evidence(driver_log)
+    summary = {
+        "asset_match": asset_match,
+        "browser_binary": binary_metadata,
+        "browser_capabilities": capabilities,
+        "browser_driver": driver_metadata,
+        "build_metadata": {
+            "app_build_ids": sorted(app_build_ids),
+            "firefox_versions": sorted(firefox_versions),
+            "pass": build_metadata_pass,
+            "platform_build_ids": sorted(platform_build_ids),
+        },
+        "captured_at": utc_now(),
+        "checkpoints": checkpoints,
+        "clean_profile": True,
+        "flow_pass": flow_routes[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW,
+        "formula": "(t10 - t0) / t0 * 100",
+        "growth_percent": round(growth_percent, 6),
+        "hardware_acceleration": {
+            "pass": hardware_acceleration_pass,
+            "renderer": renderer or None,
+            "vendor": flow["final_state"].get("vendor"),
+        },
+        "heap_metric": {
+            "breakdown": {"by": "count", "bytes": True, "count": True},
+            "extractor": extractor,
+            "name": "Firefox DevTools tab heap-snapshot census bytes",
+            "source": "HeapSnapshot.takeCensus root report.bytes",
+        },
+        "manifest_sha256": file_evidence(packet_root / "manifest.json")["sha256"],
+        "monotonic_non_decreasing": totals[0] <= totals[1] <= totals[2],
+        "package_sha256": manifest.get("game_package", {}).get("sha256"),
+        "pass": (
+            asset_match
+            and build_metadata_pass
+            and session_metadata_pass
+            and flow_routes[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW
+            and hardware_acceleration_pass
+            and timing_pass
+            and viewport_pass
+            and growth_percent <= 25
+            and cleanup.get("pass") is True
+        ),
+        "profile": profile,
+        "quit": cleanup,
+        "session_metadata_pass": session_metadata_pass,
+        "session_id": session_id,
+        "source_revision": manifest.get("source_revision"),
+        "threshold_percent": 25,
+        "timing_offsets_seconds": timing_offsets_seconds,
+        "timing_pass": timing_pass,
+        "viewport": {"height": CANVAS_HEIGHT, "width": CANVAS_WIDTH},
+        "viewport_pass": viewport_pass,
+        "webdriver_log": driver_log_evidence,
+    }
+    write_json(output / "firefox-heap-summary.json", summary)
+    return summary
+
+
+def result_passes(
+    result: dict[str, Any],
+    require_stability: bool,
+    require_gamepad: bool = False,
+    external_memory_companion: bool = False,
+) -> bool:
     required = [
         "artifact_boot",
         "audio_after_gesture",
+        "browser_cleanup",
         "clean_console",
         "complete_flow",
         "fullscreen",
@@ -2146,16 +2990,18 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
         "storage_unavailable",
         "terminal_runtime_health",
     ]
+    if require_gamepad or require_stability:
+        required.append("gamepad")
     if require_stability:
         required.extend(
             (
                 "acceptance_isolation",
-                "gamepad",
-                "memory",
                 "runtime_stability",
                 "stability_performance",
             )
         )
+        if not external_memory_companion:
+            required.append("memory")
     return (
         result.get("web_report_exit_code") == 0
         and all(result.get("checks", {}).get(name, {}).get("pass") is True for name in required)
@@ -2311,6 +3157,44 @@ def self_test() -> int:
             ]
 
     assert parse_viewport("960x540") == (960, 540)
+    windows_gpus = parse_windows_gpu_output(
+        json.dumps(
+            [
+                {
+                    "AdapterCompatibility": "Intel Corporation",
+                    "DriverVersion": "32.0.101.6559",
+                    "Name": "Intel(R) Arc(TM) Graphics",
+                    "PNPDeviceID": "PCI\\VEN_8086",
+                    "VideoProcessor": "Intel Arc",
+                },
+                {
+                    "AdapterCompatibility": "Advanced Micro Devices, Inc.",
+                    "DriverVersion": "32.0.21025.1006",
+                    "Name": "AMD Radeon RX 7800 XT",
+                    "PNPDeviceID": "PCI\\VEN_1002",
+                    "VideoProcessor": "AMD Radeon Graphics Processor",
+                },
+            ]
+        )
+    )
+    assert windows_gpus["available"] is True
+    assert windows_gpus["truncated"] is False
+    assert [adapter["name"] for adapter in windows_gpus["adapters"]] == [
+        "Intel(R) Arc(TM) Graphics",
+        "AMD Radeon RX 7800 XT",
+    ]
+    bounded_gpus = parse_windows_gpu_output(
+        json.dumps(
+            [{"Name": f"adapter-{index}"} for index in range(WINDOWS_GPU_MAX_ADAPTERS + 1)]
+        )
+    )
+    assert len(bounded_gpus["adapters"]) == WINDOWS_GPU_MAX_ADAPTERS
+    assert bounded_gpus["truncated"] is True
+    assert parse_windows_gpu_output("not-json") == {
+        "adapters": [],
+        "available": False,
+        "truncated": False,
+    }
     assert expected_canvas_rect(800, 540) == {
         "height": 450,
         "width": 800,
@@ -2396,6 +3280,215 @@ def self_test() -> int:
         "event_kind": "key_return",
         "sequence": "1",
     }
+    healthy_audio_entries = [
+        {
+            "level": "log",
+            "message": (
+                "GC_METRICS|settings|at_ms=900|fullscreen=false|muted=false"
+            ),
+            "phase": "flow",
+        },
+        {
+            "level": "log",
+            "message": "GC_METRICS|route|at_ms=1000|route=match",
+            "phase": "flow",
+        }
+    ]
+    for observation in range(AUDIO_PROBE_MAX_OBSERVATIONS):
+        healthy_audio_entries.append(
+            {
+                "level": "log",
+                "message": (
+                    "GC_METRICS|audio"
+                    f"|active_sources={1 if observation == 4 else 0}"
+                    f"|at_ms={1000 + observation * 500}|volume=1"
+                ),
+                "phase": "flow",
+            }
+        )
+    healthy_audio = audio_probe_check(
+        healthy_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert healthy_audio["pass"] is True
+    assert healthy_audio["bounded"] is True
+    assert healthy_audio["complete"] is True
+    assert healthy_audio["positive_source_observed"] is True
+    assert healthy_audio["audible_settings"]["pass"] is True
+    assert healthy_audio["invalid_observations"] == []
+    assert healthy_audio["ordered"] is True
+    assert healthy_audio["observation_offsets_ms"] == [
+        observation * 500 for observation in range(AUDIO_PROBE_MAX_OBSERVATIONS)
+    ]
+    focus_reentry_audio = audio_probe_check(
+        [
+            *healthy_audio_entries,
+            {
+                "level": "log",
+                "message": "GC_METRICS|route|at_ms=2500|route=match",
+            },
+        ],
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert focus_reentry_audio["pass"] is True
+    assert focus_reentry_audio["match_at_ms"] == 1000
+    missing_audio = audio_probe_check(
+        [
+            {
+                "level": "log",
+                "message": "GC_METRICS|route|at_ms=1000|route=match",
+            }
+        ],
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert missing_audio["pass"] is False
+    assert missing_audio["complete"] is False
+    assert missing_audio["positive_source_observed"] is False
+    silent_audio_entries = [
+        {
+            **entry,
+            "message": str(entry["message"]).replace("active_sources=1", "active_sources=0"),
+        }
+        for entry in healthy_audio_entries
+    ]
+    silent_audio = audio_probe_check(
+        silent_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert silent_audio["pass"] is False
+    assert silent_audio["complete"] is True
+    assert silent_audio["positive_source_observed"] is False
+    muted_audio_entries = [
+        {
+            **entry,
+            "message": str(entry["message"]).replace("muted=false", "muted=true"),
+        }
+        for entry in healthy_audio_entries
+    ]
+    muted_audio = audio_probe_check(
+        muted_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert muted_audio["pass"] is False
+    assert muted_audio["audible_settings"]["pass"] is False
+    incomplete_audio = audio_probe_check(
+        healthy_audio_entries[:-1],
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert incomplete_audio["pass"] is False
+    assert incomplete_audio["bounded"] is False
+    assert incomplete_audio["complete"] is False
+    malformed_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("active_sources=0", "active_sources=invalid")
+                if "at_ms=1000|volume=1" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    malformed_audio = audio_probe_check(
+        malformed_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert malformed_audio["pass"] is False
+    assert malformed_audio["complete"] is False
+    assert malformed_audio["invalid_observations"][0]["reason"] == (
+        "invalid active_sources or volume"
+    )
+    nonfinite_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("at_ms=1500", "at_ms=nan")
+                if "GC_METRICS|audio" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    nonfinite_audio = audio_probe_check(
+        nonfinite_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert nonfinite_audio["pass"] is False
+    assert nonfinite_audio["invalid_observations"][0]["reason"] == "non-finite at_ms"
+    missing_audio_field_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("|volume=1", "")
+                if "at_ms=1500|volume=1" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    missing_audio_field = audio_probe_check(
+        missing_audio_field_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert missing_audio_field["pass"] is False
+    assert missing_audio_field["invalid_observations"][0]["reason"] == (
+        "invalid active_sources or volume"
+    )
+    nonfinite_volume_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("|volume=1", "|volume=nan")
+                if "at_ms=1500|volume=1" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    nonfinite_volume = audio_probe_check(
+        nonfinite_volume_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert nonfinite_volume["pass"] is False
+    assert nonfinite_volume["invalid_observations"][0]["reason"] == (
+        "invalid active_sources or volume"
+    )
+    duplicate_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("at_ms=1500", "at_ms=1000")
+                if "GC_METRICS|audio" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    duplicate_audio = audio_probe_check(
+        duplicate_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert duplicate_audio["pass"] is False
+    assert duplicate_audio["complete"] is False
+    assert duplicate_audio["ordered"] is False
+    out_of_order_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("at_ms=2000", "at_ms=1250")
+                if "GC_METRICS|audio" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    out_of_order_audio = audio_probe_check(
+        out_of_order_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert out_of_order_audio["pass"] is False
+    assert out_of_order_audio["complete"] is False
+    assert out_of_order_audio["ordered"] is False
     fake_driver = FakeChromeDriver()
     chrome_entries: list[dict[str, Any]] = []
     assert route_sequence(flow_console(fake_driver, "chrome", "flow", chrome_entries)) == [
@@ -2638,6 +3731,7 @@ def self_test() -> int:
         for name in (
             "artifact_boot",
             "audio_after_gesture",
+            "browser_cleanup",
             "clean_console",
             "complete_flow",
             "fullscreen",
@@ -2658,6 +3752,41 @@ def self_test() -> int:
         "web_report_exit_code": 0,
     }
     assert result_passes(healthy_short_result, require_stability=False) is True
+    assert (
+        result_passes(
+            {
+                **healthy_short_result,
+                "checks": {
+                    **healthy_short_result["checks"],
+                    "browser_cleanup": {"pass": False},
+                },
+            },
+            require_stability=False,
+        )
+        is False
+    )
+    assert (
+        result_passes(
+            healthy_short_result,
+            require_stability=False,
+            require_gamepad=True,
+        )
+        is False
+    )
+    assert (
+        result_passes(
+            {
+                **healthy_short_result,
+                "checks": {
+                    **healthy_short_result["checks"],
+                    "gamepad": {"pass": True},
+                },
+            },
+            require_stability=False,
+            require_gamepad=True,
+        )
+        is True
+    )
     assert (
         result_passes(
             {
@@ -2684,6 +3813,86 @@ def self_test() -> int:
         )
         is False
     )
+    healthy_long_checks = {
+        **healthy_short_result["checks"],
+        "acceptance_isolation": {"pass": True},
+        "gamepad": {"pass": True},
+        "memory": {"pass": True},
+        "runtime_stability": {"pass": True},
+        "stability_performance": {"pass": True},
+    }
+    healthy_long_result = {
+        **healthy_short_result,
+        "checks": healthy_long_checks,
+    }
+    assert result_passes(healthy_long_result, require_stability=True) is True
+    missing_firefox_heap_result = {
+        **healthy_long_result,
+        "checks": {
+            **healthy_long_checks,
+            "memory": {"pass": None},
+        },
+    }
+    assert result_passes(missing_firefox_heap_result, require_stability=True) is False
+    assert (
+        result_passes(
+            missing_firefox_heap_result,
+            require_stability=True,
+            external_memory_companion=True,
+        )
+        is True
+    )
+    extractor_source = firefox_heap_extractor_source(
+        [
+            {
+                "heap_snapshot": {"path": r"C:\evidence\heap-t0.fxsnapshot"},
+                "label": "t0",
+            }
+        ],
+        Path(r"C:\evidence"),
+    )
+    assert "ChromeUtils.readHeapSnapshot" in extractor_source
+    assert 'breakdown: { by: "count", count: true, bytes: true }' in extractor_source
+    assert "snapshot_creation_time_us" in extractor_source
+    assert "snapshot_sha256" in extractor_source
+    assert "heap-t0-census.json" in extractor_source
+    assert firefox_heap_snapshot_timing([1_000_000, 301_000_000, 601_000_000]) == {
+        "offsets_seconds": [0.0, 300.0, 600.0],
+        "pass": True,
+    }
+    assert (
+        firefox_heap_snapshot_timing([1_000_000, 317_000_000, 601_000_000])["pass"]
+        is False
+    )
+    assert (
+        firefox_heap_snapshot_timing([1_000_000, 301_000_000, 301_000_000])["pass"]
+        is False
+    )
+
+    class FakeStoppedProcess:
+        pid = 123
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    class FakeService:
+        process = FakeStoppedProcess()
+
+    class FakeQuitDriver:
+        service = FakeService()
+
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+
+        def quit(self) -> None:
+            if self.fail:
+                raise RuntimeError("synthetic quit failure")
+
+    assert quit_browser_bounded(FakeQuitDriver(), 1)["pass"] is True
+    failed_quit = quit_browser_bounded(FakeQuitDriver(fail=True), 1)
+    assert failed_quit["pass"] is False
+    assert failed_quit["error"] == "synthetic quit failure"
     print("browser matrix self-test: OK")
     return 0
 
@@ -2697,6 +3906,19 @@ def main() -> int:
     parser.add_argument("--viewport", action="append", type=parse_viewport)
     parser.add_argument("--flow-timeout", type=int, default=300)
     parser.add_argument("--stability-seconds", type=int, default=600)
+    parser.add_argument(
+        "--require-gamepad",
+        action="store_true",
+        help="require standard-mapped physical A/B observations in every viewport row",
+    )
+    parser.add_argument(
+        "--external-memory-companion",
+        action="store_true",
+        help=(
+            "complete a Firefox long row with its attended offline JS-heap "
+            "snapshot companion"
+        ),
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -2717,6 +3939,12 @@ def main() -> int:
         parser.error("--browser is required unless --self-test is used")
     if args.flow_timeout <= 0 or args.stability_seconds < 0:
         parser.error("timeouts must be positive (stability may be zero)")
+    if args.external_memory_companion and (
+        args.browser != "firefox" or args.stability_seconds <= 0
+    ):
+        parser.error(
+            "--external-memory-companion requires Firefox with positive stability seconds"
+        )
 
     binary, driver = resolve_assets(args.browser, args.binary, args.driver)
     viewports = args.viewport or DEFAULT_VIEWPORTS
@@ -2733,15 +3961,47 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=False)
     write_json(root / "manifest.json", manifest)
     environment = {
-        "browser_binary": str(binary),
-        "browser_driver": str(driver),
+        "asset_resolution_mode": (
+            "explicit_override" if args.binary or args.driver else "selenium_manager_stable"
+        ),
+        "browser_binary": executable_metadata(binary),
+        "browser_channel_requested": "stable",
+        "browser_driver": executable_metadata(driver),
         "captured_at": utc_now(),
         "clean_profile": True,
         "extensions_disabled": True,
         "hardware_acceleration_requested": True,
+        "memory_evidence_mode": (
+            "external_firefox_companion"
+            if args.external_memory_companion
+            else "automated"
+        ),
         "os": os_metadata(),
+        "physical_gamepad_required": args.require_gamepad,
+        "selenium": selenium_metadata(),
         "served_url": base_url,
         "warning_classifications": [pattern.pattern for pattern in warning_classifications],
+    }
+    windows_gpu = environment["os"].get("windows_video_controllers", {})
+    environment_checks = {
+        "gpu_metadata": {
+            "pass": (
+                windows_gpu.get("available") is True
+                and bool(windows_gpu.get("adapters"))
+                if os.name == "nt"
+                else True
+            ),
+            "required": os.name == "nt",
+        },
+        "stable_browser_requested": {
+            "pass": not (args.binary or args.driver),
+            "requested": "stable",
+            "resolution_mode": (
+                "explicit_override"
+                if args.binary or args.driver
+                else "selenium_manager_stable"
+            ),
+        },
     }
     write_json(root / "environment.json", environment)
 
@@ -2769,17 +4029,73 @@ def main() -> int:
                 warning_classifications,
             )
         )
-    packet_pass = all(
-        result_passes(result, require_stability=index == 0)
+    automated_pass = all(
+        result_passes(
+            result,
+            require_stability=index == 0 and args.stability_seconds > 0,
+            require_gamepad=args.require_gamepad,
+            external_memory_companion=(
+                args.external_memory_companion
+                and index == 0
+                and args.stability_seconds > 0
+            ),
+        )
         for index, result in enumerate(results)
+    ) and all(check["pass"] is True for check in environment_checks.values())
+    memory_companion: dict[str, Any] = {
+        "required": args.external_memory_companion,
+        "status": "not_required",
+    }
+    if args.external_memory_companion:
+        if not automated_pass:
+            memory_companion["status"] = "skipped_automated_failure"
+        else:
+            try:
+                companion_summary = run_firefox_heap_companion(
+                    binary,
+                    driver,
+                    base_url,
+                    root,
+                    manifest,
+                    args.flow_timeout,
+                    environment,
+                )
+                memory_companion = {
+                    "pass": companion_summary.get("pass") is True,
+                    "required": True,
+                    "status": (
+                        "pass" if companion_summary.get("pass") is True else "fail"
+                    ),
+                    "summary": str(
+                        root
+                        / "firefox-heap-companion"
+                        / "firefox-heap-summary.json"
+                    ),
+                }
+            except Exception as error:
+                memory_companion = {
+                    "error": {
+                        "message": str(error),
+                        "type": type(error).__name__,
+                    },
+                    "pass": False,
+                    "required": True,
+                    "status": "error",
+                }
+    packet_pass = automated_pass and (
+        not args.external_memory_companion
+        or memory_companion.get("pass") is True
     )
     write_json(
         root / "summary.json",
         {
+            "automated_pass": automated_pass,
             "browser": args.browser,
             "captured_at": utc_now(),
             "environment": environment,
+            "environment_checks": environment_checks,
             "manifest": manifest,
+            "memory_companion": memory_companion,
             "pass": packet_pass,
             "results": results,
         },

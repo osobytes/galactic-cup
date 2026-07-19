@@ -59,6 +59,100 @@ CI can run this command without opening a browser. A normal browser should be
 used for the title-screen and complete-flow checks; those compatibility and
 performance checks remain part of issue #3.
 
+## Evidence campaign
+
+The evidence runner needs Python 3.11 or newer. Its complete 15-wheel Selenium
+4.43.0 closure is version- and hash-locked in
+`scripts/browser_matrix-requirements.txt`; install it with
+`pip --require-hashes`. The Windows entrypoint does this in a disposable
+environment and gives Selenium Manager a campaign-local cache. Each packet
+records versions, paths, sizes, and SHA-256 hashes for Python, Selenium
+Manager, the stable-channel browser, and its driver.
+
+On an attended Windows 11 host, install current stable Chrome and Firefox, then
+run from PowerShell:
+
+```powershell
+.\scripts\windows_browser_campaign.ps1
+```
+
+The entrypoint refuses a reused output root, creates an evidence-only virtual
+environment, builds and serves the artifact, and runs one fresh-profile
+session for every browser/viewport pair. The 960×540 session is the
+600-second row; the other two sessions exercise the complete flow and controls.
+After the Firefox heap companion, it stops the server with a bounded cleanup
+and archives each packet. Raw packets, ZIPs, server logs, operator
+observations, and `campaign-summary.json` are under
+`.cache\omp0-windows-campaign\<timestamp>\` by default and remain ignored.
+Each packet's `environment.json` includes a bounded
+`Win32_VideoController` inventory, so Intel and AMD adapters are retained
+alongside any `nvidia-smi` result. Missing Windows GPU metadata makes the
+campaign incomplete.
+
+Keep the desktop unlocked and foregrounded with hardware acceleration enabled,
+Windows scaling at 100%, and enough physical resolution for an exact
+1920×1080 browser viewport (2560×1440 or larger is recommended). Enable audible
+playback and connect one physical controller exposed by the browser with
+`mapping="standard"`; listen during Match and press physical A then B in every
+browser/viewport session. After each session, the operator must answer
+`yes`, `no`, or `unsure` for audible output and physical A/B. Only `yes` passes;
+the answers are written inside the raw packet before its ZIP is hashed. Do not
+substitute a virtual HID or infer a pass from a connected device without both
+input events. No Actions workflow is provided: the fixed attended desktop,
+GPU/audio, resolution, and physical-input requirements are not available on
+an eligible repository runner.
+
+### Firefox heap companion
+
+Firefox process-tree RSS remains useful supplemental process memory, but it is
+not JavaScript heap. `performance.memory` is a non-standard Chromium-only API.
+The Firefox 960×540 runner therefore keeps the exact artifact server alive,
+launches a second clean WebDriver-controlled Firefox profile with the same
+Selenium Manager-resolved browser and driver, verifies the inner viewport
+before and after every checkpoint, and guides an attended companion:
+
+1. Let the runner reach stable Result, then open that tab's Firefox DevTools
+   **Memory** panel in an undocked window.
+2. At t0, t5, and t10, use `about:memory` **Minimize memory usage** to force
+   GC/CC and save `about-memory-<label>.json.gz`. Immediately take and save the
+   tab snapshot as `heap-<label>.fxsnapshot`.
+3. After t10, paste the packet's generated `firefox-heap-extractor.js` into
+   that isolated profile's Browser Console. Firefox itself reopens each saved
+   snapshot and runs a root `{ by: "count" }` heap census. The runner accepts
+   `report.bytes` only when each generated census JSON matches the wrapper's
+   independent snapshot SHA-256 and size. If Firefox shows its first-paste
+   protection prompt, follow that prompt in this disposable profile, then
+   paste the unchanged generated file.
+
+The embedded snapshot creation times must put t5/t10 within 15 seconds of
+300/600 seconds after t0. Six non-empty raw files (three `about:memory` reports
+and three snapshots), the three generated census outputs, the exact extractor
+source and hash, session metadata, and `firefox-heap-summary.json` are
+required. The summary computes `(t10 - t0) / t0 * 100`, reports whether
+t0 ≤ t5 ≤ t10, applies the unchanged 25% threshold, and records the actual
+companion session/profile, Firefox `appBuildID`/`platformBuildID` and
+capabilities, browser/driver hashes, source and package revisions, exact
+viewport/Result checks, and authoritative snapshot timing. The Firefox long
+row and campaign cannot pass unless this companion passes.
+
+Mozilla documents
+[`about:memory` GC/CC and reports](https://firefox-source-docs.mozilla.org/performance/memory/about_colon_memory.html),
+the [Firefox Memory tool](https://firefox-source-docs.mozilla.org/devtools-user/memory/index.html),
+and [snapshot save/diff operations](https://firefox-source-docs.mozilla.org/performance/memory/basic_operations.html).
+Mozilla's
+[`HeapSnapshot` interface](https://searchfox.org/firefox-main/source/dom/chrome-webidl/HeapSnapshot.webidl)
+defines offline snapshot loading, embedded creation time, and census
+collection; the
+[`Debugger.Memory` census reference](https://searchfox.org/firefox-main/source/js/src/doc/Debugger/Debugger.Memory.md)
+defines the root byte count used here.
+MDN documents
+[`performance.memory` as non-standard and Chromium-only](https://developer.mozilla.org/en-US/docs/Web/API/Performance/memory).
+The Browser Console extractor is enabled only in the disposable campaign
+profile and reads only the named local snapshots. Geckodriver's
+[`--allow-system-access`](https://firefox-source-docs.mozilla.org/testing/geckodriver/Flags.html)
+grants browser-UI-process privileges and full system access, so it remains
+disabled.
+
 ## Reproducibility and provenance
 
 The build packages only the authored runtime inputs needed by LÖVE:
