@@ -53,6 +53,7 @@ HARD_RUNTIME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 HEAP_CROSSCHECK_TOLERANCE_PERCENT = 5
+FIREFOX_FLOW_WAIT_CHUNK_SECONDS = 90
 
 
 def utc_now() -> str:
@@ -501,12 +502,126 @@ return {
 };
 """
 
+FIREFOX_FLOW_WAIT = """
+const marker = arguments[0];
+const timeoutMs = arguments[1];
+const done = arguments[arguments.length - 1];
+const deadline = performance.now() + timeoutMs;
+let cursor = 0;
+function inspect() {
+  const compat = window.__GALACTIC_CUP__ || {};
+  const status = compat.status || "missing";
+  const entries = compat.console_entries || [];
+  while (cursor < entries.length) {
+    const message = String(entries[cursor].message || "");
+    cursor += 1;
+    if (message.includes("GC_BROWSER|error|")) {
+      done({error: message, matched: false, status});
+      return;
+    }
+    if (message.includes(marker)) {
+      done({error: null, matched: true, status});
+      return;
+    }
+  }
+  if (status !== "running" || performance.now() >= deadline) {
+    done({error: null, matched: false, status});
+    return;
+  }
+  window.setTimeout(inspect, 100);
+}
+inspect();
+"""
+
 
 def page_state(driver: Any) -> dict[str, Any]:
     value = driver.execute_script(PAGE_STATE)
     if not isinstance(value, dict):
         raise RuntimeError("browser did not return page state")
     return value
+
+
+def wait_for_firefox_flow_marker(driver: Any, marker: str, timeout: float) -> bool:
+    """Wait in Firefox without repeatedly synchronizing WebDriver and the renderer."""
+    if timeout <= 0:
+        return False
+    driver.set_script_timeout(timeout + 5)
+    value = driver.execute_async_script(FIREFOX_FLOW_WAIT, marker, timeout * 1000)
+    if not isinstance(value, dict):
+        raise RuntimeError("Firefox did not return flow-wait state")
+    if value.get("error"):
+        raise RuntimeError(f"browser runtime reported an error: {value['error']}")
+    if value.get("status") != "running":
+        raise RuntimeError(f"browser runtime changed to {value.get('status')}")
+    return value.get("matched") is True
+
+
+def wait_for_firefox_flow_until(
+    driver: Any,
+    marker: str,
+    deadline: float,
+) -> tuple[bool, int]:
+    waits = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, waits
+        waits += 1
+        if wait_for_firefox_flow_marker(
+            driver,
+            marker,
+            min(remaining, FIREFOX_FLOW_WAIT_CHUNK_SECONDS),
+        ):
+            return True, waits
+
+
+def firefox_flow_actions(
+    started: float,
+    stability_started: float,
+    stability_seconds: int,
+) -> list[tuple[float, str, str]]:
+    actions = [(started + 11, "keyboard", "m")]
+    if stability_seconds:
+        actions.extend(
+            (
+                (stability_started, "memory", "t0"),
+                (stability_started + 300, "memory", "t5"),
+                (stability_started + 600, "memory", "t10"),
+                (
+                    stability_started + stability_seconds - 20,
+                    "keyboard",
+                    "m",
+                ),
+            )
+        )
+    return sorted(actions)
+
+
+def chrome_post_flow_actions(
+    keyboard_probe_at: float,
+    liveness_probe_at: float | None,
+    memory_schedule: list[tuple[float, str]],
+    memory_index: int,
+    trace_at: float | None,
+) -> list[tuple[float, str, str]]:
+    actions = [
+        (at, "memory", label) for at, label in memory_schedule[memory_index:]
+    ]
+    if keyboard_probe_at != float("inf"):
+        actions.append((keyboard_probe_at, "keyboard", "m"))
+    if liveness_probe_at is not None:
+        actions.append((liveness_probe_at, "keyboard", "m"))
+    if trace_at is not None:
+        actions.append((trace_at, "trace", "performance"))
+    return sorted(actions)
+
+
+def sleep_until(deadline: float) -> None:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1, remaining))
 
 
 def browser_console(driver: Any, phase: str) -> list[dict[str, Any]]:
@@ -1448,12 +1563,26 @@ def run_flow(
         if stability_seconds
         else []
     )
+    if browser_name == "firefox":
+        return run_firefox_flow(
+            driver,
+            dimensions,
+            output,
+            flow_timeout,
+            stability_seconds,
+            service_pid,
+            started,
+            stability_started,
+            end_at,
+        )
     memory_index = 0
     memories = []
     performance_entries = []
     flow_completed = False
     match_focus_recovery = False
     match_focus_attempted = False
+    native_log_drains_before_flow = 0
+    post_flow_actions = []
     screenshot_saved = False
 
     while time.monotonic() <= end_at + 5:
@@ -1463,6 +1592,7 @@ def run_flow(
             if state.get("status") != "running":
                 raise RuntimeError(f"browser runtime changed to {state.get('status')}")
         current_entries = flow_console(driver, browser_name, "flow", chrome_entries)
+        native_log_drains_before_flow += 1
         runtime_errors = [
             record
             for record in records(current_entries)
@@ -1482,9 +1612,11 @@ def run_flow(
             driver.switch_to.window(current)
 
             def recovered_match() -> bool:
+                nonlocal native_log_drains_before_flow
                 new_routes = route_sequence(
                     flow_console(driver, browser_name, "match_focus", chrome_entries)
                 )
+                native_log_drains_before_flow += 1
                 tail = new_routes[route_count:]
                 return "pause" in tail and normalized_routes(tail)[-1:] == ["match"]
 
@@ -1492,11 +1624,10 @@ def run_flow(
             match_focus_recovery = True
         if normalized_routes(routes)[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW:
             flow_completed = True
-            if not screenshot_saved:
+            if not stability_seconds and not screenshot_saved:
                 driver.save_screenshot(str(output / "result.png"))
                 screenshot_saved = True
-            if not stability_seconds:
-                break
+            break
         if not flow_completed and now > flow_deadline:
             raise RuntimeError(f"flow did not reach Result within {flow_timeout} seconds")
         if now >= keyboard_probe_at:
@@ -1520,6 +1651,35 @@ def run_flow(
             trace_at = None
         time.sleep(1)
 
+    if flow_completed and stability_seconds:
+        post_flow_actions = chrome_post_flow_actions(
+            keyboard_probe_at,
+            liveness_probe_at,
+            memory_schedule,
+            memory_index,
+            trace_at,
+        )
+        for action_at, action, value in post_flow_actions:
+            sleep_until(action_at)
+            if action == "keyboard":
+                send_key(driver, value)
+            elif action == "memory":
+                memories.append(
+                    collect_memory(
+                        driver,
+                        browser_name,
+                        service_pid,
+                        value,
+                    )
+                )
+            else:
+                performance_entries.extend(driver.get_log(value))
+                trace_at = None
+        sleep_until(end_at)
+        if not screenshot_saved:
+            driver.save_screenshot(str(output / "result.png"))
+            screenshot_saved = True
+
     if trace_at:
         performance_entries.extend(driver.get_log("performance"))
     entries, final_state = final_flow_capture(driver, browser_name, chrome_entries)
@@ -1530,8 +1690,120 @@ def run_flow(
         "final_state": final_state,
         "flow_completed": flow_completed,
         "match_focus_recovery": match_focus_recovery,
+        "measurement_collection": {
+            "mode": "chrome_native_log_until_flow_scheduled_terminal_capture",
+            "native_log_drains_before_flow": native_log_drains_before_flow,
+            "periodic_native_log_drains_after_flow": 0,
+            "periodic_page_state_probes": 0,
+            "post_flow_scheduled_actions": [
+                {"action": action, "value": value}
+                for _, action, value in post_flow_actions
+            ],
+            "terminal_native_log_drains": 2,
+        },
         "memory": memories,
         "performance_log": performance_entries,
+    }
+
+
+def run_firefox_flow(
+    driver: Any,
+    dimensions: dict[str, int],
+    output: Path,
+    flow_timeout: int,
+    stability_seconds: int,
+    service_pid: int,
+    started: float,
+    stability_started: float,
+    end_at: float,
+) -> dict[str, Any]:
+    flow_deadline = started + flow_timeout
+    memories = []
+    flow_completed = False
+    in_page_marker_waits = 0
+    screenshot_saved = False
+
+    wait_for_route(driver, "match", min(15, flow_timeout))
+    routes = route_sequence(browser_console(driver, "match_focus"))
+    route_count = len(routes)
+    current = driver.current_window_handle
+    driver.switch_to.new_window("tab")
+    driver.get("data:text/html,<title>Match focus probe</title>")
+    time.sleep(0.5)
+    driver.close()
+    driver.switch_to.window(current)
+
+    def recovered_match() -> bool:
+        new_routes = route_sequence(browser_console(driver, "match_focus"))
+        tail = new_routes[route_count:]
+        return "pause" in tail and normalized_routes(tail)[-1:] == ["match"]
+
+    wait_until(recovered_match, 15, "Match focus recovery")
+
+    def observe_flow_until(deadline: float) -> None:
+        nonlocal flow_completed, in_page_marker_waits, screenshot_saved
+        if flow_completed:
+            return
+        wait_deadline = min(deadline, flow_deadline)
+        remaining = wait_deadline - time.monotonic()
+        if remaining > 0:
+            flow_completed, waits = wait_for_firefox_flow_until(
+                driver,
+                "GC_METRICS|flow_complete|",
+                wait_deadline,
+            )
+            in_page_marker_waits += waits
+        if flow_completed:
+            if not stability_seconds and not screenshot_saved:
+                driver.save_screenshot(str(output / "result.png"))
+                screenshot_saved = True
+        elif time.monotonic() >= flow_deadline:
+            raise RuntimeError(f"flow did not reach Result within {flow_timeout} seconds")
+
+    for action_at, action, value in firefox_flow_actions(
+        started,
+        stability_started,
+        stability_seconds,
+    ):
+        observe_flow_until(action_at)
+        sleep_until(action_at)
+        if action == "keyboard":
+            send_key(driver, value)
+        else:
+            memories.append(
+                collect_memory(
+                    driver,
+                    "firefox",
+                    service_pid,
+                    value,
+                )
+            )
+
+    observe_flow_until(flow_deadline)
+    if stability_seconds:
+        sleep_until(end_at)
+        if not screenshot_saved:
+            driver.save_screenshot(str(output / "result.png"))
+            screenshot_saved = True
+
+    entries, final_state = final_flow_capture(driver, "firefox", [])
+    return {
+        "console": entries,
+        "dimensions": dimensions,
+        "duration_seconds": time.monotonic() - started,
+        "final_state": final_state,
+        "flow_completed": flow_completed,
+        "match_focus_recovery": True,
+        "measurement_collection": {
+            "async_wait_chunk_seconds": FIREFOX_FLOW_WAIT_CHUNK_SECONDS,
+            "in_page_marker_waits": in_page_marker_waits,
+            "mode": "firefox_scheduled_terminal_capture",
+            "periodic_console_drains": 0,
+            "periodic_page_state_probes": 0,
+            "scheduled_memory_probes": len(memories),
+        },
+        "memory": memories,
+        "performance_log": [],
     }
 
 
@@ -1793,6 +2065,7 @@ def run_viewport(
                 "viewport",
             )
         },
+        "measurement_collection": flow.get("measurement_collection"),
         "preflight": {
             key: preflight.get(key)
             for key in (
@@ -1850,6 +2123,44 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
 
 
 def self_test() -> int:
+    class FakeFirefoxWaitDriver:
+        def __init__(self, value: dict[str, Any]) -> None:
+            self.value = value
+            self.timeout = None
+            self.arguments = None
+
+        def execute_script(self, _script: str, *_args: Any) -> Any:
+            raise AssertionError("Firefox flow waits must not poll PAGE_STATE")
+
+        def set_script_timeout(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        def execute_async_script(self, script: str, *arguments: Any) -> dict[str, Any]:
+            assert script == FIREFOX_FLOW_WAIT
+            self.arguments = arguments
+            return self.value
+
+    class FakeFirefoxChunkDriver:
+        def __init__(self) -> None:
+            self.arguments: list[tuple[Any, ...]] = []
+            self.timeouts: list[float] = []
+            self.values = [
+                {"error": None, "matched": False, "status": "running"},
+                {"error": None, "matched": False, "status": "running"},
+                {"error": None, "matched": True, "status": "running"},
+            ]
+
+        def execute_script(self, _script: str, *_args: Any) -> Any:
+            raise AssertionError("Firefox flow waits must not poll PAGE_STATE")
+
+        def set_script_timeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+        def execute_async_script(self, script: str, *arguments: Any) -> dict[str, Any]:
+            assert script == FIREFOX_FLOW_WAIT
+            self.arguments.append(arguments)
+            return self.values.pop(0)
+
     class FakeChromeDriver:
         capabilities = {"browserName": "chrome"}
 
@@ -2103,6 +2414,102 @@ def self_test() -> int:
     assert values_within_percent(100, 104, HEAP_CROSSCHECK_TOLERANCE_PERCENT) is True
     assert values_within_percent(100, 106, HEAP_CROSSCHECK_TOLERANCE_PERCENT) is False
     assert growth_percent(100, 125) == 25
+    firefox_actions = firefox_flow_actions(100, 175, 600)
+    assert firefox_actions == [
+        (111, "keyboard", "m"),
+        (175, "memory", "t0"),
+        (475, "memory", "t5"),
+        (755, "keyboard", "m"),
+        (775, "memory", "t10"),
+    ]
+    assert chrome_post_flow_actions(
+        float("inf"),
+        755,
+        [(175, "t0"), (475, "t5"), (775, "t10")],
+        1,
+        None,
+    ) == [
+        (475, "memory", "t5"),
+        (755, "keyboard", "m"),
+        (775, "memory", "t10"),
+    ]
+    assert chrome_post_flow_actions(
+        111,
+        None,
+        [(175, "t0")],
+        0,
+        170,
+    ) == [
+        (111, "keyboard", "m"),
+        (170, "trace", "performance"),
+        (175, "memory", "t0"),
+    ]
+    marker_driver = FakeFirefoxWaitDriver(
+        {"error": None, "matched": True, "status": "running"}
+    )
+    assert (
+        wait_for_firefox_flow_marker(
+            marker_driver,
+            "GC_METRICS|flow_complete|",
+            2,
+        )
+        is True
+    )
+    assert marker_driver.timeout == 7
+    assert marker_driver.arguments == ("GC_METRICS|flow_complete|", 2000)
+    chunk_driver = FakeFirefoxChunkDriver()
+    chunk_matched, chunk_waits = wait_for_firefox_flow_until(
+        chunk_driver,
+        "GC_METRICS|flow_complete|",
+        time.monotonic() + 300,
+    )
+    assert chunk_matched is True
+    assert chunk_waits == 3
+    assert chunk_driver.timeouts == [95, 95, 95]
+    assert chunk_driver.arguments == [
+        ("GC_METRICS|flow_complete|", 90000),
+        ("GC_METRICS|flow_complete|", 90000),
+        ("GC_METRICS|flow_complete|", 90000),
+    ]
+    timeout_driver = FakeFirefoxWaitDriver(
+        {"error": None, "matched": False, "status": "running"}
+    )
+    assert (
+        wait_for_firefox_flow_marker(
+            timeout_driver,
+            "GC_METRICS|flow_complete|",
+            2,
+        )
+        is False
+    )
+    failed_driver = FakeFirefoxWaitDriver(
+        {"error": None, "matched": False, "status": "failed"}
+    )
+    try:
+        wait_for_firefox_flow_marker(
+            failed_driver,
+            "GC_METRICS|flow_complete|",
+            2,
+        )
+        raise AssertionError("failed Firefox runtime was accepted")
+    except RuntimeError as error:
+        assert "changed to failed" in str(error)
+    error_driver = FakeFirefoxWaitDriver(
+        {
+            "error": "GC_BROWSER|error|message=failed",
+            "matched": False,
+            "status": "running",
+        }
+    )
+    try:
+        wait_for_firefox_flow_marker(
+            error_driver,
+            "GC_METRICS|flow_complete|",
+            2,
+        )
+        raise AssertionError("Firefox runtime error was accepted")
+    except RuntimeError as error:
+        assert "GC_BROWSER|error|message=failed" in str(error)
     synthetic = [
         {
             "level": "log",
