@@ -50,8 +50,17 @@
 ---@field team InputTeam
 ---@field player_id string -- Authored outfield PlayerData id, never a keeper.
 
+---@class InputFixtureRosters
+---@field home string[] -- Exactly five ordered home-fixture PlayerData ids, including its AI keeper.
+---@field away string[] -- Exactly five ordered away-fixture PlayerData ids, including its AI keeper.
+
+---@class InputRosterMembership
+---@field home table<string, boolean>
+---@field away table<string, boolean>
+
 ---@class InputOwnership
 ---@field version integer -- Exactly InputFrame.VERSION.
+---@field rosters InputFixtureRosters -- Explicit fixture-side roster membership.
 ---@field slots InputSlotAssignment[] -- Exactly eight assignments in canonical InputSlot order.
 
 ---@class InputFrameModule
@@ -61,6 +70,7 @@ input_frame.VERSION = 1
 input_frame.HOME_SLOT_COUNT = 4
 input_frame.AWAY_SLOT_COUNT = 4
 input_frame.SLOT_COUNT = input_frame.HOME_SLOT_COUNT + input_frame.AWAY_SLOT_COUNT
+input_frame.FIXTURE_TEAM_SIZE = input_frame.HOME_SLOT_COUNT + 1
 input_frame.MOVE_SCALE = 127
 input_frame.MAX_TICK = 2147483647
 input_frame.MAX_PLAYER_ID_BYTES = 64
@@ -116,7 +126,13 @@ local SAMPLE_FIELDS = {
 
 local OWNERSHIP_FIELDS = {
     version = true,
+    rosters = true,
     slots = true,
+}
+
+local ROSTER_FIELDS = {
+    home = true,
+    away = true,
 }
 
 local ASSIGNMENT_FIELDS = {
@@ -189,6 +205,30 @@ local function is_canonical_array(value)
         end
     end
     for index = 1, input_frame.SLOT_COUNT do
+        if value[index] == nil then
+            return false
+        end
+    end
+    return true
+end
+
+---@param value any
+---@return boolean
+local function is_roster_array(value)
+    if type(value) ~= "table" then
+        return false
+    end
+    local count = 0
+    for index in pairs(value) do
+        if type(index) ~= "number" or not is_integer(index) or index < 1 then
+            return false
+        end
+        count = math.max(count, index)
+    end
+    if count ~= input_frame.FIXTURE_TEAM_SIZE then
+        return false
+    end
+    for index = 1, count do
         if value[index] == nil then
             return false
         end
@@ -438,6 +478,79 @@ function input_frame.copy(frame)
     return input_frame.new(frame.tick, frame.slots)
 end
 
+---@param roster any
+---@param team InputTeam
+---@param players_by_id table<string, PlayerData>
+---@param fixture_players table<string, boolean>
+---@return table<string, boolean>?, string?, InputFrameErrorCode?
+local function collect_roster_membership(roster, team, players_by_id, fixture_players)
+    if not is_roster_array(roster) then
+        return failure("malformed", ("%s fixture roster is invalid"):format(team))
+    end
+    local members = {}
+    local keeper_count = 0
+    for index = 1, #roster do
+        local player_id = roster[index]
+        if type(player_id) ~= "string" or player_id == "" then
+            return failure("malformed", ("%s fixture roster has an invalid player id"):format(team))
+        end
+        if #player_id > input_frame.MAX_PLAYER_ID_BYTES then
+            return failure("malformed", ("%s fixture roster player id is too long"):format(team))
+        end
+        local player = players_by_id[player_id]
+        if player == nil then
+            return failure("malformed", ("%s fixture roster names an unknown player"):format(team))
+        end
+        if fixture_players[player_id] then
+            return failure("malformed", "one roster player cannot belong to both fixture sides")
+        end
+        fixture_players[player_id] = true
+        members[player_id] = true
+        if player.position == "keeper" then
+            keeper_count = keeper_count + 1
+        end
+    end
+    if keeper_count ~= 1 then
+        return failure("malformed", ("%s fixture roster needs exactly one keeper"):format(team))
+    end
+    return members
+end
+
+---@param rosters any
+---@param players_by_id table<string, PlayerData>
+---@return InputRosterMembership?, string?, InputFrameErrorCode?
+local function roster_memberships(rosters, players_by_id)
+    if type(rosters) ~= "table" or not has_only_fields(rosters, ROSTER_FIELDS) then
+        return failure("malformed", "input ownership needs canonical fixture rosters")
+    end
+    local fixture_players = {}
+    local home, home_err, home_code =
+        collect_roster_membership(rosters.home, "home", players_by_id, fixture_players)
+    if home == nil then
+        return nil, home_err, home_code
+    end
+    local away, away_err, away_code =
+        collect_roster_membership(rosters.away, "away", players_by_id, fixture_players)
+    if away == nil then
+        return nil, away_err, away_code
+    end
+    return { home = home, away = away }
+end
+
+---@param rosters InputFixtureRosters
+---@return InputFixtureRosters
+local function copy_rosters(rosters)
+    local home = {}
+    local away = {}
+    for index = 1, #rosters.home do
+        home[index] = rosters.home[index]
+    end
+    for index = 1, #rosters.away do
+        away[index] = rosters.away[index]
+    end
+    return { home = home, away = away }
+end
+
 ---@param ownership any
 ---@param players_by_id table<string, PlayerData>
 ---@return boolean?, string?, InputFrameErrorCode?
@@ -456,6 +569,11 @@ function input_frame.validate_ownership(ownership, players_by_id)
     end
     if type(players_by_id) ~= "table" then
         return failure("malformed", "input ownership requires a roster player index")
+    end
+    local memberships, membership_err, membership_code =
+        roster_memberships(ownership.rosters, players_by_id)
+    if memberships == nil then
+        return nil, membership_err, membership_code
     end
 
     local seen_players = {}
@@ -490,6 +608,12 @@ function input_frame.validate_ownership(ownership, players_by_id)
                 ("input ownership slot %d names an unknown player"):format(index)
             )
         end
+        if not memberships[slot.team][assignment.player_id] then
+            return failure(
+                "malformed",
+                ("input ownership slot %d binds a player from the other fixture side"):format(index)
+            )
+        end
         if player.position == "keeper" then
             return failure("malformed", "keepers cannot own input slots")
         end
@@ -499,14 +623,22 @@ function input_frame.validate_ownership(ownership, players_by_id)
 end
 
 ---@param assignments InputSlotAssignment[]
+---@param rosters InputFixtureRosters
 ---@param players_by_id table<string, PlayerData>
 ---@return InputOwnership?, string?, InputFrameErrorCode?
-function input_frame.new_ownership(assignments, players_by_id)
+function input_frame.new_ownership(assignments, rosters, players_by_id)
     if not is_canonical_array(assignments) then
         return failure(
             "malformed",
             "input ownership assignments must contain exactly eight canonical entries"
         )
+    end
+    if type(players_by_id) ~= "table" then
+        return failure("malformed", "input ownership requires a roster player index")
+    end
+    local memberships, membership_err, membership_code = roster_memberships(rosters, players_by_id)
+    if memberships == nil then
+        return nil, membership_err, membership_code
     end
     local copied_slots = {}
     for index = 1, input_frame.SLOT_COUNT do
@@ -522,6 +654,7 @@ function input_frame.new_ownership(assignments, players_by_id)
     end
     local ownership = {
         version = input_frame.VERSION,
+        rosters = copy_rosters(rosters),
         slots = copied_slots,
     }
     local ok, err, code = input_frame.validate_ownership(ownership, players_by_id)
@@ -539,7 +672,7 @@ function input_frame.copy_ownership(ownership, players_by_id)
     if not ok then
         return nil, err, code
     end
-    return input_frame.new_ownership(ownership.slots, players_by_id)
+    return input_frame.new_ownership(ownership.slots, ownership.rosters, players_by_id)
 end
 
 ---@param value string

@@ -21,13 +21,18 @@ never changes during that fixture:
 | 7 | `away_3` | away | 3 |
 | 8 | `away_4` | away | 4 |
 
-`InputOwnership` records the roster `player_id` assigned to every row before
-tick zero. `input_frame.validate_ownership` requires all eight rows in that
-order, rejects duplicate or unknown players, and rejects `position ==
-"keeper"`. A session later assigns an input producer to each slot, but neither
-that producer identity nor a mutable selected-player identity belongs in this
-contract. Ownership does not move when possession changes. Keepers remain
-AI-only and have no input slot.
+`InputOwnership` records the selected fixture rosters as separate ordered
+`rosters.home` and `rosters.away` lists before tick zero. Those lists contain
+exactly the five-player fixture side, including exactly one AI keeper; the
+eight slot assignments then name one outfielder from the matching side.
+`input_frame.validate_ownership` requires all eight rows in canonical order,
+validates the selected roster IDs against the content player index, rejects a
+player selected for both sides, and rejects an assignment from the other side's
+roster. It also rejects duplicate input owners and `position == "keeper"`
+assignments. A session later assigns an input producer to each slot, but
+neither that producer identity nor a mutable selected-player identity belongs
+in this contract. Ownership does not move when possession changes. Keepers
+remain AI-only and have no input slot.
 
 An absent human source must still contribute its row: use the deterministic
 neutral sample or replace the row with deterministic bot input in a later
@@ -128,7 +133,7 @@ the tape or snapshot, never in an individual frame or transport envelope:
 - content identity for the authored player/team/formation/species data;
 - gameplay configuration identity, including tuning and fixture rules;
 - initial deterministic RNG seed;
-- the canonical `InputOwnership` roster mapping; and
+- the canonical `InputOwnership` selected home/away rosters and slot mapping; and
 - the fixed tick rate once issue #35 establishes it.
 
 OMP-2 replay and rollback work must compare this identity before claiming a

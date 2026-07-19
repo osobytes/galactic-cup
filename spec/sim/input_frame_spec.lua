@@ -18,10 +18,10 @@ local function assignments()
         "mika_olu",
         "rok_tann",
         "sela_dwin",
-        "brakka",
-        "veil_nyx",
-        "tib_quell",
         "drell",
+        "morv",
+        "krag",
+        "tox_vren",
     }
     local result = {}
     for index = 1, input_frame.SLOT_COUNT do
@@ -33,6 +33,14 @@ local function assignments()
         }
     end
     return result
+end
+
+---@return InputFixtureRosters
+local function fixture_rosters()
+    return {
+        home = { "ozzo", "zyro_vex", "mika_olu", "rok_tann", "sela_dwin" },
+        away = { "gax_oru", "drell", "morv", "krag", "tox_vren" },
+    }
 end
 
 ---@return InputSample[]
@@ -57,6 +65,7 @@ t.describe("OMP-1 input frame", function()
             { "away_4", "away", 4 },
         }
         t.eq(input_frame.SLOT_COUNT, 8)
+        t.eq(input_frame.FIXTURE_TEAM_SIZE, 5)
         for index = 1, input_frame.SLOT_COUNT do
             local slot = assert(input_frame.slot(index))
             t.eq(slot.index, index)
@@ -73,28 +82,55 @@ t.describe("OMP-1 input frame", function()
 
     t.it("maps canonical slots to unique non-keeper roster players", function()
         local by_id = players_by_id()
-        local ownership = assert(input_frame.new_ownership(assignments(), by_id))
+        local rosters = fixture_rosters()
+        local ownership = assert(input_frame.new_ownership(assignments(), rosters, by_id))
         t.eq(ownership.version, input_frame.VERSION)
+        t.eq(ownership.rosters.home[1], "ozzo")
+        t.eq(ownership.rosters.away[1], "gax_oru")
         t.eq(#ownership.slots, input_frame.SLOT_COUNT)
         t.eq(ownership.slots[1].slot, "home_1")
         t.eq(ownership.slots[5].team, "away")
-        t.eq(ownership.slots[8].player_id, "drell")
+        t.eq(ownership.slots[8].player_id, "tox_vren")
 
         local duplicate = assignments()
-        duplicate[8].player_id = duplicate[1].player_id
-        local value, _, code = input_frame.new_ownership(duplicate, by_id)
+        duplicate[4].player_id = duplicate[1].player_id
+        local value, _, code = input_frame.new_ownership(duplicate, rosters, by_id)
         t.eq(value, nil)
         t.eq(code, "malformed")
 
         local keeper = assignments()
         keeper[1].player_id = "ozzo"
-        value, _, code = input_frame.new_ownership(keeper, by_id)
+        value, _, code = input_frame.new_ownership(keeper, rosters, by_id)
         t.eq(value, nil)
         t.eq(code, "malformed")
 
         local wrong_team = assignments()
         wrong_team[5].team = "home"
-        value, _, code = input_frame.new_ownership(wrong_team, by_id)
+        value, _, code = input_frame.new_ownership(wrong_team, rosters, by_id)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+
+        local cross_side = assignments()
+        cross_side[5].player_id = "zyro_vex"
+        value, _, code = input_frame.new_ownership(cross_side, rosters, by_id)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+
+        local unknown_assignment = assignments()
+        unknown_assignment[1].player_id = "missing_player"
+        value, _, code = input_frame.new_ownership(unknown_assignment, rosters, by_id)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+
+        local unknown_roster = fixture_rosters()
+        unknown_roster.away[5] = "missing_player"
+        value, _, code = input_frame.new_ownership(assignments(), unknown_roster, by_id)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+
+        local no_keeper = fixture_rosters()
+        no_keeper.home[1] = "brakka"
+        value, _, code = input_frame.new_ownership(assignments(), no_keeper, by_id)
         t.eq(value, nil)
         t.eq(code, "malformed")
     end)
@@ -150,14 +186,14 @@ t.describe("OMP-1 input frame", function()
         }))
         t.is_true(assert(input_frame.is_held(sample, "shoot")))
         t.is_true(assert(input_frame.is_held(sample, "sprint")))
-        t.is_true(not assert(input_frame.is_held(sample, "pass")))
+        t.eq(assert(input_frame.is_held(sample, "pass")), false)
         t.is_true(assert(input_frame.has_edge(sample, "shoot")))
         t.is_true(assert(input_frame.has_edge(sample, "dash")))
-        t.is_true(not assert(input_frame.has_edge(sample, "pass")))
+        t.eq(assert(input_frame.has_edge(sample, "pass")), false)
 
         local next_sample = assert(input_frame.new_sample({ held = sample.held, edges = 0 }))
         t.is_true(assert(input_frame.is_held(next_sample, "shoot")))
-        t.is_true(not assert(input_frame.has_edge(next_sample, "shoot")))
+        t.eq(assert(input_frame.has_edge(next_sample, "shoot")), false)
     end)
 
     t.it("encodes and decodes one byte-for-byte canonical frame", function()
