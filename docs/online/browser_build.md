@@ -59,6 +59,66 @@ CI can run this command without opening a browser. A normal browser should be
 used for the title-screen and complete-flow checks; those compatibility and
 performance checks remain part of issue #3.
 
+## Evidence campaign
+
+The evidence runner needs Python 3.11 or newer and the exact Selenium version
+in `scripts/browser_matrix-requirements.txt`. Install it in a disposable
+environment before running `scripts/browser_matrix.py`; browser and driver
+discovery is delegated to pinned Selenium 4.43.0.
+
+On an attended Windows 11 host, install current stable Chrome and Firefox, then
+run from PowerShell:
+
+```powershell
+.\scripts\windows_browser_campaign.ps1
+```
+
+The entrypoint creates an evidence-only virtual environment, builds and serves
+the artifact, runs the 600-second Chrome matrix followed by Firefox, stops the
+server in cleanup, and archives each packet. Raw packets, ZIPs, server logs,
+operator observations, and `campaign-summary.json` are under
+`.cache\omp0-windows-campaign\<timestamp>\` by default and remain ignored.
+Each packet's `environment.json` includes a bounded
+`Win32_VideoController` inventory, so Intel and AMD adapters are retained
+alongside any `nvidia-smi` result.
+
+Keep the desktop unlocked and foregrounded with hardware acceleration enabled,
+Windows scaling at 100%, and enough physical resolution for an exact
+1920×1080 browser viewport (2560×1440 or larger is recommended). Enable audible
+playback and connect one physical controller exposed by the browser with
+`mapping="standard"`; listen during the opening flow and press physical A then
+B in each browser. Do not substitute a virtual HID or infer a pass from a
+connected device without both input events. No Actions workflow is provided:
+the fixed attended desktop, GPU/audio, resolution, and physical-input
+requirements are not available on an eligible repository runner.
+
+### Firefox heap companion
+
+Firefox process-tree RSS remains useful supplemental process memory, but it is
+not JavaScript heap. `performance.memory` is a non-standard Chromium-only API,
+so capture Firefox heap manually against the same clean artifact revision:
+
+1. Let the game tab complete the compatibility flow and reach its stable
+   Result state. Open that tab's Firefox DevTools **Memory** panel.
+2. At t0, t5, and t10, open `about:memory`, click **Minimize memory usage** to
+   force GC/CC, optionally select **anonymize**, and save a `.json.gz` report.
+   Return to the game tab's Memory panel immediately, take a tab-scoped heap
+   snapshot, and save the `.fxsnapshot` with the matching checkpoint label.
+3. Retain all six files with the automated Firefox packet, exact source/package
+   hashes, browser version, and checkpoint times. Compare the tab snapshots;
+   report the `about:memory` files separately as Firefox-wide companion data.
+
+Mozilla documents
+[`about:memory` GC/CC and reports](https://firefox-source-docs.mozilla.org/performance/memory/about_colon_memory.html),
+the [Firefox Memory tool](https://firefox-source-docs.mozilla.org/devtools-user/memory/index.html),
+and [snapshot save/diff operations](https://firefox-source-docs.mozilla.org/performance/memory/basic_operations.html).
+MDN documents
+[`performance.memory` as non-standard and Chromium-only](https://developer.mozilla.org/en-US/docs/Web/API/Performance/memory).
+This remains a manual handoff: geckodriver's
+[`--allow-system-access`](https://firefox-source-docs.mozilla.org/testing/geckodriver/Flags.html)
+grants browser-UI-process privileges and full system access, so it is not
+enabled without a separate validated automation design.
+
 ## Reproducibility and provenance
 
 The build packages only the authored runtime inputs needed by LÖVE:

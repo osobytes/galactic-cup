@@ -1,25 +1,18 @@
 # OMP-0 platform decision
 
-Status: **inconclusive**. This record applies the fixed rules in
-[`omp0_acceptance.md`](omp0_acceptance.md) to the evidence available on
-2026-07-18. It does not move a threshold or turn unavailable evidence into a
-pass.
+Status: **inconclusive**. This record applies the unchanged rules in
+[`omp0_acceptance.md`](omp0_acceptance.md) to evidence available on 2026-07-18.
+Unavailable evidence is not a pass.
 
 ## Decision
 
-No primary shipping path is authorized yet.
-
-- `browser-first` with `native-download` fallback requires every browser hard
-  gate to pass in every required environment, issue #5's transport profiles to
-  pass, and the fixed soft-target score to qualify.
-- `native-download` with browser investigation as fallback requires a complete
-  evidence set, a passing native product-flow baseline, and either a browser
-  hard-gate failure or a sub-80% browser soft-target score.
-
-The Linux matrix now contains reproducible browser hard-gate failures, but
-Windows 11, physical-gamepad, and some heap evidence are still unavailable.
-Rule 1 therefore keeps the result inconclusive; Rule 4 does not allow the
-native path to be selected from an incomplete comparison.
+No primary shipping path is authorized yet. Linux browser flow, pacing,
+keyboard/input, persistence, letterboxing, Chrome heap, runtime stability, and
+the issue #5 transport proof now pass. The required Windows 11 rows, physical
+gamepad A/B, positive Firefox audio recheck, Firefox JavaScript heap, and issue
+#3's complete native comparison remain unavailable. Rule 1 therefore keeps the
+result inconclusive, and Rule 4 cannot select native from an incomplete
+comparison.
 
 ## Evidence inventory
 
@@ -27,71 +20,59 @@ native path to be selected from an incomplete comparison.
 | --- | --- | --- |
 | Criteria | [Issue #1](https://github.com/osobytes/galactic-cup/issues/1), [`omp0_acceptance.md`](omp0_acceptance.md) | Fixed before implementation |
 | Browser artifact | [PR #8](https://github.com/osobytes/galactic-cup/pull/8), [`browser_build.md`](browser_build.md) | Reproducible and pinned |
-| Browser matrix | [Issue #16](https://github.com/osobytes/galactic-cup/issues/16), [`browser_compatibility.md`](browser_compatibility.md), [raw Linux matrix](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-evidence-5f8e76c), [reviewed Chrome probe](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-16-review-evidence-806f7a3) | Linux viewport/flow complete; required controls/heap missing; Windows missing |
+| Browser matrix | [Issue #16](https://github.com/osobytes/galactic-cup/issues/16), [`browser_compatibility.md`](browser_compatibility.md) | Linux automated gates pass; external controls/heap and Windows missing |
+| Linux remediations | [#20 persistence](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-20-evidence-d2b175b), [#21 pacing/input](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-21-evidence-d7fc8cf), [#22 Chrome heap](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-22-evidence-dab866b), [#24 letterboxing](https://github.com/osobytes/galactic-cup/releases/tag/omp0-issue-24-evidence-5813c53) | Pass |
 | Transport seam | [PR #10](https://github.com/osobytes/galactic-cup/pull/10), [`transport_bridge.md`](transport_bridge.md) | Bounded asynchronous contract available |
 | WebRTC proof | [Issue #5](https://github.com/osobytes/galactic-cup/issues/5), [PR #14](https://github.com/osobytes/galactic-cup/pull/14), [`webrtc_input_proof.md`](webrtc_input_proof.md) | Both 10-minute network profiles pass |
-
-The full matrix is tied to source
-`5f8e76cf46ce85f488be7a3ee8e88105cd43ab19` and game package
-`c939d74873cb49fe8d587c66af9d7363c15580a3523846ee2ea210921c5aaef5`.
-The reviewed Chrome probe uses source `806f7a3` and package `3542846f…f2f8daa`.
-Both use the pinned love.js revision documented in `browser_build.md`.
+| Native comparison | [Issue #3](https://github.com/osobytes/galactic-cup/issues/3) | Complete product-flow comparison missing |
 
 ## Criterion evaluation
 
 | Criterion | Current evidence | Result |
 | --- | --- | --- |
-| Artifact boot | Linux Chrome/Firefox boot to a Title screenshot in 529–969 ms at all required viewports | Pass on Linux; Windows missing |
-| Product flow | Every Linux row completes Title → Result and passes `web_report.py --require-flow` | Pass on Linux; Windows missing |
-| Update/draw/frame/input | Chrome fails pacing at all viewports, including a GC-isolated 960×540 probe; Firefox fails at 960×540 and passes at 1280×720/1920×1080; input gates pass | Hard-gate failures |
-| Browser console | Page runtime is clean; the raw Firefox packet classified a fatal post-quit `AsyncShutdown` error that the reviewed collector now keeps separate and unclassifiable | Runtime pass on Linux; teardown limitation recorded |
-| Lifecycle and controls | Focus recovery during Match, resize events, fullscreen, keyboard, and clean Result pass; reviewed Chrome audio passes; Chrome's non-16:9 probe stretches instead of letterboxing | Partial with a letterboxing failure; Firefox audio and physical gamepad missing |
-| Runtime stability | Both 615-second Linux runs remain live, recover focus, and accept late input/settings changes | Pass on Linux |
-| Memory | Chrome RSS +12.91%, post-GC heap +185.76%; Firefox RSS +1.17%, heap unavailable | Chrome fail; Firefox inconclusive |
-| Persistence | Mute resets on reload in every Linux row | Fail |
-| Tick/input/queue/latency transport | Issue #5 completed both fixed 10-minute browser profiles with bounded queues and full input recovery | Pass |
+| Artifact boot and product flow | Linux Chrome/Firefox boot and complete Title → Result at all required viewports | Pass on Linux; Windows missing |
+| Update/draw/frame/input | All six final Linux rows pass unchanged thresholds; long rows retain stability/liveness | Pass on Linux; Windows missing |
+| Console and lifecycle | Clean page runtime, terminal health, focus recovery, fullscreen, keyboard, and clean Result | Pass on Linux |
+| Persistence and letterboxing | Reload/populate, recoverable storage failure, tall/wide geometry, and pointer mapping pass in Chrome/Firefox | Pass on Linux |
+| Audio and gamepad | Reviewed Chrome positive audio passes; Firefox needs corrected-probe recheck; physical A/B unavailable | Incomplete |
+| Memory | Authoritative Chrome post-GC heap -0.27%; Firefox RSS is supplemental and Firefox JS heap is unavailable | Chrome pass; Firefox incomplete |
+| Transport | Both fixed issue #5 profiles pass bounded queue/input/latency requirements | Pass |
+| Native comparison | Existing machine baseline is not the complete issue #3 product-flow comparison | Incomplete |
 
 ## Required matrix
 
 | Environment | 960×540 | 1280×720 | 1920×1080 | Decision status |
 | --- | --- | --- | --- | --- |
-| Linux Chrome 150 | Flow pass; performance fail | Flow pass; performance fail | Flow pass; performance fail | Gamepad missing; letterboxing fails |
-| Linux Firefox 152 | Flow pass; performance fail | Flow/performance pass | Flow/performance pass | Gamepad, JS heap, audio, and letterbox proof missing |
-| Windows 11 Chrome | Unavailable | Unavailable | Unavailable | Missing required environment |
-| Windows 11 Firefox | Unavailable | Unavailable | Unavailable | Missing required environment |
+| Linux Chrome 150 | Automated flow/performance/memory pass | Automated flow/performance pass | Automated flow/performance pass | Physical gamepad missing |
+| Linux Firefox 152 | Automated flow/performance/stability pass | Automated flow/performance pass | Automated flow/performance pass | Gamepad, positive audio, JS heap missing |
+| Windows 11 Chrome | Unavailable | Unavailable | Unavailable | Required environment missing |
+| Windows 11 Firefox | Unavailable | Unavailable | Unavailable | Required environment and heap missing |
 
 The optional macOS confidence row remains unmeasured and does not replace a
 required environment.
 
 ## Blocking work
 
-- [#20](https://github.com/osobytes/galactic-cup/issues/20) restores browser
-  settings persistence.
-- [#21](https://github.com/osobytes/galactic-cup/issues/21) owns the measured
-  frame-pacing failures.
-- [#22](https://github.com/osobytes/galactic-cup/issues/22) owns Chrome
-  post-GC heap growth.
-- [#24](https://github.com/osobytes/galactic-cup/issues/24) owns non-16:9
-  browser canvas distortion.
-- [#16](https://github.com/osobytes/galactic-cup/issues/16) still owns Windows
-  Chrome/Firefox, physical-gamepad proof, and Firefox heap evidence.
-- [#3](https://github.com/osobytes/galactic-cup/issues/3) must compare the
-  completed browser evidence with the complete native product-flow baseline.
-
-Issue [#6](https://github.com/osobytes/galactic-cup/issues/6) remains open
-until those inputs let the repository owner accept one primary path and one
-fallback under the fixed rules.
+- [#16](https://github.com/osobytes/galactic-cup/issues/16): attended Windows
+  Chrome/Firefox packets, physical standard-gamepad A/B, positive Firefox audio
+  recheck, and Firefox heap companion.
+- [#3](https://github.com/osobytes/galactic-cup/issues/3): completed native
+  product-flow comparison against the browser evidence.
+- [#6](https://github.com/osobytes/galactic-cup/issues/6): owner acceptance of
+  one primary path and one fallback after those inputs are complete.
 
 ## Risks and later assumptions
 
 - The pinned browser runtime still requires a local-spike CSP containing
   `unsafe-eval`; that is not a production security decision.
-- OMP-1 may use the deterministic simulation and transport-neutral input seam,
+- Firefox heap capture remains an attended manual procedure; process RSS is not
+  substituted for JS heap, and privileged browser-UI automation is not enabled.
+- OMP-1 may use deterministic simulation and the transport-neutral input seam,
   but must not assume browser-first delivery.
-- OMP-2 may reuse the issue #5 input envelope and diagnostics; rollback,
-  signaling, topology, and production STUN/TURN remain unproven.
-- OMP-3 must keep both the reproducible browser artifact and native client
-  runnable until this record changes from inconclusive.
+- OMP-2 may reuse the issue #5 envelope and diagnostics; rollback, signaling,
+  topology, and production STUN/TURN remain unproven.
+- OMP-3 must keep browser and native clients runnable until this record changes
+  from inconclusive.
 
-Reconsider this decision only when the missing required evidence or focused
-defects change—not by reinterpreting the thresholds.
+Reconsider this decision only when missing evidence changes—not by
+reinterpreting the fixed thresholds.

@@ -54,6 +54,12 @@ HARD_RUNTIME_PATTERN = re.compile(
 )
 HEAP_CROSSCHECK_TOLERANCE_PERCENT = 5
 FIREFOX_FLOW_WAIT_CHUNK_SECONDS = 90
+AUDIO_PROBE_SECONDS = 5
+AUDIO_PROBE_INTERVAL_SECONDS = 0.5
+AUDIO_PROBE_MAX_OBSERVATIONS = int(AUDIO_PROBE_SECONDS / AUDIO_PROBE_INTERVAL_SECONDS) + 1
+AUDIO_PROBE_WAIT_SLACK_SECONDS = 0.75
+WINDOWS_GPU_MAX_ADAPTERS = 8
+WINDOWS_GPU_MAX_FIELD_LENGTH = 512
 
 
 def utc_now() -> str:
@@ -252,6 +258,55 @@ def command_output(command: list[str]) -> str | None:
     return output if result.returncode == 0 and output else None
 
 
+def parse_windows_gpu_output(output: str | None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "adapters": [],
+        "available": False,
+        "truncated": False,
+    }
+    if not output:
+        return result
+    try:
+        rows = json.loads(output)
+    except json.JSONDecodeError:
+        return result
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        return result
+    adapters = []
+    fields = {
+        "AdapterCompatibility": "adapter_compatibility",
+        "DriverVersion": "driver_version",
+        "Name": "name",
+        "PNPDeviceID": "pnp_device_id",
+        "VideoProcessor": "video_processor",
+    }
+    for row in rows[:WINDOWS_GPU_MAX_ADAPTERS]:
+        if not isinstance(row, dict):
+            continue
+        adapter = {}
+        for source, target in fields.items():
+            value = row.get(source)
+            if value is not None:
+                adapter[target] = str(value)[:WINDOWS_GPU_MAX_FIELD_LENGTH]
+        if adapter:
+            adapters.append(adapter)
+    result["adapters"] = adapters
+    result["available"] = bool(adapters)
+    result["truncated"] = len(rows) > WINDOWS_GPU_MAX_ADAPTERS
+    return result
+
+
+def windows_gpu_metadata() -> dict[str, Any]:
+    script = (
+        "Get-CimInstance Win32_VideoController | "
+        "Select-Object Name,DriverVersion,AdapterCompatibility,PNPDeviceID,VideoProcessor | "
+        "ConvertTo-Json -Compress"
+    )
+    return parse_windows_gpu_output(command_output(["powershell", "-NoProfile", "-Command", script]))
+
+
 def os_metadata() -> dict[str, Any]:
     value: dict[str, Any] = {
         "platform": platform.platform(),
@@ -273,6 +328,11 @@ def os_metadata() -> dict[str, Any]:
             "--query-gpu=name,driver_version",
             "--format=csv,noheader",
         ]
+    )
+    value["windows_video_controllers"] = (
+        windows_gpu_metadata()
+        if os.name == "nt"
+        else {"adapters": [], "available": False, "truncated": False}
     )
     return value
 
@@ -1178,6 +1238,72 @@ def terminal_runtime_health(
     }
 
 
+def audio_probe_check(
+    entries: list[dict[str, Any]],
+    final_state: dict[str, Any],
+) -> dict[str, Any]:
+    parsed = records(entries)
+    match_times = []
+    observations = []
+    autoplay_warnings = 0
+    for entry in entries:
+        if "AudioContext was not allowed to start" in str(entry.get("message", "")):
+            autoplay_warnings += 1
+    for record in parsed:
+        try:
+            at_ms = float(record.get("at_ms", ""))
+        except (TypeError, ValueError):
+            continue
+        if record.get("kind") == "route" and record.get("route") == "match":
+            match_times.append(at_ms)
+        elif record.get("kind") == "audio":
+            observations.append((at_ms, record))
+    match_at_ms = match_times[0] if match_times else None
+    offsets_ms = (
+        [at_ms - match_at_ms for at_ms, _ in observations]
+        if match_at_ms is not None
+        else []
+    )
+    bounded = (
+        len(observations) <= AUDIO_PROBE_MAX_OBSERVATIONS
+        and all(
+            -100 <= offset <= (AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS) * 1000
+            for offset in offsets_ms
+        )
+    )
+    complete = (
+        bool(offsets_ms)
+        and offsets_ms[0] <= (AUDIO_PROBE_INTERVAL_SECONDS + 0.25) * 1000
+        and offsets_ms[-1] >= (AUDIO_PROBE_SECONDS - AUDIO_PROBE_INTERVAL_SECONDS) * 1000
+    )
+    positive = any(
+        int(record.get("active_sources", "0")) > 0
+        and float(record.get("volume", "0")) > 0
+        for _, record in observations
+    )
+    user_activated = bool(final_state.get("user_activation", {}).get("has_been_active"))
+    return {
+        "autoplay_warnings": autoplay_warnings,
+        "bounded": bounded,
+        "complete": complete,
+        "duration_seconds": AUDIO_PROBE_SECONDS,
+        "match_at_ms": match_at_ms,
+        "max_observations": AUDIO_PROBE_MAX_OBSERVATIONS,
+        "observation_offsets_ms": offsets_ms,
+        "observations": [record for _, record in observations],
+        "pass": (
+            user_activated
+            and match_at_ms is not None
+            and bounded
+            and complete
+            and positive
+            and autoplay_warnings == 0
+        ),
+        "positive_source_observed": positive,
+        "user_activation": user_activated,
+    }
+
+
 def evidence_checks(
     browser_name: str,
     entries: list[dict[str, Any]],
@@ -1197,11 +1323,6 @@ def evidence_checks(
     ]
     renderer = str(final_state.get("renderer") or "")
     software = any(name in renderer.lower() for name in SOFTWARE_RENDERERS)
-    audio_warnings = [
-        entry
-        for entry in entries
-        if "AudioContext was not allowed to start" in str(entry.get("message", ""))
-    ]
     first_memory = memories[0] if memories else {}
     last_memory = memories[-1] if memories else {}
     first_rss = first_memory.get("process_tree", {}).get("rss_kib")
@@ -1273,12 +1394,6 @@ def evidence_checks(
     teardown_console = [
         entry for entry in entries if entry.get("phase") == "webdriver_teardown"
     ]
-    audio_records = [record for record in parsed if record.get("kind") == "audio"]
-    audio_playing = any(
-        int(record.get("active_sources", "0")) > 0
-        and float(record.get("volume", "0")) > 0
-        for record in audio_records
-    )
     return {
         "acceptance_isolation": {
             **acceptance_isolation,
@@ -1293,15 +1408,7 @@ def evidence_checks(
                 )
             ),
         },
-        "audio_after_gesture": {
-            "observations": audio_records,
-            "autoplay_warnings": len(audio_warnings),
-            "pass": (
-                bool(final_state.get("user_activation", {}).get("has_been_active"))
-                and audio_playing
-                and not audio_warnings
-            ),
-        },
+        "audio_after_gesture": audio_probe_check(entries, final_state),
         "artifact_boot": {
             "navigation_to_title_ms": preflight.get("navigation_to_title_ms"),
             "pass": preflight.get("title_state", {}).get("status") == "running",
@@ -1612,6 +1719,7 @@ def run_flow(
     flow_completed = False
     match_focus_recovery = False
     match_focus_attempted = False
+    audio_probe_wait_until = None
     native_log_drains_before_flow = 0
     post_flow_actions = []
     screenshot_saved = False
@@ -1634,6 +1742,9 @@ def run_flow(
         routes = route_sequence(current_entries)
         if not match_focus_attempted and normalized_routes(routes)[-1:] == ["match"]:
             match_focus_attempted = True
+            audio_probe_wait_until = (
+                time.monotonic() + AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS
+            )
             route_count = len(routes)
             current = driver.current_window_handle
             driver.switch_to.new_window("tab")
@@ -1655,10 +1766,18 @@ def run_flow(
             match_focus_recovery = True
         if normalized_routes(routes)[-len(EXPECTED_FLOW) :] == EXPECTED_FLOW:
             flow_completed = True
-            if not stability_seconds and not screenshot_saved:
-                driver.save_screenshot(str(output / "result.png"))
-                screenshot_saved = True
-            break
+            if audio_probe_wait_until is None:
+                audio_probe_wait_until = (
+                    now + AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS
+                )
+            if stability_seconds or (
+                audio_probe_wait_until is not None
+                and now >= audio_probe_wait_until
+            ):
+                if not stability_seconds and not screenshot_saved:
+                    driver.save_screenshot(str(output / "result.png"))
+                    screenshot_saved = True
+                break
         if not flow_completed and now > flow_deadline:
             raise RuntimeError(f"flow did not reach Result within {flow_timeout} seconds")
         if now >= keyboard_probe_at:
@@ -1724,6 +1843,9 @@ def run_flow(
         "measurement_collection": {
             "mode": "chrome_native_log_until_flow_scheduled_terminal_capture",
             "native_log_drains_before_flow": native_log_drains_before_flow,
+            "short_run_audio_probe_waited": (
+                not stability_seconds and audio_probe_wait_until is not None
+            ),
             "periodic_native_log_drains_after_flow": 0,
             "periodic_page_state_probes": 0,
             "post_flow_scheduled_actions": [
@@ -1755,6 +1877,9 @@ def run_firefox_flow(
     screenshot_saved = False
 
     wait_for_route(driver, "match", min(15, flow_timeout))
+    audio_probe_wait_until = (
+        time.monotonic() + AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS
+    )
     routes = route_sequence(browser_console(driver, "match_focus"))
     route_count = len(routes)
     current = driver.current_window_handle
@@ -1811,6 +1936,8 @@ def run_firefox_flow(
             )
 
     observe_flow_until(flow_deadline)
+    if not stability_seconds:
+        sleep_until(audio_probe_wait_until)
     if stability_seconds:
         sleep_until(end_at)
         if not screenshot_saved:
@@ -1832,6 +1959,7 @@ def run_firefox_flow(
             "periodic_console_drains": 0,
             "periodic_page_state_probes": 0,
             "scheduled_memory_probes": len(memories),
+            "short_run_audio_probe_waited": not stability_seconds,
         },
         "memory": memories,
         "performance_log": [],
@@ -2311,6 +2439,44 @@ def self_test() -> int:
             ]
 
     assert parse_viewport("960x540") == (960, 540)
+    windows_gpus = parse_windows_gpu_output(
+        json.dumps(
+            [
+                {
+                    "AdapterCompatibility": "Intel Corporation",
+                    "DriverVersion": "32.0.101.6559",
+                    "Name": "Intel(R) Arc(TM) Graphics",
+                    "PNPDeviceID": "PCI\\VEN_8086",
+                    "VideoProcessor": "Intel Arc",
+                },
+                {
+                    "AdapterCompatibility": "Advanced Micro Devices, Inc.",
+                    "DriverVersion": "32.0.21025.1006",
+                    "Name": "AMD Radeon RX 7800 XT",
+                    "PNPDeviceID": "PCI\\VEN_1002",
+                    "VideoProcessor": "AMD Radeon Graphics Processor",
+                },
+            ]
+        )
+    )
+    assert windows_gpus["available"] is True
+    assert windows_gpus["truncated"] is False
+    assert [adapter["name"] for adapter in windows_gpus["adapters"]] == [
+        "Intel(R) Arc(TM) Graphics",
+        "AMD Radeon RX 7800 XT",
+    ]
+    bounded_gpus = parse_windows_gpu_output(
+        json.dumps(
+            [{"Name": f"adapter-{index}"} for index in range(WINDOWS_GPU_MAX_ADAPTERS + 1)]
+        )
+    )
+    assert len(bounded_gpus["adapters"]) == WINDOWS_GPU_MAX_ADAPTERS
+    assert bounded_gpus["truncated"] is True
+    assert parse_windows_gpu_output("not-json") == {
+        "adapters": [],
+        "available": False,
+        "truncated": False,
+    }
     assert expected_canvas_rect(800, 540) == {
         "height": 450,
         "width": 800,
@@ -2396,6 +2562,72 @@ def self_test() -> int:
         "event_kind": "key_return",
         "sequence": "1",
     }
+    healthy_audio_entries = [
+        {
+            "level": "log",
+            "message": "GC_METRICS|route|at_ms=1000|route=match",
+        }
+    ]
+    for observation in range(AUDIO_PROBE_MAX_OBSERVATIONS):
+        healthy_audio_entries.append(
+            {
+                "level": "log",
+                "message": (
+                    "GC_METRICS|audio"
+                    f"|active_sources={1 if observation == 4 else 0}"
+                    f"|at_ms={1000 + observation * 500}|volume=1"
+                ),
+            }
+        )
+    healthy_audio = audio_probe_check(
+        healthy_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert healthy_audio["pass"] is True
+    assert healthy_audio["bounded"] is True
+    assert healthy_audio["complete"] is True
+    assert healthy_audio["positive_source_observed"] is True
+    assert healthy_audio["observation_offsets_ms"] == [
+        observation * 500 for observation in range(AUDIO_PROBE_MAX_OBSERVATIONS)
+    ]
+    focus_reentry_audio = audio_probe_check(
+        [
+            *healthy_audio_entries,
+            {
+                "level": "log",
+                "message": "GC_METRICS|route|at_ms=2500|route=match",
+            },
+        ],
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert focus_reentry_audio["pass"] is True
+    assert focus_reentry_audio["match_at_ms"] == 1000
+    missing_audio = audio_probe_check(
+        [
+            {
+                "level": "log",
+                "message": "GC_METRICS|route|at_ms=1000|route=match",
+            }
+        ],
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert missing_audio["pass"] is False
+    assert missing_audio["complete"] is False
+    assert missing_audio["positive_source_observed"] is False
+    silent_audio_entries = [
+        {
+            **entry,
+            "message": str(entry["message"]).replace("active_sources=1", "active_sources=0"),
+        }
+        for entry in healthy_audio_entries
+    ]
+    silent_audio = audio_probe_check(
+        silent_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert silent_audio["pass"] is False
+    assert silent_audio["complete"] is True
+    assert silent_audio["positive_source_observed"] is False
     fake_driver = FakeChromeDriver()
     chrome_entries: list[dict[str, Any]] = []
     assert route_sequence(flow_console(fake_driver, "chrome", "flow", chrome_entries)) == [

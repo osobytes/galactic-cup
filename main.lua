@@ -208,6 +208,12 @@ local metrics
 local last_route
 ---@type CompatibilityFlow?
 local compatibility_flow
+local compatibility_audio_probe_next_at
+local compatibility_audio_probe_observations = 0
+local compatibility_audio_probe_started = false
+
+local COMPATIBILITY_AUDIO_PROBE_INTERVAL_SECONDS = 0.5
+local COMPATIBILITY_AUDIO_PROBE_MAX_OBSERVATIONS = 11
 
 ---@return number
 local function clock()
@@ -232,6 +238,31 @@ local function record_audio(now)
     if love.audio and love.audio.getActiveSourceCount and love.audio.getVolume then
         metrics:audio(now, love.audio.getActiveSourceCount(), love.audio.getVolume())
     end
+end
+
+---@param now number
+local function start_compatibility_audio_probe(now)
+    if compatibility_audio_probe_started then
+        return
+    end
+    compatibility_audio_probe_started = true
+    compatibility_audio_probe_next_at = now
+    compatibility_audio_probe_observations = 0
+end
+
+---@param now number
+local function update_compatibility_audio_probe(now)
+    if not compatibility_audio_probe_next_at or now < compatibility_audio_probe_next_at then
+        return
+    end
+    record_audio(now)
+    compatibility_audio_probe_observations = compatibility_audio_probe_observations + 1
+    if compatibility_audio_probe_observations >= COMPATIBILITY_AUDIO_PROBE_MAX_OBSERVATIONS then
+        compatibility_audio_probe_next_at = nil
+        return
+    end
+    compatibility_audio_probe_next_at = compatibility_audio_probe_next_at
+        + COMPATIBILITY_AUDIO_PROBE_INTERVAL_SECONDS
 end
 
 function love.load()
@@ -265,12 +296,13 @@ function love.update(dt)
     if route ~= last_route then
         metrics:route(now, route)
         last_route = route
-        if route == "match" then
-            record_audio(now)
+        if route == "match" and compatibility_flow then
+            start_compatibility_audio_probe(now)
         elseif route == "result" then
             metrics:flow_complete(now, route)
         end
     end
+    update_compatibility_audio_probe(now)
 end
 
 function love.draw()
