@@ -1,0 +1,86 @@
+name: CI
+
+on:
+    workflow_dispatch:
+    push:
+        branches: [main]
+    pull_request:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ci-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    quality:
+        name: Lua quality gate
+        runs-on: ubuntu-24.04
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+            - name: Install pinned toolchain
+              env:
+                  LOVE_VERSION: 11.5
+                  LOVE_SHA256: 65a673406431eff7167a15a032bf7a2e4ba50108e091eb7b176465831f9b5e00
+                  STYLUA_VERSION: 2.5.2
+                  STYLUA_SHA256: bcb0d855e91f102f28a370e850f8566b3b44b79e6274d806ea5246837c0fd5ab
+                  LUALS_VERSION: 3.18.2
+                  LUALS_SHA256: ca71415dd19f19e30aaa35a4915aefca9fdb5fec31b98331cc3d77f778d539c5
+              run: |
+                  tool_dir="$RUNNER_TEMP/galactic-cup-tools"
+                  mkdir -p "$tool_dir/bin" "$tool_dir/stylua" "$tool_dir/luals" "$tool_dir/love"
+
+                  curl --fail --location --retry 3 --silent --show-error \
+                      --output "$tool_dir/stylua.zip" \
+                      "https://github.com/JohnnyMorganz/StyLua/releases/download/v${STYLUA_VERSION}/stylua-linux-x86_64.zip"
+                  echo "${STYLUA_SHA256}  $tool_dir/stylua.zip" | sha256sum --check --status
+                  unzip -q "$tool_dir/stylua.zip" -d "$tool_dir/stylua"
+
+                  curl --fail --location --retry 3 --silent --show-error \
+                      --output "$tool_dir/luals.tar.gz" \
+                      "https://github.com/LuaLS/lua-language-server/releases/download/${LUALS_VERSION}/lua-language-server-${LUALS_VERSION}-linux-x64.tar.gz"
+                  echo "${LUALS_SHA256}  $tool_dir/luals.tar.gz" | sha256sum --check --status
+                  tar -xzf "$tool_dir/luals.tar.gz" -C "$tool_dir/luals"
+
+                  curl --fail --location --retry 3 --silent --show-error \
+                      --output "$tool_dir/love.AppImage" \
+                      "https://github.com/love2d/love/releases/download/${LOVE_VERSION}/love-${LOVE_VERSION}-x86_64.AppImage"
+                  echo "${LOVE_SHA256}  $tool_dir/love.AppImage" | sha256sum --check --status
+                  chmod +x "$tool_dir/love.AppImage"
+                  (
+                      cd "$tool_dir/love"
+                      "$tool_dir/love.AppImage" --appimage-extract >/dev/null
+                  )
+                  ln -s "$tool_dir/love/squashfs-root/AppRun" "$tool_dir/bin/love"
+
+                  "$tool_dir/stylua/stylua" --version
+                  "$tool_dir/luals/bin/lua-language-server" --version
+                  "$tool_dir/bin/love" --version
+                  printf '%s\n' "$tool_dir/bin" "$tool_dir/stylua" "$tool_dir/luals/bin" >> "$GITHUB_PATH"
+
+            - name: Check formatting
+              run: stylua --check .
+
+            - name: Check Lua types
+              run: lua-language-server --check . --checklevel=Warning
+
+            - name: Run headless test suite
+              run: love . --test
+
+            - name: Run gameplay tripwire
+              run: love . --tripwire
+
+    browser_artifact:
+        name: Browser artifact smoke
+        runs-on: ubuntu-24.04
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+            - name: Build and smoke-test browser artifact
+              run: ./scripts/web_smoke.sh
