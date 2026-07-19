@@ -3332,7 +3332,7 @@ def main() -> int:
     packet_pass = all(
         result_passes(
             result,
-            require_stability=index == 0,
+            require_stability=index == 0 and args.stability_seconds > 0,
             require_gamepad=args.require_gamepad,
         )
         for index, result in enumerate(results)
