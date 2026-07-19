@@ -1,9 +1,12 @@
 # OMP-0 browser compatibility report
 
-Status: **incomplete**. Stable Linux Chrome and Firefox now pass the automated
-flow, pacing, keyboard/input, persistence, and letterboxing gates. Windows 11,
-physical gamepad A/B, Firefox JavaScript heap, and issue #3's native comparison
-are still missing. Missing evidence is not treated as a pass.
+Status: **accepted for the current Linux development scope**. Stable Linux
+Chrome and Firefox pass the automated flow, pacing, keyboard/input,
+persistence, and letterboxing gates. Physical gamepad A/B and Firefox
+JavaScript heap remain unverified, so this is not broader browser release
+certification. Windows 11 is deferred to issue
+[#30](https://github.com/osobytes/galactic-cup/issues/30). Missing evidence is
+not treated as a pass.
 
 ## Artifact and durable evidence
 
@@ -87,15 +90,17 @@ Firefox's recorded process-tree RSS is not JavaScript heap.
 Firefox t0/t5/t10 heap companion remains manual. The concise procedure and
 Mozilla sources are in [`browser_build.md`](browser_build.md).
 
-## Remaining blockers
+## Deferred validation
 
-- Run the serialized PowerShell campaign on an unlocked hardware-accelerated
-  Windows 11 desktop with audible playback, sufficient resolution, and a
-  physical standard-mapped controller.
-- Capture the attended Firefox t0/t5/t10 heap companion.
-- Complete issue [#3](https://github.com/osobytes/galactic-cup/issues/3)'s
-  native product-flow comparison.
+- Issue [#30](https://github.com/osobytes/galactic-cup/issues/30) retains the
+  serialized Windows 11 Chrome/Firefox campaign, physical controller, audible
+  playback, and Firefox heap requirements for a later support expansion.
+- Linux physical standard-gamepad coverage and Firefox t0/t5/t10 heap evidence
+  are still required before making a broader public browser-support claim.
+- Issue [#31](https://github.com/osobytes/galactic-cup/issues/31) tracks a
+  self-contained Linux download separately from browser certification.
 
-Issue [#16](https://github.com/osobytes/galactic-cup/issues/16) and the parent
-compatibility issue #3 remain open. The decision in
-[`platform_decision.md`](platform_decision.md) remains inconclusive.
+Issue [#16](https://github.com/osobytes/galactic-cup/issues/16) completed the
+repository-owned evidence tooling and is closed. The owner-accepted delivery
+policy and its narrower current support scope are recorded in
+[`platform_decision.md`](platform_decision.md).
