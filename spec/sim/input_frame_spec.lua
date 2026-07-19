@@ -1,0 +1,230 @@
+local t = require("spec.support.runner")
+local input_frame = require("sim.input_frame")
+local players = require("data.players")
+
+---@return table<string, PlayerData>
+local function players_by_id()
+    local by_id = {}
+    for _, player in ipairs(players) do
+        by_id[player.id] = player
+    end
+    return by_id
+end
+
+---@return InputSlotAssignment[]
+local function assignments()
+    local player_ids = {
+        "zyro_vex",
+        "mika_olu",
+        "rok_tann",
+        "sela_dwin",
+        "brakka",
+        "veil_nyx",
+        "tib_quell",
+        "drell",
+    }
+    local result = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        local slot = assert(input_frame.slot(index))
+        result[index] = {
+            slot = slot.id,
+            team = slot.team,
+            player_id = player_ids[index],
+        }
+    end
+    return result
+end
+
+---@return InputSample[]
+local function neutral_slots()
+    local slots = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        slots[index] = input_frame.neutral_sample()
+    end
+    return slots
+end
+
+t.describe("OMP-1 input frame", function()
+    t.it("defines exactly four stable outfield slots per team", function()
+        local expected = {
+            { "home_1", "home", 1 },
+            { "home_2", "home", 2 },
+            { "home_3", "home", 3 },
+            { "home_4", "home", 4 },
+            { "away_1", "away", 1 },
+            { "away_2", "away", 2 },
+            { "away_3", "away", 3 },
+            { "away_4", "away", 4 },
+        }
+        t.eq(input_frame.SLOT_COUNT, 8)
+        for index = 1, input_frame.SLOT_COUNT do
+            local slot = assert(input_frame.slot(index))
+            t.eq(slot.index, index)
+            t.eq(slot.id, expected[index][1])
+            t.eq(slot.team, expected[index][2])
+            t.eq(slot.outfield_index, expected[index][3])
+        end
+        t.eq(assert(input_frame.slot_index("home", 4)), 4)
+        t.eq(assert(input_frame.slot_index("away", 1)), 5)
+        local slot, _, code = input_frame.slot(9)
+        t.eq(slot, nil)
+        t.eq(code, "malformed")
+    end)
+
+    t.it("maps canonical slots to unique non-keeper roster players", function()
+        local by_id = players_by_id()
+        local ownership = assert(input_frame.new_ownership(assignments(), by_id))
+        t.eq(ownership.version, input_frame.VERSION)
+        t.eq(#ownership.slots, input_frame.SLOT_COUNT)
+        t.eq(ownership.slots[1].slot, "home_1")
+        t.eq(ownership.slots[5].team, "away")
+        t.eq(ownership.slots[8].player_id, "drell")
+
+        local duplicate = assignments()
+        duplicate[8].player_id = duplicate[1].player_id
+        local value, _, code = input_frame.new_ownership(duplicate, by_id)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+
+        local keeper = assignments()
+        keeper[1].player_id = "ozzo"
+        value, _, code = input_frame.new_ownership(keeper, by_id)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+
+        local wrong_team = assignments()
+        wrong_team[5].team = "home"
+        value, _, code = input_frame.new_ownership(wrong_team, by_id)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+    end)
+
+    t.it("creates independent neutral samples for every tick and slot", function()
+        local frame = assert(input_frame.neutral(120))
+        t.eq(frame.version, input_frame.VERSION)
+        t.eq(frame.tick, 120)
+        t.eq(#frame.slots, input_frame.SLOT_COUNT)
+        for index = 1, input_frame.SLOT_COUNT do
+            local sample = frame.slots[index]
+            t.eq(sample.move_x, 0)
+            t.eq(sample.move_y, 0)
+            t.eq(sample.held, 0)
+            t.eq(sample.edges, 0)
+        end
+        frame.slots[1].move_x = 20
+        t.eq(frame.slots[2].move_x, 0, "neutral slots do not share a table")
+    end)
+
+    t.it("quantizes movement with fixed saturation, rounding, and decode rules", function()
+        t.eq(assert(input_frame.quantize_axis(-2)), -127)
+        t.eq(assert(input_frame.quantize_axis(-1)), -127)
+        t.eq(assert(input_frame.quantize_axis(-0.5)), -64)
+        t.eq(assert(input_frame.quantize_axis(0)), 0)
+        t.eq(assert(input_frame.quantize_axis(0.5)), 64)
+        t.eq(assert(input_frame.quantize_axis(1)), 127)
+        t.eq(assert(input_frame.quantize_axis(2)), 127)
+        local move_x, move_y = assert(input_frame.quantize_move(-0.5, 0.5))
+        t.eq(move_x, -64)
+        t.eq(move_y, 64)
+
+        t.near(assert(input_frame.dequantize_axis(-127)), -1)
+        t.near(assert(input_frame.dequantize_axis(64)), 64 / 127)
+        local decoded_x, decoded_y = assert(input_frame.dequantize_move({
+            move_x = -64,
+            move_y = 64,
+            held = 0,
+            edges = 0,
+        }))
+        t.near(decoded_x, -64 / 127)
+        t.near(decoded_y, 64 / 127)
+
+        local value, _, code = input_frame.quantize_axis(0 / 0)
+        t.eq(value, nil)
+        t.eq(code, "malformed")
+    end)
+
+    t.it("keeps supplied holds and one-tick edges distinct", function()
+        local sample = assert(input_frame.new_sample({
+            held = input_frame.HELD_BITS.shoot + input_frame.HELD_BITS.sprint,
+            edges = input_frame.EDGE_BITS.shoot + input_frame.EDGE_BITS.dash,
+        }))
+        t.is_true(assert(input_frame.is_held(sample, "shoot")))
+        t.is_true(assert(input_frame.is_held(sample, "sprint")))
+        t.is_true(not assert(input_frame.is_held(sample, "pass")))
+        t.is_true(assert(input_frame.has_edge(sample, "shoot")))
+        t.is_true(assert(input_frame.has_edge(sample, "dash")))
+        t.is_true(not assert(input_frame.has_edge(sample, "pass")))
+
+        local next_sample = assert(input_frame.new_sample({ held = sample.held, edges = 0 }))
+        t.is_true(assert(input_frame.is_held(next_sample, "shoot")))
+        t.is_true(not assert(input_frame.has_edge(next_sample, "shoot")))
+    end)
+
+    t.it("encodes and decodes one byte-for-byte canonical frame", function()
+        local slots = neutral_slots()
+        slots[1] = assert(input_frame.new_sample({
+            move_x = -127,
+            move_y = 64,
+            held = input_frame.HELD_BITS.shoot + input_frame.HELD_BITS.lob,
+            edges = input_frame.EDGE_BITS.shoot,
+        }))
+        slots[8] = assert(input_frame.new_sample({
+            move_x = 127,
+            move_y = -64,
+            held = input_frame.HELD_BITS.aerial_strike,
+            edges = input_frame.EDGE_BITS.dodge,
+        }))
+        local frame = assert(input_frame.new(42, slots))
+        local wire = assert(input_frame.encode(frame))
+        t.eq(
+            wire,
+            "1|42|-127,64,17,1|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|127,-64,32,16"
+        )
+
+        local decoded = assert(input_frame.decode(wire))
+        local reencoded = assert(input_frame.encode(decoded))
+        t.eq(reencoded, wire)
+        t.eq(decoded.tick, 42)
+        t.eq(decoded.slots[1].move_x, -127)
+        t.eq(decoded.slots[8].edges, input_frame.EDGE_BITS.dodge)
+    end)
+
+    t.it("rejects malformed, noncanonical, and oversized frame data", function()
+        local frame = assert(input_frame.neutral(0))
+        frame.slots[9] = input_frame.neutral_sample()
+        local ok, _, code = input_frame.validate(frame)
+        t.eq(ok, nil)
+        t.eq(code, "malformed")
+
+        local sample, _, sample_code = input_frame.new_sample({ held = 128 })
+        t.eq(sample, nil)
+        t.eq(sample_code, "malformed")
+
+        local wire = assert(input_frame.encode(assert(input_frame.neutral(0))))
+        local value, _, decode_code = input_frame.decode("01" .. wire:sub(2))
+        t.eq(value, nil)
+        t.eq(decode_code, "malformed")
+        value, _, decode_code = input_frame.decode(wire:gsub("0,0,0,0", "-0,0,0,0", 1))
+        t.eq(value, nil)
+        t.eq(decode_code, "malformed")
+        value, _, decode_code = input_frame.decode(wire .. "x")
+        t.eq(value, nil)
+        t.eq(decode_code, "malformed")
+
+        local maximum_slots = neutral_slots()
+        for index = 1, input_frame.SLOT_COUNT do
+            maximum_slots[index] = assert(input_frame.new_sample({
+                move_x = -127,
+                move_y = -127,
+                held = 127,
+                edges = 31,
+            }))
+        end
+        local maximum_wire =
+            assert(input_frame.encode(assert(input_frame.new(input_frame.MAX_TICK, maximum_slots))))
+        t.eq(#maximum_wire, input_frame.MAX_WIRE_BYTES)
+        value, _, decode_code = input_frame.decode(maximum_wire .. "x")
+        t.eq(value, nil)
+        t.eq(decode_code, "wire_too_large")
+    end)
+end)
