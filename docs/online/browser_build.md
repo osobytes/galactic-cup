@@ -61,10 +61,13 @@ performance checks remain part of issue #3.
 
 ## Evidence campaign
 
-The evidence runner needs Python 3.11 or newer and the exact Selenium version
-in `scripts/browser_matrix-requirements.txt`. Install it in a disposable
-environment before running `scripts/browser_matrix.py`; browser and driver
-discovery is delegated to pinned Selenium 4.43.0.
+The evidence runner needs Python 3.11 or newer. Its complete 15-wheel Selenium
+4.43.0 closure is version- and hash-locked in
+`scripts/browser_matrix-requirements.txt`; install it with
+`pip --require-hashes`. The Windows entrypoint does this in a disposable
+environment and gives Selenium Manager a campaign-local cache. Each packet
+records versions, paths, sizes, and SHA-256 hashes for Python, Selenium
+Manager, the stable-channel browser, and its driver.
 
 On an attended Windows 11 host, install current stable Chrome and Firefox, then
 run from PowerShell:
@@ -73,40 +76,52 @@ run from PowerShell:
 .\scripts\windows_browser_campaign.ps1
 ```
 
-The entrypoint creates an evidence-only virtual environment, builds and serves
-the artifact, runs the 600-second Chrome matrix followed by Firefox, stops the
-server in cleanup, and archives each packet. Raw packets, ZIPs, server logs,
-operator observations, and `campaign-summary.json` are under
+The entrypoint refuses a reused output root, creates an evidence-only virtual
+environment, builds and serves the artifact, and runs one fresh-profile
+session for every browser/viewport pair. The 960×540 session is the
+600-second row; the other two sessions exercise the complete flow and controls.
+After the Firefox heap companion, it stops the server with a bounded cleanup
+and archives each packet. Raw packets, ZIPs, server logs, operator
+observations, and `campaign-summary.json` are under
 `.cache\omp0-windows-campaign\<timestamp>\` by default and remain ignored.
 Each packet's `environment.json` includes a bounded
 `Win32_VideoController` inventory, so Intel and AMD adapters are retained
-alongside any `nvidia-smi` result.
+alongside any `nvidia-smi` result. Missing Windows GPU metadata makes the
+campaign incomplete.
 
 Keep the desktop unlocked and foregrounded with hardware acceleration enabled,
 Windows scaling at 100%, and enough physical resolution for an exact
 1920×1080 browser viewport (2560×1440 or larger is recommended). Enable audible
 playback and connect one physical controller exposed by the browser with
-`mapping="standard"`; listen during the opening flow and press physical A then
-B in each browser. Do not substitute a virtual HID or infer a pass from a
-connected device without both input events. No Actions workflow is provided:
-the fixed attended desktop, GPU/audio, resolution, and physical-input
-requirements are not available on an eligible repository runner.
+`mapping="standard"`; listen during Match and press physical A then B in every
+browser/viewport session. After each session, the operator must answer
+`yes`, `no`, or `unsure` for audible output and physical A/B. Only `yes` passes;
+the answers are written inside the raw packet before its ZIP is hashed. Do not
+substitute a virtual HID or infer a pass from a connected device without both
+input events. No Actions workflow is provided: the fixed attended desktop,
+GPU/audio, resolution, and physical-input requirements are not available on
+an eligible repository runner.
 
 ### Firefox heap companion
 
 Firefox process-tree RSS remains useful supplemental process memory, but it is
-not JavaScript heap. `performance.memory` is a non-standard Chromium-only API,
-so capture Firefox heap manually against the same clean artifact revision:
+not JavaScript heap. `performance.memory` is a non-standard Chromium-only API.
+The PowerShell campaign therefore keeps the exact artifact server alive,
+launches a separate clean Firefox profile, and guides an attended companion:
 
-1. Let the game tab complete the compatibility flow and reach its stable
-   Result state. Open that tab's Firefox DevTools **Memory** panel.
-2. At t0, t5, and t10, open `about:memory`, click **Minimize memory usage** to
-   force GC/CC, optionally select **anonymize**, and save a `.json.gz` report.
-   Return to the game tab's Memory panel immediately, take a tab-scoped heap
-   snapshot, and save the `.fxsnapshot` with the matching checkpoint label.
-3. Retain all six files with the automated Firefox packet, exact source/package
-   hashes, browser version, and checkpoint times. Compare the tab snapshots;
-   report the `about:memory` files separately as Firefox-wide companion data.
+1. Reach stable Result and open that tab's Firefox DevTools **Memory** panel in
+   Aggregate view.
+2. At t0, t5, and t10, use `about:memory` **Minimize memory usage** to force
+   GC/CC and save `about-memory-<label>.json.gz`. Immediately take and save the
+   tab snapshot as `heap-<label>.fxsnapshot`.
+3. Record the Memory panel's whole-tab heap **Total Bytes** value—not RSS or
+   snapshot file size. The script computes `(t10 - t0) / t0 * 100`, reports
+   whether t0 ≤ t5 ≤ t10, and applies the unchanged 25% threshold.
+
+All six non-empty files plus `firefox-heap-summary.json` are required. The
+summary records checkpoint times and file hashes and ties the scalar series to
+the source revision, package hash, Firefox capabilities, and browser binary
+hash before the containing packet is archived.
 
 Mozilla documents
 [`about:memory` GC/CC and reports](https://firefox-source-docs.mozilla.org/performance/memory/about_colon_memory.html),

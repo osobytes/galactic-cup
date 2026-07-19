@@ -2,9 +2,9 @@
 
 Status: **incomplete**. Stable Linux Chrome and Firefox now pass the automated
 flow, pacing, keyboard/input, persistence, and letterboxing gates. Windows 11,
-physical gamepad A/B, reverified positive Firefox audio, Firefox JavaScript
-heap, and issue #3's native comparison are still missing. Missing evidence is
-not treated as a pass.
+physical gamepad A/B, current-head positive audio confirmation, Firefox
+JavaScript heap, and issue #3's native comparison are still missing. Missing
+evidence is not treated as a pass.
 
 ## Artifact and durable evidence
 
@@ -33,8 +33,8 @@ capabilities, screenshots, console/service logs, memory samples, and summaries.
 
 | Row | 960×540 | 1280×720 | 1920×1080 | Remaining |
 | --- | --- | --- | --- | --- |
-| Linux Chrome 150 | Flow/pacing/input pass; 600 s stability and Chrome heap pass | Flow/pacing/input pass | Flow/pacing/input pass | Physical gamepad |
-| Linux Firefox 152 | Flow/pacing/input pass; 600 s stability pass | Flow/pacing/input pass | Flow/pacing/input pass | Physical gamepad, positive audio recheck, JS heap |
+| Linux Chrome 150 | Flow/pacing/input pass; 600 s stability and Chrome heap pass | Flow/pacing/input pass | Flow/pacing/input pass | Physical gamepad, current-head positive audio |
+| Linux Firefox 152 | Flow/pacing/input pass; 600 s stability pass | Flow/pacing/input pass | Flow/pacing/input pass | Physical gamepad, current-head positive audio, JS heap |
 | Windows 11 Chrome | Unavailable | Unavailable | Unavailable | Attended hardware campaign |
 | Windows 11 Firefox | Unavailable | Unavailable | Unavailable | Attended hardware campaign plus manual JS heap |
 
@@ -54,11 +54,18 @@ measurement changed from the original apparent leak to
 
 ## Controls and memory interpretation
 
-The runner now observes audio at most 11 times over roughly five seconds after
-entering Match. A pass requires user activation, no autoplay warning, a
-complete bounded probe, positive master volume, and at least one active source.
-Reviewed Chrome evidence already contains a positive source; Firefox must be
-rerun with this corrected probe before positive audio is claimed.
+The runner observes exactly 11 ordered samples over roughly five seconds after
+entering Match. A pass requires an unmuted setting before Match, user
+activation, no autoplay warning, positive master volume, and at least one
+active source. Malformed, missing, non-finite, duplicate, or out-of-order
+samples fail the check without aborting evidence capture.
+
+The positive Chrome packet at source `806f7a3` is historical evidence, not a
+current-head result. Pre-fix source `4b446ceb` left the persistence probe's
+`muted=true` setting in place, so its otherwise complete Chrome and Firefox
+probes correctly observed zero sources. The handoff runner now persists
+`muted=false` before the product flow; positive audio still requires a clean
+current-head rerun and must not be inferred from either earlier packet.
 
 No physical standard-mapped controller was available for the Linux packets.
 The attended operator must expose `mapping="standard"` and produce both
@@ -75,8 +82,8 @@ Mozilla sources are in [`browser_build.md`](browser_build.md).
 - Run the serialized PowerShell campaign on an unlocked hardware-accelerated
   Windows 11 desktop with audible playback, sufficient resolution, and a
   physical standard-mapped controller.
-- Reverify positive Firefox audio with the bounded probe and capture the manual
-  Firefox t0/t5/t10 heap companion.
+- Reverify positive Chrome and Firefox audio with the exact 11-sample probe and
+  capture the attended Firefox t0/t5/t10 heap companion.
 - Complete issue [#3](https://github.com/osobytes/galactic-cup/issues/3)'s
   native product-flow comparison.
 

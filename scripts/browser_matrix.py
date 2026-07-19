@@ -7,6 +7,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -258,6 +259,48 @@ def command_output(command: list[str]) -> str | None:
     return output if result.returncode == 0 and output else None
 
 
+def executable_metadata(path: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    version = None
+    try:
+        result = subprocess.run(
+            [str(resolved), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = (result.stdout or result.stderr).strip()
+        if output:
+            version = output
+    except (OSError, subprocess.SubprocessError):
+        pass
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(resolved),
+        "sha256": digest.hexdigest(),
+        "size_bytes": resolved.stat().st_size,
+        "version_output": version,
+    }
+
+
+def selenium_metadata() -> dict[str, Any]:
+    try:
+        import selenium
+        from selenium.webdriver.common.selenium_manager import SeleniumManager
+    except ImportError as error:
+        raise RuntimeError("Selenium is required: python3 -m pip install selenium") from error
+    return {
+        "cache_path": os.environ.get("SE_CACHE_PATH"),
+        "manager": executable_metadata(SeleniumManager._get_binary()),
+        "python": executable_metadata(Path(sys.executable)),
+        "selenium_version": selenium.__version__,
+    }
+
+
 def parse_windows_gpu_output(output: str | None) -> dict[str, Any]:
     result: dict[str, Any] = {
         "adapters": [],
@@ -411,11 +454,15 @@ def resolve_assets(browser_name: str, binary: Path | None, driver: Path | None) 
     if binary and driver:
         return binary.resolve(), driver.resolve()
 
-    args = ["--browser", browser_name, "--skip-driver-in-path"]
+    args = [
+        "--browser",
+        browser_name,
+        "--browser-version",
+        "stable",
+        "--skip-driver-in-path",
+    ]
     if binary:
         args.extend(["--browser-path", str(binary.resolve())])
-    elif browser_name == "firefox":
-        args.extend(["--browser-version", "stable"])
     result = SeleniumManager().binary_paths(args)
     resolved_binary = binary or Path(result["browser_path"])
     resolved_driver = driver or Path(result["driver_path"])
@@ -1242,58 +1289,122 @@ def audio_probe_check(
     entries: list[dict[str, Any]],
     final_state: dict[str, Any],
 ) -> dict[str, Any]:
-    parsed = records(entries)
-    match_times = []
-    observations = []
+    match_times: list[float] = []
+    observations: list[tuple[float, int, float, dict[str, str]]] = []
+    invalid_observations: list[dict[str, Any]] = []
+    settings_observations: list[tuple[float, dict[str, str]]] = []
     autoplay_warnings = 0
     for entry in entries:
         if "AudioContext was not allowed to start" in str(entry.get("message", "")):
             autoplay_warnings += 1
-    for record in parsed:
+    for index, entry in enumerate(entries):
+        message = entry.get("message")
+        record = parse_marker(message) if isinstance(message, str) else None
+        if not record:
+            continue
         try:
             at_ms = float(record.get("at_ms", ""))
         except (TypeError, ValueError):
+            if record.get("kind") == "audio":
+                invalid_observations.append(
+                    {"index": index, "reason": "invalid at_ms", "record": record}
+                )
+            continue
+        if not math.isfinite(at_ms):
+            if record.get("kind") == "audio":
+                invalid_observations.append(
+                    {"index": index, "reason": "non-finite at_ms", "record": record}
+                )
             continue
         if record.get("kind") == "route" and record.get("route") == "match":
             match_times.append(at_ms)
         elif record.get("kind") == "audio":
-            observations.append((at_ms, record))
+            try:
+                active_sources = int(record["active_sources"])
+                volume = float(record["volume"])
+                if active_sources < 0 or not math.isfinite(volume) or volume < 0:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                invalid_observations.append(
+                    {
+                        "index": index,
+                        "reason": "invalid active_sources or volume",
+                        "record": record,
+                    }
+                )
+                continue
+            observations.append((at_ms, active_sources, volume, record))
+        elif record.get("kind") == "settings" and str(entry.get("phase", "")).startswith(
+            ("flow", "match_focus")
+        ):
+            settings_observations.append(
+                (at_ms, {**record, "phase": str(entry.get("phase"))})
+            )
     match_at_ms = match_times[0] if match_times else None
     offsets_ms = (
-        [at_ms - match_at_ms for at_ms, _ in observations]
+        [at_ms - match_at_ms for at_ms, _, _, _ in observations]
         if match_at_ms is not None
         else []
     )
+    ordered = all(
+        later > earlier for earlier, later in zip(offsets_ms, offsets_ms[1:])
+    )
     bounded = (
-        len(observations) <= AUDIO_PROBE_MAX_OBSERVATIONS
+        len(observations) == AUDIO_PROBE_MAX_OBSERVATIONS
+        and not invalid_observations
         and all(
             -100 <= offset <= (AUDIO_PROBE_SECONDS + AUDIO_PROBE_WAIT_SLACK_SECONDS) * 1000
             for offset in offsets_ms
         )
     )
     complete = (
-        bool(offsets_ms)
+        len(offsets_ms) == AUDIO_PROBE_MAX_OBSERVATIONS
+        and not invalid_observations
+        and ordered
         and offsets_ms[0] <= (AUDIO_PROBE_INTERVAL_SECONDS + 0.25) * 1000
         and offsets_ms[-1] >= (AUDIO_PROBE_SECONDS - AUDIO_PROBE_INTERVAL_SECONDS) * 1000
     )
     positive = any(
-        int(record.get("active_sources", "0")) > 0
-        and float(record.get("volume", "0")) > 0
-        for _, record in observations
+        active_sources > 0 and volume > 0
+        for _, active_sources, volume, _ in observations
+    )
+    settings_before_match = (
+        [
+            record
+            for at_ms, record in settings_observations
+            if match_at_ms is not None and at_ms <= match_at_ms
+        ][-1]
+        if match_at_ms is not None
+        and any(at_ms <= match_at_ms for at_ms, _ in settings_observations)
+        else None
+    )
+    audible_settings = (
+        settings_before_match is not None
+        and settings_before_match.get("muted") == "false"
+        and bool(observations)
+        and all(volume > 0 for _, _, volume, _ in observations)
     )
     user_activated = bool(final_state.get("user_activation", {}).get("has_been_active"))
     return {
+        "audible_settings": {
+            "pass": audible_settings,
+            "settings_before_match": settings_before_match,
+            "volumes": [volume for _, _, volume, _ in observations],
+        },
         "autoplay_warnings": autoplay_warnings,
         "bounded": bounded,
         "complete": complete,
         "duration_seconds": AUDIO_PROBE_SECONDS,
+        "invalid_observations": invalid_observations,
         "match_at_ms": match_at_ms,
         "max_observations": AUDIO_PROBE_MAX_OBSERVATIONS,
         "observation_offsets_ms": offsets_ms,
-        "observations": [record for _, record in observations],
+        "observations": [record for _, _, _, record in observations],
+        "ordered": ordered,
         "pass": (
             user_activated
             and match_at_ms is not None
+            and audible_settings
             and bounded
             and complete
             and positive
@@ -1481,11 +1592,15 @@ def evidence_checks(
         "performance": sample_gate(entries),
         "stability_performance": stability_performance,
         "persistence": {
+            "flush_after_restore": preflight.get("flush_after_restore"),
             "flush_after_save": preflight.get("flush_after_save"),
             "muted_after_reload": preflight.get("muted_after_reload"),
+            "muted_after_restore": preflight.get("muted_after_restore"),
             "pass": (
                 preflight.get("flush_after_save") is True
                 and preflight.get("muted_after_reload") == "true"
+                and preflight.get("flush_after_restore") is True
+                and preflight.get("muted_after_restore") == "false"
                 and preflight.get("storage_after_reload", {}).get("state") == "ready"
                 and preflight.get("storage_after_reload", {}).get("populate_count", 0) >= 1
             ),
@@ -1607,6 +1722,22 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     values = settings_values(after_reload, "muted")
     muted_after_reload = values[-1] if values else None
     after_reload.extend(webdriver_console(driver, "persistence_reload"))
+    restore_flush_count = int(storage_after_reload.get("flush_count") or 0)
+    send_key(driver, "m")
+    wait_for_setting(driver, "muted", "false")
+    storage_after_restore = wait_until(
+        lambda: (
+            page_state(driver).get("storage")
+            if int((page_state(driver).get("storage") or {}).get("flush_count") or 0)
+            > restore_flush_count
+            else None
+        ),
+        10,
+        "audible settings flush",
+    )
+    flush_after_restore = (
+        int(storage_after_restore.get("flush_count") or 0) > restore_flush_count
+    )
 
     driver.get(with_query(url, {"storage": "unavailable"}))
     wait_until(
@@ -1647,9 +1778,11 @@ def run_preflight(driver: Any, url: str, width: int, height: int, output: Path) 
     return {
         "console": console,
         "flush_after_save": flush_after_save,
+        "flush_after_restore": flush_after_restore,
         "fullscreen_observed": fullscreen_observed,
         "letterboxing": letterboxing,
         "muted_after_reload": muted_after_reload,
+        "muted_after_restore": "false",
         "navigation_to_title_ms": navigation_to_title_ms,
         "storage_after_reload": storage_after_reload,
         "storage_unavailable_boot_recoverable": storage_unavailable_boot_recoverable,
@@ -2159,10 +2292,12 @@ def run_viewport(
                 key: preflight.get(key)
                 for key in (
                     "fullscreen_observed",
+                    "flush_after_restore",
                     "flush_after_save",
                     "acceptance_isolation",
                     "letterboxing",
                     "muted_after_reload",
+                    "muted_after_restore",
                     "navigation_to_title_ms",
                     "storage_after_reload",
                     "storage_unavailable_boot_recoverable",
@@ -2237,11 +2372,13 @@ def run_viewport(
             key: preflight.get(key)
             for key in (
                 "fullscreen_observed",
+                "flush_after_restore",
                 "flush_after_save",
                 "acceptance_isolation",
                 "letterboxing",
                 "match_focus_recovery",
                 "muted_after_reload",
+                "muted_after_restore",
                 "navigation_to_title_ms",
                 "storage_after_reload",
                 "storage_unavailable_boot_recoverable",
@@ -2258,7 +2395,11 @@ def run_viewport(
     return result
 
 
-def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
+def result_passes(
+    result: dict[str, Any],
+    require_stability: bool,
+    require_gamepad: bool = False,
+) -> bool:
     required = [
         "artifact_boot",
         "audio_after_gesture",
@@ -2274,11 +2415,12 @@ def result_passes(result: dict[str, Any], require_stability: bool) -> bool:
         "storage_unavailable",
         "terminal_runtime_health",
     ]
+    if require_gamepad or require_stability:
+        required.append("gamepad")
     if require_stability:
         required.extend(
             (
                 "acceptance_isolation",
-                "gamepad",
                 "memory",
                 "runtime_stability",
                 "stability_performance",
@@ -2565,7 +2707,15 @@ def self_test() -> int:
     healthy_audio_entries = [
         {
             "level": "log",
+            "message": (
+                "GC_METRICS|settings|at_ms=900|fullscreen=false|muted=false"
+            ),
+            "phase": "flow",
+        },
+        {
+            "level": "log",
             "message": "GC_METRICS|route|at_ms=1000|route=match",
+            "phase": "flow",
         }
     ]
     for observation in range(AUDIO_PROBE_MAX_OBSERVATIONS):
@@ -2577,6 +2727,7 @@ def self_test() -> int:
                     f"|active_sources={1 if observation == 4 else 0}"
                     f"|at_ms={1000 + observation * 500}|volume=1"
                 ),
+                "phase": "flow",
             }
         )
     healthy_audio = audio_probe_check(
@@ -2587,6 +2738,9 @@ def self_test() -> int:
     assert healthy_audio["bounded"] is True
     assert healthy_audio["complete"] is True
     assert healthy_audio["positive_source_observed"] is True
+    assert healthy_audio["audible_settings"]["pass"] is True
+    assert healthy_audio["invalid_observations"] == []
+    assert healthy_audio["ordered"] is True
     assert healthy_audio["observation_offsets_ms"] == [
         observation * 500 for observation in range(AUDIO_PROBE_MAX_OBSERVATIONS)
     ]
@@ -2628,6 +2782,137 @@ def self_test() -> int:
     assert silent_audio["pass"] is False
     assert silent_audio["complete"] is True
     assert silent_audio["positive_source_observed"] is False
+    muted_audio_entries = [
+        {
+            **entry,
+            "message": str(entry["message"]).replace("muted=false", "muted=true"),
+        }
+        for entry in healthy_audio_entries
+    ]
+    muted_audio = audio_probe_check(
+        muted_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert muted_audio["pass"] is False
+    assert muted_audio["audible_settings"]["pass"] is False
+    incomplete_audio = audio_probe_check(
+        healthy_audio_entries[:-1],
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert incomplete_audio["pass"] is False
+    assert incomplete_audio["bounded"] is False
+    assert incomplete_audio["complete"] is False
+    malformed_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("active_sources=0", "active_sources=invalid")
+                if "at_ms=1000|volume=1" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    malformed_audio = audio_probe_check(
+        malformed_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert malformed_audio["pass"] is False
+    assert malformed_audio["complete"] is False
+    assert malformed_audio["invalid_observations"][0]["reason"] == (
+        "invalid active_sources or volume"
+    )
+    nonfinite_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("at_ms=1500", "at_ms=nan")
+                if "GC_METRICS|audio" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    nonfinite_audio = audio_probe_check(
+        nonfinite_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert nonfinite_audio["pass"] is False
+    assert nonfinite_audio["invalid_observations"][0]["reason"] == "non-finite at_ms"
+    missing_audio_field_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("|volume=1", "")
+                if "at_ms=1500|volume=1" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    missing_audio_field = audio_probe_check(
+        missing_audio_field_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert missing_audio_field["pass"] is False
+    assert missing_audio_field["invalid_observations"][0]["reason"] == (
+        "invalid active_sources or volume"
+    )
+    nonfinite_volume_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("|volume=1", "|volume=nan")
+                if "at_ms=1500|volume=1" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    nonfinite_volume = audio_probe_check(
+        nonfinite_volume_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert nonfinite_volume["pass"] is False
+    assert nonfinite_volume["invalid_observations"][0]["reason"] == (
+        "invalid active_sources or volume"
+    )
+    duplicate_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("at_ms=1500", "at_ms=1000")
+                if "GC_METRICS|audio" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    duplicate_audio = audio_probe_check(
+        duplicate_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert duplicate_audio["pass"] is False
+    assert duplicate_audio["complete"] is False
+    assert duplicate_audio["ordered"] is False
+    out_of_order_audio_entries = [
+        {
+            **entry,
+            "message": (
+                str(entry["message"]).replace("at_ms=2000", "at_ms=1250")
+                if "GC_METRICS|audio" in str(entry["message"])
+                else entry["message"]
+            ),
+        }
+        for entry in healthy_audio_entries
+    ]
+    out_of_order_audio = audio_probe_check(
+        out_of_order_audio_entries,
+        {"user_activation": {"has_been_active": True}},
+    )
+    assert out_of_order_audio["pass"] is False
+    assert out_of_order_audio["complete"] is False
+    assert out_of_order_audio["ordered"] is False
     fake_driver = FakeChromeDriver()
     chrome_entries: list[dict[str, Any]] = []
     assert route_sequence(flow_console(fake_driver, "chrome", "flow", chrome_entries)) == [
@@ -2892,6 +3177,28 @@ def self_test() -> int:
     assert result_passes(healthy_short_result, require_stability=False) is True
     assert (
         result_passes(
+            healthy_short_result,
+            require_stability=False,
+            require_gamepad=True,
+        )
+        is False
+    )
+    assert (
+        result_passes(
+            {
+                **healthy_short_result,
+                "checks": {
+                    **healthy_short_result["checks"],
+                    "gamepad": {"pass": True},
+                },
+            },
+            require_stability=False,
+            require_gamepad=True,
+        )
+        is True
+    )
+    assert (
+        result_passes(
             {
                 **healthy_short_result,
                 "checks": {
@@ -2930,6 +3237,11 @@ def main() -> int:
     parser.add_argument("--flow-timeout", type=int, default=300)
     parser.add_argument("--stability-seconds", type=int, default=600)
     parser.add_argument(
+        "--require-gamepad",
+        action="store_true",
+        help="require standard-mapped physical A/B observations in every viewport row",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=ROOT / ".cache" / "omp0-browser-matrix" / datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -2965,15 +3277,31 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=False)
     write_json(root / "manifest.json", manifest)
     environment = {
-        "browser_binary": str(binary),
-        "browser_driver": str(driver),
+        "browser_binary": executable_metadata(binary),
+        "browser_channel_requested": "stable",
+        "browser_driver": executable_metadata(driver),
         "captured_at": utc_now(),
         "clean_profile": True,
         "extensions_disabled": True,
         "hardware_acceleration_requested": True,
         "os": os_metadata(),
+        "physical_gamepad_required": args.require_gamepad,
+        "selenium": selenium_metadata(),
         "served_url": base_url,
         "warning_classifications": [pattern.pattern for pattern in warning_classifications],
+    }
+    windows_gpu = environment["os"].get("windows_video_controllers", {})
+    environment_checks = {
+        "gpu_metadata": {
+            "pass": (
+                windows_gpu.get("available") is True
+                and bool(windows_gpu.get("adapters"))
+                if os.name == "nt"
+                else True
+            ),
+            "required": os.name == "nt",
+        },
+        "stable_browser_requested": {"pass": True, "requested": "stable"},
     }
     write_json(root / "environment.json", environment)
 
@@ -3002,15 +3330,20 @@ def main() -> int:
             )
         )
     packet_pass = all(
-        result_passes(result, require_stability=index == 0)
+        result_passes(
+            result,
+            require_stability=index == 0,
+            require_gamepad=args.require_gamepad,
+        )
         for index, result in enumerate(results)
-    )
+    ) and all(check["pass"] is True for check in environment_checks.values())
     write_json(
         root / "summary.json",
         {
             "browser": args.browser,
             "captured_at": utc_now(),
             "environment": environment,
+            "environment_checks": environment_checks,
             "manifest": manifest,
             "pass": packet_pass,
             "results": results,
