@@ -45,7 +45,7 @@ function keeper.arc_target(context)
 
     local goal_center = Vec2.new(goal_line_x, context.goal.y + context.goal.h / 2)
     local ball_depth = (context.ball_pos.x - goal_line_x) * infield_direction
-    if not context.in_1v1 and ball_depth >= MIDFIELD_DEPTH then
+    if ball_depth >= MIDFIELD_DEPTH then
         return goal_center
     end
 
