@@ -122,6 +122,28 @@ def chrome_arguments(ci: bool) -> tuple[str, ...]:
     return tuple(arguments)
 
 
+def firefox_arguments(ci: bool) -> tuple[str, ...]:
+    if ci:
+        return ()
+    return ("-headless",)
+
+
+def firefox_preferences(ci: bool) -> dict[str, bool | int]:
+    preferences: dict[str, bool | int] = {
+        "extensions.autoDisableScopes": 15,
+        "extensions.enabledScopes": 0,
+    }
+    if ci:
+        preferences.update(
+            {
+                "webgl.force-enabled": True,
+                "gfx.webrender.software": True,
+                "gfx.x11-egl.force-disabled": True,
+            }
+        )
+    return preferences
+
+
 def bounded_log_tail(path: Path, max_lines: int = 40, max_characters: int = 6000) -> str:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -158,9 +180,11 @@ def launch(browser_name: str, binary: Path, driver: Path, log: Path) -> Any:
 
     options = Options()
     options.binary_location = str(binary)
-    options.add_argument("-headless")
-    options.set_preference("extensions.autoDisableScopes", 15)
-    options.set_preference("extensions.enabledScopes", 0)
+    ci = os.environ.get("CI") == "true"
+    for argument in firefox_arguments(ci):
+        options.add_argument(argument)
+    for name, value in firefox_preferences(ci).items():
+        options.set_preference(name, value)
     return webdriver.Firefox(
         service=Service(
             str(driver),
@@ -343,6 +367,22 @@ def self_test() -> None:
         raise RuntimeError("CI Chrome arguments omit --no-sandbox")
     if "--no-sandbox" in chrome_arguments(False):
         raise RuntimeError("local Chrome arguments unexpectedly disable the sandbox")
+    if firefox_arguments(False) != ("-headless",):
+        raise RuntimeError("local Firefox arguments omit headless mode")
+    if firefox_arguments(True):
+        raise RuntimeError("CI Firefox arguments unexpectedly enable headless mode")
+    ci_only_firefox_preferences = {
+        "webgl.force-enabled": True,
+        "gfx.webrender.software": True,
+        "gfx.x11-egl.force-disabled": True,
+    }
+    local_firefox_preferences = firefox_preferences(False)
+    expected_ci_firefox_preferences = local_firefox_preferences.copy()
+    expected_ci_firefox_preferences.update(ci_only_firefox_preferences)
+    if firefox_preferences(True) != expected_ci_firefox_preferences:
+        raise RuntimeError("CI Firefox preferences do not match software GL requirements")
+    if any(name in local_firefox_preferences for name in ci_only_firefox_preferences):
+        raise RuntimeError("local Firefox preferences unexpectedly force software WebGL")
 
     class FakeProcess:
         def __init__(self) -> None:

@@ -114,8 +114,14 @@ jobs:
 
             - name: Run two fresh Chrome and Firefox determinism campaigns
               env:
+                  GALLIUM_DRIVER: llvmpipe
+                  LIBGL_ALWAYS_SOFTWARE: "1"
                   SE_CACHE_PATH: ${{ runner.temp }}/selenium
               run: |
-                  "$RUNNER_TEMP/browser-evidence/bin/python" -B scripts/browser_determinism.py \
-                      --artifact "$RUNNER_TEMP/omp1-web" \
-                      --output "$RUNNER_TEMP/omp1-browser-determinism.json"
+                  xvfb-run -a \
+                      -s "-screen 0 1280x720x24 -nolisten tcp +extension GLX +render -noreset" \
+                      "$RUNNER_TEMP/browser-evidence/bin/python" -B scripts/browser_determinism.py \
+                          --artifact "$RUNNER_TEMP/omp1-web" \
+                          --browser firefox \
+                          --browser chrome \
+                          --output "$RUNNER_TEMP/omp1-browser-determinism.json"
