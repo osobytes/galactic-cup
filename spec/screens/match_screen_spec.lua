@@ -1,5 +1,7 @@
 local t = require("spec.support.runner")
 local Match = require("game.screens.match")
+local fixed_clock = require("sim.fixed_clock")
+local sim_match = require("sim.match")
 
 t.describe("match screen rematch (tier 2)", function()
     t.it("R restarts a finished match with the same pre-match choices", function()
@@ -41,6 +43,47 @@ t.describe("match screen rematch (tier 2)", function()
         m:event({ kind = "key", key = "r" })
         m:event({ kind = "action", action = "confirm" })
         t.is_true(m.state.finished)
+    end)
+end)
+
+t.describe("match screen fixed simulation clock (tier 2)", function()
+    t.it("samples render frames but only steps the match at the canonical interval", function()
+        local saved_keyboard = love.keyboard
+        local original_step = sim_match.step
+        local down = {}
+        local dts = {}
+        love.keyboard = {
+            isDown = function(...)
+                for _, key in ipairs({ ... }) do
+                    if down[key] then
+                        return true
+                    end
+                end
+                return false
+            end,
+        }
+        sim_match.step = function(state, dt, input)
+            dts[#dts + 1] = dt
+            return original_step(state, dt, input)
+        end
+
+        local ok, err = pcall(function()
+            local screen = Match.new()
+            local initial_time = screen.state.time_left
+            screen:update(1 / 120)
+            t.eq(#dts, 0, "a zero-tick render update never steps the simulator")
+            screen:update(1 / 120)
+            screen:update(1 / 30)
+            t.eq(#dts, 3)
+            for _, dt in ipairs(dts) do
+                t.eq(dt, fixed_clock.TICK_SECONDS)
+            end
+            t.eq(screen._clock.tick, 3)
+            t.near(screen.state.time_left, initial_time - 3 * fixed_clock.TICK_SECONDS, 1e-9)
+        end)
+        sim_match.step = original_step
+        love.keyboard = saved_keyboard
+        assert(ok, err)
     end)
 end)
 

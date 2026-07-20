@@ -92,7 +92,7 @@ function RealMatch:update(dt)
     self.match:update(dt)
     local elapsed = before - self.match.state.time_left
     if elapsed > 0 then
-        match_observer.observe(self.observer, self.match.state, elapsed)
+        match_observer.observe(self.observer, self.match.state, elapsed, self.match._frame_events)
     end
     if self.match.state.finished then
         self.full_time_elapsed = self.full_time_elapsed + dt

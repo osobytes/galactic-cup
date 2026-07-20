@@ -7,6 +7,7 @@
 local Vec2 = require("core.vec2")
 local match = require("sim.match")
 local bot = require("sim.bot")
+local fixed_clock = require("sim.fixed_clock")
 local metrics = require("sim.metrics")
 local tuning = require("sim.tuning")
 local teams = require("data.teams")
@@ -14,7 +15,7 @@ local teams = require("data.teams")
 local headless = {}
 
 local FIELD = { w = 960, h = 540 } -- the real game's pitch (game/screens/match.lua)
-local DT = 1 / 60 -- fixed step: matches the game loop, keeps runs reproducible
+local DT = fixed_clock.TICK_SECONDS
 local DEFAULT_DURATION = 120
 local DEFAULT_MAX_GOALS = 3
 local MAX_STEPS_SLACK = 600 -- overtime guard: a stuck sim must not hang the batch
@@ -116,6 +117,7 @@ function headless.run_match(opts)
     -- Metrics only fold MatchState/events; they never read bot or controlled-side
     -- state, so the same collector is valid for home-proxy and all-AI fixtures.
     local c = metrics.new(s)
+    local clock = fixed_clock.new()
 
     local max_steps = math.ceil(duration / DT) + MAX_STEPS_SLACK
     for _ = 1, max_steps do
@@ -123,8 +125,14 @@ function headless.run_match(opts)
             break
         end
         local input = b and bot.input(b, s, DT) or NO_INPUT
-        match.step(s, DT, input)
-        metrics.observe(c, s, DT)
+        local _, continue = fixed_clock.step(clock, input, function(_, tick_input)
+            match.step(s, DT, tick_input)
+            metrics.observe(c, s, DT)
+            return not s.finished
+        end)
+        if not continue then
+            break
+        end
     end
 
     if saved ~= nil then

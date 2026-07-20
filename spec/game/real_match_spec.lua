@@ -47,6 +47,23 @@ t.describe("real match observer", function()
         t.eq(summary.home_stats.possession, 1)
         t.eq(summary.mvp_player_id, home_id)
     end)
+
+    t.it("can observe every event produced by a multi-tick render update", function()
+        local match = Match.new()
+        local state = match.state
+        local value = match_observer.new(state)
+        local home_id = state.players[2].id
+        state.events = {}
+
+        match_observer.observe(value, state, 2 / 60, {
+            { kind = "pass", x = 0, y = 0, player = home_id },
+            { kind = "shot", x = 0, y = 0, player = home_id },
+        })
+
+        local summary = match_observer.finish(value)
+        t.eq(summary.home_stats.shots, 1)
+        t.eq(summary.home_stats.pass_completion, 1)
+    end)
 end)
 
 t.describe("real match adapter", function()

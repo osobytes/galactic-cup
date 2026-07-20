@@ -2,6 +2,7 @@
 -- `sim.match`, and renders the result. Drawing lives ONLY here (AGENTS.md §2).
 
 local sim_match = require("sim.match")
+local fixed_clock = require("sim.fixed_clock")
 local arenas = require("data.arenas")
 local teams = require("data.teams")
 local tactics = require("data.tactics")
@@ -15,6 +16,7 @@ local match_hud = require("game.match_hud")
 local onboarding = require("game.match_onboarding")
 local tuning_panel = require("game.ui.tuning_panel")
 local replay = require("game.render.replay")
+local match_input_adapter = require("game.match_input_adapter")
 local Vec2 = require("core.vec2")
 
 local FIELD_W = 960
@@ -50,6 +52,9 @@ local FIELD_H = 540
 ---@field _dash boolean
 ---@field _dodge boolean
 ---@field _space_held_prev boolean  -- tracks Space held off the ball for jockey stance
+---@field _clock FixedClockState
+---@field _input_adapter MatchInputAdapterState
+---@field _frame_events MatchEvent[] -- Events produced by every simulation tick in the latest render update.
 local Match = {}
 Match.__index = Match
 
@@ -89,6 +94,9 @@ function Match:restart()
     self._pass_held_prev = false
     self._lob_latch = false
     self._space_held_prev = false
+    self._clock = fixed_clock.new()
+    self._input_adapter = match_input_adapter.new()
+    self._frame_events = {}
     self._last_score = 0
     self._last_home = 0
     self._last_scoring_team = nil
@@ -250,11 +258,10 @@ function Match:update(dt)
         return
     end
     if self.state.finished then
-        audio.update(self.state, dt)
+        audio.tick(dt)
         return
     end
     self._kickoff_banner = math.max(0, self._kickoff_banner - dt)
-    replay.record(self.state) -- pre-step: the goal flight stays in the buffer
     -- Space reads as "shoot" while carrying (hold to charge, release to fire);
     -- off the ball it is "jockey" while held and fires the poke on release
     -- — mirroring the on-ball hold/release pattern so muscle memory transfers.
@@ -280,7 +287,7 @@ function Match:update(dt)
     end
     local move = read_move_axis()
     ---@type MatchInput
-    local input = {
+    local frame_input = {
         move = move,
         shoot = self._shoot_held_prev and not held, -- fire on release
         shoot_held = held,
@@ -299,10 +306,37 @@ function Match:update(dt)
     self._pass_held_prev = k_held
     self._space_held_prev = space_down_offball
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
-    sim_match.step(self.state, dt, input)
+
+    -- Render input is sampled every update, then the adapter holds one-shot
+    -- edges until a canonical simulation tick consumes them. A fast display
+    -- therefore cannot drop an action merely because this render update makes
+    -- zero simulation progress.
+    self._input_adapter = match_input_adapter.sample(self._input_adapter, frame_input)
+    self._frame_events = {}
+    fixed_clock.advance(self._clock, dt, function(_)
+        local next, tick_input = match_input_adapter.next_tick(self._input_adapter)
+        self._input_adapter = next
+        return tick_input
+    end, function(_, tick_input)
+        replay.record(self.state) -- Pre-step, so the goal flight remains in the buffer.
+        local score_before = self.state.score.home + self.state.score.away
+        sim_match.step(self.state, fixed_clock.TICK_SECONDS, tick_input)
+        for _, event in ipairs(self.state.events) do
+            self._frame_events[#self._frame_events + 1] = event
+        end
+        effects.consume(self.state)
+        audio.consume(self.state)
+        -- Preserve the existing goal beat: stop this catch-up batch as soon as
+        -- a live goal is scored, then the render update starts its replay.
+        local scored = self.state.score.home + self.state.score.away > score_before
+        return not self.state.finished and not scored
+    end)
+
+    -- Presentation is never a second simulation authority. It follows normal
+    -- render dt even on frames that consume zero or several simulation ticks.
     view_state.update(self.state.players, dt)
-    effects.update(self.state, dt) -- juice layer: event bursts + ball trail
-    audio.update(self.state, dt) -- synthesized SFX from event queue
+    effects.tick(dt)
+    audio.tick(dt)
     local controlled = self.state.players[self.state.controlled]
     local owner = self.state.owner and self.state.players[self.state.owner] or nil
     self._onboarding = onboarding.update(self._onboarding, {
@@ -311,10 +345,10 @@ function Match:update(dt)
         keeper_holding = self.state.owner == self.state.controlled
             and controlled.is_keeper
             and not controlled.feet_ball,
-        moved = move:length() > 0.2 or input.sprint,
-        shot = input.shoot or input.shoot_held,
-        passed = input.pass or input.pass_held,
-        defended = input.jockey or input.dash or input.switch,
+        moved = move:length() > 0.2 or frame_input.sprint,
+        shot = frame_input.shoot or frame_input.shoot_held,
+        passed = frame_input.pass or frame_input.pass_held,
+        defended = frame_input.jockey or frame_input.dash or frame_input.switch,
     }, dt)
 
     -- A goal just went in (score edge, match still live): celebrate, then roll

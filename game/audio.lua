@@ -53,6 +53,7 @@ local _sfx = {}
 local _prev_score_home = 0
 local _prev_score_away = 0
 local _prev_finished = false
+local _prev_time_left = -1
 local _crowd_swell_t = 0.0 -- countdown for crowd swell (seconds remaining)
 local CROWD_SWELL_DUR = 3.0
 
@@ -403,12 +404,10 @@ function audio.tick(dt)
     end
 end
 
---- Drain state.events and play the matching SFX. Also handles score-edge
---- detection for the goal sound and crowd swell, and keeps the crowd loop
---- alive. Call after effects.update each frame.
+-- Consume one simulated state's events and score edges. Continuous ambience is
+-- deliberately advanced separately by `tick` at the display's cadence.
 ---@param state MatchState
----@param dt number
-function audio.update(state, dt)
+function audio.consume(state)
     if not love.audio or not love.sound then
         return
     end
@@ -455,32 +454,20 @@ function audio.update(state, dt)
     end
     _prev_finished = state.finished
 
-    -- Kickoff detection: state.time_left near full and no owner (initial or
-    -- post-goal restart). We fire the whistle once per kickoff via a simple
-    -- edge: detect when time_left just reset to max (near the maximum value).
-    -- We track the previous time_left to catch a rising edge.
-    -- (Kickoff is signalled separately; see _prev_time_left tracking below.)
-
-    audio.tick(dt)
-end
-
--- Track previous time_left for kickoff edge detection (module-level).
-local _prev_time_left = -1
-
--- Kick-off whistle: fires whenever time_left jumps UP (reset after a goal or
--- fresh match start). We detect this as time_left > _prev_time_left + 1.
--- Override update to include kickoff logic (replace the one above):
-local _base_update = audio.update
----@param state MatchState
----@param dt number
-function audio.update(state, dt)
     -- Kickoff edge: time reset upward (new match or post-goal)
     if _prev_time_left >= 0 and state.time_left > _prev_time_left + 1 then
         play("kickoff")
     end
     _prev_time_left = state.time_left
+end
 
-    _base_update(state, dt)
+-- Compatibility helper for callers that have one simulation step per render
+-- frame. Fixed-clock callers consume every tick then advance ambience once.
+---@param state MatchState
+---@param dt number
+function audio.update(state, dt)
+    audio.consume(state)
+    audio.tick(dt)
 end
 
 --- Reset audio state for a new match (stop crowd swell, re-sync score refs).
