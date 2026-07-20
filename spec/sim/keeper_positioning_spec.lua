@@ -41,8 +41,11 @@ end
 
 ---@param keeper_mental integer
 ---@param ball_pos Vec2
+---@param defending_team "home"|"away"?
 ---@return KeeperPositionScenario
-local function scenario(keeper_mental, ball_pos)
+local function scenario(keeper_mental, ball_pos, defending_team)
+    defending_team = defending_team or "home"
+    local attacking_team = defending_team == "home" and "away" or "home"
     local by_id = player_index(keeper_mental)
     local ownership = match.ownership_for_teams(teams.nebula, teams.orion, by_id)
     local state = match.new({
@@ -55,9 +58,9 @@ local function scenario(keeper_mental, ball_pos)
     })
     local keeper_idx, carrier_idx, support_idx
     for index, player in ipairs(state.players) do
-        if player.team == "home" and player.is_keeper then
+        if player.team == defending_team and player.is_keeper then
             keeper_idx = index
-        elseif player.team == "away" and not player.is_keeper then
+        elseif player.team == attacking_team and not player.is_keeper then
             if not carrier_idx then
                 carrier_idx = index
             elseif not support_idx then
@@ -86,11 +89,12 @@ local function scenario(keeper_mental, ball_pos)
     end
 
     local defending_keeper = state.players[keeper_idx_value]
-    defending_keeper.pos = Vec2.new(12, 270)
+    defending_keeper.pos = Vec2.new(defending_team == "home" and 12 or state.field.w - 12, 270)
     defending_keeper.anchor = defending_keeper.pos
     local carrier = state.players[carrier_idx_value]
-    carrier.facing = Vec2.new(-1, 0)
-    carrier.pos = ball_pos:add(Vec2.new(18, 0))
+    local facing_x = carrier.team == "home" and 1 or -1
+    carrier.facing = Vec2.new(facing_x, 0)
+    carrier.pos = ball_pos:add(Vec2.new(-facing_x * 18, 0))
     carrier.anchor = carrier.pos
     state.owner = carrier_idx_value
     state.ball = ball_pos
@@ -107,8 +111,9 @@ local function scenario(keeper_mental, ball_pos)
 end
 
 ---@param state MatchState
-local function step(state)
-    match.step(state, DT, assert(input_frame.neutral(state.input_tick)))
+---@param frame InputFrame?
+local function step(state, frame)
+    match.step(state, DT, frame or assert(input_frame.neutral(state.input_tick)))
 end
 
 ---@param state MatchState
@@ -116,9 +121,10 @@ end
 ---@param ball_pos Vec2
 local function move_carrier(state, carrier_idx, ball_pos)
     local carrier = state.players[carrier_idx]
-    carrier.pos = ball_pos:add(Vec2.new(18, 0))
+    local facing_x = carrier.team == "home" and 1 or -1
+    carrier.pos = ball_pos:add(Vec2.new(-facing_x * 18, 0))
     carrier.anchor = carrier.pos
-    carrier.facing = Vec2.new(-1, 0)
+    carrier.facing = Vec2.new(facing_x, 0)
     carrier.vel = Vec2.new(0, 0)
     carrier.run_vel = Vec2.new(0, 0)
     state.ball = ball_pos
@@ -196,30 +202,52 @@ t.describe("keeper arc positioning integration", function()
         )
     end)
 
-    t.it(
-        "uses the exact claim depth and conservative support radius for 1v1 eligibility",
-        function()
-            local at_depth = scenario(8, Vec2.new(CLAIM_DEPTH, 220))
-            step(at_depth.state)
-            t.is_true(at_depth.state.players[at_depth.keeper].keeper_1v1_target ~= nil)
+    t.it("uses the exact claim depth for 1v1 eligibility", function()
+        local at_depth = scenario(8, Vec2.new(CLAIM_DEPTH, 220))
+        step(at_depth.state)
+        t.is_true(at_depth.state.players[at_depth.keeper].keeper_1v1_target ~= nil)
 
-            local beyond_depth = scenario(8, Vec2.new(CLAIM_DEPTH + 0.01, 220))
-            step(beyond_depth.state)
-            t.eq(beyond_depth.state.players[beyond_depth.keeper].keeper_1v1_target, nil)
+        local beyond_depth = scenario(8, Vec2.new(CLAIM_DEPTH + 0.01, 220))
+        step(beyond_depth.state)
+        t.eq(beyond_depth.state.players[beyond_depth.keeper].keeper_1v1_target, nil)
+    end)
 
-            local supported = scenario(8, Vec2.new(150, 220))
+    t.it("uses the exact support boundary at both goals", function()
+        for _, direction in ipairs({
+            { defending_team = "home", ball = Vec2.new(150, 220) },
+            { defending_team = "away", ball = Vec2.new(810, 220) },
+        }) do
+            local supported = scenario(8, direction.ball, direction.defending_team)
             supported.state.players[supported.support].pos =
                 supported.state.players[supported.carrier].pos:add(Vec2.new(0, KEEPER_1V1_SUPPORT))
             step(supported.state)
             t.eq(supported.state.players[supported.keeper].keeper_1v1_target, nil)
 
-            local alone = scenario(8, Vec2.new(150, 220))
+            local alone = scenario(8, direction.ball, direction.defending_team)
             alone.state.players[alone.support].pos =
                 alone.state.players[alone.carrier].pos:add(Vec2.new(0, KEEPER_1V1_SUPPORT + 0.01))
             step(alone.state)
             t.is_true(alone.state.players[alone.keeper].keeper_1v1_target ~= nil)
         end
-    )
+    end)
+
+    t.it("uses top-of-tick support positions at both goals", function()
+        for _, direction in ipairs({
+            { defending_team = "home", ball = Vec2.new(150, 220) },
+            { defending_team = "away", ball = Vec2.new(810, 220) },
+        }) do
+            local value = scenario(8, direction.ball, direction.defending_team)
+            local support = value.state.players[value.support]
+            support.pos =
+                value.state.players[value.carrier].pos:add(Vec2.new(0, KEEPER_1V1_SUPPORT + 0.01))
+            support.anchor = support.pos
+            local frame = assert(input_frame.neutral(value.state.input_tick))
+            local support_slot = assert(value.state.slot_for_player[value.support])
+            frame.slots[support_slot] = assert(input_frame.new_sample({ move_y = -127 }))
+            step(value.state, frame)
+            t.is_true(value.state.players[value.keeper].keeper_1v1_target ~= nil)
+        end
+    end)
 
     t.it("enters hold-and-narrow at the inclusive 0.6 anticipation gate", function()
         local at_gate = scenario(6, Vec2.new(150, 220))
@@ -237,14 +265,24 @@ t.describe("keeper arc positioning integration", function()
         )
     end)
 
-    t.it("locks the 1v1 target laterally while the carrier feints", function()
+    t.it("recomputes 1v1 depth while locking the lateral target", function()
         local value = locked_scenario()
         local defending_keeper = value.state.players[value.keeper]
         local locked = assert(defending_keeper.keeper_1v1_target)
-        move_carrier(value.state, value.carrier, Vec2.new(150, 340))
+        local advanced_ball = Vec2.new(100, 270)
+        local expected = keeper.arc_target({
+            keeper_pos = defending_keeper.pos,
+            ball_pos = advanced_ball,
+            goal = value.state.goal_home,
+            team = "home",
+            aggression = defending_keeper.keeper_aggression,
+            in_1v1 = true,
+        })
+        move_carrier(value.state, value.carrier, advanced_ball)
         step(value.state)
         local after = assert(defending_keeper.keeper_1v1_target)
-        t.eq(after.x, locked.x)
+        t.near(after.x, expected.x, 1e-9, "the keeper continues narrowing with current geometry")
+        t.is_true(after.x > locked.x, "the updated geometry changes the depth target")
         t.eq(after.y, locked.y)
     end)
 end)

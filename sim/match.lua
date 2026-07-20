@@ -2374,25 +2374,27 @@ local function move_players(s, dt, inputs)
                 apply_locomotion(s, p, desired, dt)
             else
                 -- Hold the angle-bisected arc. A composed keeper facing a lone
-                -- carrier locks one hold-and-narrow target on entry; its
-                -- lateral component cannot chase feints before the shot.
+                -- carrier locks the lateral component on entry so it cannot
+                -- chase feints, while depth keeps narrowing with the play.
                 local goal = (p.team == "home") and s.goal_home or s.goal_away
                 -- The support scan is scoped to this keeper branch: no
                 -- per-player global O(players^2) pass.
-                local carrier = s.owner and s.players[s.owner] or nil
+                local carrier_idx = s.owner
+                local carrier = carrier_idx and s.players[carrier_idx] or nil
                 if
                     carrier
                     and (carrier.is_keeper or carrier.team == p.team or not in_claim_zone(s, p))
                 then
                     carrier = nil
                 end
-                if carrier then
-                    for _, support in ipairs(s.players) do
+                if carrier and carrier_idx then
+                    local carrier_pos = prev[carrier_idx]
+                    for support_idx, support in ipairs(s.players) do
                         if
-                            support ~= carrier
+                            support_idx ~= carrier_idx
                             and support.team == carrier.team
                             and not support.is_keeper
-                            and support.pos:dist(carrier.pos) <= KEEPER_1V1_SUPPORT
+                            and prev[support_idx]:dist(carrier_pos) <= KEEPER_1V1_SUPPORT
                         then
                             carrier = nil
                             break
@@ -2402,21 +2404,23 @@ local function move_players(s, dt, inputs)
                 local in_1v1 = carrier ~= nil and p.keeper_anticipation >= 0.6
                 local target
                 if in_1v1 then
-                    if not p.keeper_1v1_target then
-                        p.keeper_1v1_target = keeper.arc_target({
-                            keeper_pos = p.pos,
-                            ball_pos = s.ball,
-                            goal = goal,
-                            team = p.team,
-                            aggression = p.keeper_aggression,
-                            in_1v1 = true,
-                        })
+                    local fresh_target = keeper.arc_target({
+                        keeper_pos = prev[i],
+                        ball_pos = s.ball,
+                        goal = goal,
+                        team = p.team,
+                        aggression = p.keeper_aggression,
+                        in_1v1 = true,
+                    })
+                    if p.keeper_1v1_target then
+                        fresh_target = Vec2.new(fresh_target.x, p.keeper_1v1_target.y)
                     end
-                    target = assert(p.keeper_1v1_target)
+                    p.keeper_1v1_target = fresh_target
+                    target = fresh_target
                 else
                     p.keeper_1v1_target = nil
                     target = keeper.arc_target({
-                        keeper_pos = p.pos,
+                        keeper_pos = prev[i],
                         ball_pos = s.ball,
                         goal = goal,
                         team = p.team,
