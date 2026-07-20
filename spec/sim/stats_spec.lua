@@ -4,13 +4,15 @@ local stats = require("sim.stats")
 ---@param pace integer
 ---@param strength integer
 ---@param mental integer?
+---@param technique integer?
+---@param stamina integer?
 ---@return StatBlock
-local function block(pace, strength, mental)
+local function block(pace, strength, mental, technique, stamina)
     return {
         pace = pace,
         strength = strength,
-        technique = 5,
-        stamina = 5,
+        technique = technique or 5,
+        stamina = stamina or 5,
         mental = mental or 5,
     }
 end
@@ -39,5 +41,71 @@ t.describe("stats", function()
         local unsettled = stats.keeper_reach(block(4, 5, 2))
         t.eq(composed, 78, "the migrated mental value keeps the existing reach mapping")
         t.is_true(composed > unsettled, "mental should improve derived defensive reach")
+    end)
+
+    t.it("maps keeper anticipation exactly and clamps it to the unit interval", function()
+        t.eq(stats.keeper_anticipation(block(5, 5, 0)), 0)
+        t.eq(stats.keeper_anticipation(block(5, 5, 5)), 0.5)
+        t.eq(stats.keeper_anticipation(block(5, 5, 10)), 1)
+        t.eq(stats.keeper_anticipation(block(5, 5, -2)), 0)
+        t.eq(stats.keeper_anticipation(block(5, 5, 12)), 1)
+    end)
+
+    t.it("never lowers keeper anticipation as mental increases", function()
+        local previous = stats.keeper_anticipation(block(5, 5, 0))
+        for mental = 1, 10 do
+            local current = stats.keeper_anticipation(block(5, 5, mental))
+            t.is_true(current >= previous)
+            previous = current
+        end
+    end)
+
+    t.it("maps keeper aggression to a conservative positive pixel distance", function()
+        t.eq(stats.keeper_aggression(block(0, 5, 0)), 18)
+        t.eq(stats.keeper_aggression(block(5, 5, 5)), 38)
+        t.eq(stats.keeper_aggression(block(10, 5, 10)), 58)
+    end)
+
+    t.it("never lowers keeper aggression as pace increases", function()
+        local previous = stats.keeper_aggression(block(0, 5, 5))
+        for pace = 1, 10 do
+            local current = stats.keeper_aggression(block(pace, 5, 5))
+            t.is_true(current >= previous)
+            previous = current
+        end
+    end)
+
+    t.it("never lowers keeper aggression as mental increases", function()
+        local previous = stats.keeper_aggression(block(5, 5, 0))
+        for mental = 1, 10 do
+            local current = stats.keeper_aggression(block(5, 5, mental))
+            t.is_true(current >= previous)
+            previous = current
+        end
+    end)
+
+    t.it("maps keeper distribution accuracy exactly and clamps it to the unit interval", function()
+        t.eq(stats.keeper_distribution_accuracy(block(5, 5, 5, 0)), 0)
+        t.eq(stats.keeper_distribution_accuracy(block(5, 5, 5, 5)), 0.5)
+        t.eq(stats.keeper_distribution_accuracy(block(5, 5, 5, 10)), 1)
+        t.eq(stats.keeper_distribution_accuracy(block(5, 5, 5, -2)), 0)
+        t.eq(stats.keeper_distribution_accuracy(block(5, 5, 5, 12)), 1)
+    end)
+
+    t.it("never lowers keeper distribution accuracy as technique increases", function()
+        local previous = stats.keeper_distribution_accuracy(block(5, 5, 5, 0))
+        for technique = 1, 10 do
+            local current = stats.keeper_distribution_accuracy(block(5, 5, 5, technique))
+            t.is_true(current >= previous)
+            previous = current
+        end
+    end)
+
+    t.it("does not use strength or stamina in the new keeper derivations", function()
+        local low = block(5, 0, 5, 5, 0)
+        local high = block(5, 10, 5, 5, 10)
+        t.eq(stats.keeper_anticipation(low), stats.keeper_anticipation(high))
+        t.eq(stats.keeper_aggression(low), stats.keeper_aggression(high))
+        t.eq(stats.keeper_distribution_accuracy(low), stats.keeper_distribution_accuracy(high))
     end)
 end)

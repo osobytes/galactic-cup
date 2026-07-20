@@ -79,6 +79,12 @@ local BASE_REACH = 22 -- dive radius (px) at mental 0
 local REACH_PER_MENTAL = 6 -- px per mental point
 local REACH_PER_PACE = 2 -- px per pace point (diving range)
 
+-- Conservative first-pass positioning depth. Canonical 0..10 stats produce
+-- 18..58 px, leaving later fixed-seed calibration to the goalkeeper milestone.
+local BASE_KEEPER_AGGRESSION = 18 -- px at pace 0 and mental 0
+local KEEPER_AGGRESSION_PER_PACE = 2 -- px per pace point
+local KEEPER_AGGRESSION_PER_MENTAL = 2 -- px per mental point
+
 ---@param s StatBlock
 ---@return number px  -- how far the keeper can get a hand to a shot
 function stats.keeper_reach(s)
@@ -89,6 +95,26 @@ end
 ---@return number  -- 0..1 clean-handling factor (higher = catches harder shots)
 function stats.keeper_handling(s)
     return math.min(1, s.technique / 10)
+end
+
+---@param s StatBlock
+---@return number anticipation  -- 0..1 mental-led shot-reading quality
+function stats.keeper_anticipation(s)
+    return math.max(0, math.min(1, s.mental / 10))
+end
+
+---@param s StatBlock
+---@return number pixels  -- positive positioning-depth cap; 18..58 for canonical stats
+function stats.keeper_aggression(s)
+    return BASE_KEEPER_AGGRESSION
+        + s.pace * KEEPER_AGGRESSION_PER_PACE
+        + s.mental * KEEPER_AGGRESSION_PER_MENTAL
+end
+
+---@param s StatBlock
+---@return number accuracy  -- 0..1 technique-led hand-distribution accuracy
+function stats.keeper_distribution_accuracy(s)
+    return math.max(0, math.min(1, s.technique / 10))
 end
 
 return stats
