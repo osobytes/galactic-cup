@@ -249,6 +249,27 @@ t.describe("keeper arc positioning integration", function()
         end
     end)
 
+    t.it("uses the top-of-tick carrier position when it crosses the support boundary", function()
+        local value = scenario(8, Vec2.new(810, 220), "away")
+        local carrier = value.state.players[value.carrier]
+        local support = value.state.players[value.support]
+        local carrier_start = carrier.pos
+        support.pos = carrier.pos:add(Vec2.new(0, KEEPER_1V1_SUPPORT + 0.01))
+        support.anchor = support.pos
+        local frame = assert(input_frame.neutral(value.state.input_tick))
+        local carrier_slot = assert(value.state.slot_for_player[value.carrier])
+        frame.slots[carrier_slot] = assert(input_frame.new_sample({ move_y = 127 }))
+
+        step(value.state, frame)
+
+        t.is_true(carrier.pos.y > carrier_start.y, "precondition: carrier moved toward support")
+        t.is_true(
+            carrier.pos:dist(support.pos) <= KEEPER_1V1_SUPPORT,
+            "precondition: live positions crossed the support threshold"
+        )
+        t.is_true(value.state.players[value.keeper].keeper_1v1_target ~= nil)
+    end)
+
     t.it("enters hold-and-narrow at the inclusive 0.6 anticipation gate", function()
         local at_gate = scenario(6, Vec2.new(150, 220))
         step(at_gate.state)

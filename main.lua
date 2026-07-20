@@ -3,6 +3,8 @@
 --   love . --test             -> run the headless test suite and exit with status code
 --   love . --sim [n]          -> play n unattended matches, print fun-proxy metrics, exit
 --   love . --snapshot-measure [n] -> measure canonical snapshot operations n times
+--   love . --determinism      -> verify the frozen OMP-1 complete-match evidence
+--   love . --determinism-refresh -> deliberately replace the frozen OMP-1 recording
 --   love . --rate-validate [n] -> validate frozen squad ratings over n paired seeds, exit
 --   love . --levers [n]       -> paired liveness checks for built-in manager levers, exit
 --   love . --sweep [n]        -> per-knob min/max sensitivity sweep over n seeds, exit
@@ -130,6 +132,81 @@ if has_flag("--snapshot-measure") then
         )
         os.exit(0)
     end
+    return
+end
+
+if has_flag("--determinism-refresh") then
+    function love.load()
+        local evidence = require("sim.determinism_evidence")
+        local recording = evidence.record()
+        local path = "data/omp1_determinism.lua"
+        local file = assert(io.open(path, "w"))
+        file:write(evidence.serialize_recording(recording))
+        file:close()
+        print(
+            ("determinism fixture refreshed: %s (%d frames, %d boundaries)"):format(
+                path,
+                #recording.frame_wires,
+                #recording.boundary_hashes
+            )
+        )
+        os.exit(0)
+    end
+    return
+end
+
+if has_flag("--determinism") then
+    local evidence = require("sim.determinism_evidence")
+    ---@type DeterminismCampaign?
+    local browser_campaign
+
+    ---@param result DeterminismEvidenceResult
+    ---@return string
+    local function runtime_report(result)
+        local major, minor, revision = love.getVersion()
+        return evidence.report(result) .. ("|love=%d.%d.%d"):format(major, minor, revision)
+    end
+
+    local function run_native_determinism()
+        local ok, result = pcall(evidence.verify)
+        print(
+            ok and runtime_report(result)
+                or ("GC_DETERMINISM|failure|message=" .. tostring(result):gsub("|", "/"))
+        )
+        os.exit(ok and 0 or 1)
+    end
+
+    function love.load()
+        if has_flag("--browser-runtime") then
+            local ok, campaign = pcall(evidence.new_campaign, false)
+            if ok then
+                browser_campaign = campaign
+            else
+                print("GC_DETERMINISM|failure|message=" .. tostring(campaign):gsub("|", "/"))
+                love.event.quit(1)
+            end
+        else
+            run_native_determinism()
+        end
+    end
+
+    function love.update()
+        if browser_campaign then
+            local ok, result = pcall(evidence.step_campaign, browser_campaign, 30)
+            if not ok then
+                print("GC_DETERMINISM|failure|message=" .. tostring(result):gsub("|", "/"))
+                browser_campaign = nil
+                love.event.quit(1)
+            elseif result then
+                print(runtime_report(result))
+                browser_campaign = nil
+                love.event.quit(0)
+            end
+        end
+    end
+
+    function love.draw() end
+
     return
 end
 

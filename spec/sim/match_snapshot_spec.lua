@@ -61,6 +61,8 @@ t.describe("canonical match snapshots", function()
             vz = 123,
             spin = -8,
         }
+        state.players[2].save_style = "stretch"
+        state.players[2].save_tip_emitted = true
         state.events[1] = {
             kind = "header",
             x = 44,
@@ -71,6 +73,13 @@ t.describe("canonical match snapshots", function()
             jumping = true,
             difficulty = 0.4,
         }
+        state.events[2] = {
+            kind = "catch",
+            x = 66,
+            y = 77,
+            player = state.players[1].id,
+            save_style = "spread",
+        }
         local snapshot = match_snapshot.capture(state)
         local restored = match_snapshot.restore(snapshot)
 
@@ -78,10 +87,14 @@ t.describe("canonical match snapshots", function()
         state.players[1].keeper_1v1_target.x = -101
         state.players[2].windup_shot.dir.y = 99
         state.events[1].x = 999
+        state.events[2].save_style = "central"
         t.is_true(snapshot.state.players[2].pos.x ~= -100)
         t.eq(snapshot.state.players[1].keeper_1v1_target.x, 40)
         t.eq(snapshot.state.players[2].windup_shot.dir.y, -0.75)
+        t.eq(snapshot.state.players[2].save_style, "stretch")
+        t.is_true(snapshot.state.players[2].save_tip_emitted)
         t.eq(snapshot.state.events[1].x, 44)
+        t.eq(snapshot.state.events[2].save_style, "spread")
 
         snapshot.state.players[2].pos.y = -200
         snapshot.state.players[1].keeper_1v1_target.y = -201
@@ -92,6 +105,7 @@ t.describe("canonical match snapshots", function()
         t.near(restored.players[1].keeper_anticipation, state.players[1].keeper_anticipation)
         t.eq(restored.players[2].windup_shot.speed, 456)
         t.near(restored.players[2].windup_shot.dir:length(), math.sqrt(0.625))
+        t.eq(restored.events[2].save_style, "spread")
     end)
 
     t.it("converges snapshot advance restore and replay at every boundary", function()

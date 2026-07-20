@@ -17,7 +17,19 @@ function love.conf(t)
     t.identity = "galactic_cup"
     t.version = "11.5"
 
-    local headless_flags = { "--test", "--sim", "--sweep", "--search", "--eval", "--tripwire" }
+    local headless_flags = {
+        "--test",
+        "--sim",
+        "--sweep",
+        "--search",
+        "--eval",
+        "--tripwire",
+        "--snapshot-measure",
+        "--determinism-refresh",
+    }
+    if not has_flag("--browser-runtime") then
+        headless_flags[#headless_flags + 1] = "--determinism"
+    end
     local headless = false
     for _, f in ipairs(headless_flags) do
         headless = headless or has_flag(f)

@@ -1,0 +1,217 @@
+# OMP-1 determinism evidence
+
+Status: **native pass on the authoritative snapshot-v3 fixture; current
+Chrome/Firefox v3 verification is enforced by CI**. The accepted snapshot-v1
+browser evidence remains preserved as a historical artifact below.
+
+This report closes the OMP-1 evidence line. It proves that one complete,
+recorded eight-slot fixture has a stable state boundary after every fixed
+tick, that selected restore/replay windows converge, and that the existing
+offline product flow remains covered. It does not implement prediction,
+rollback, transport, rooms, or network presentation.
+
+## Authoritative fixture
+
+The checked-in `data.omp1_determinism` table is the immutable tape artifact.
+It contains 7,201 canonical `InputFrame` wires (all eight stable outfield rows
+on every frame), the matching 7,202 start-of-tick snapshot hashes, identity,
+event counts, and restore windows. The source bot policy and its RNG are not
+used during verification. A same-schema explicit refresh materializes a
+replacement recording from those sources; a snapshot-schema migration replays
+and preserves the existing canonical wires while regenerating state hashes and
+outcomes.
+
+| Identity field | Frozen value |
+| --- | --- |
+| Fixture | `omp1-nebula-orion-eight-streams-v1` |
+| Tape / input / snapshot versions | `1 / 1 / 3` |
+| Build | `omp1-determinism-v1` |
+| Source | `issue-39-canonical-recording-v1` |
+| Content | `nebula-orion-showcase-content-v1` |
+| Configuration | `field=960x540;duration=120;max_goals=3;tick_rate=60` |
+| Tuning | Exact default blob (the canonical serialization is empty) |
+| Match seed | `19` |
+| Recorded source seeds | `1997, 2094, 2191, 2288, 2385, 2482, 2579, 2676` |
+| Ownership | Nebula and Orion five-player rosters; four fixed outfield slots per side |
+
+The nominal 120-second match consumes input ticks `0..7200`, then finishes at
+boundary `7201`. The extra terminal tick comes from the existing repeated
+floating-point countdown rather than a change to the 60 Hz authority. OMP-2
+must preserve this recorded boundary or deliberately replace the countdown
+with an integer tick budget and version the fixture.
+
+## Hash and repeated-run result
+
+Every boundary is encoded with canonical snapshot version 3 and hashed with
+the browser-safe FNV-1a-64 implementation. Verification performs these three
+checks:
+
+1. Two independently constructed matches agree at every boundary.
+2. Each observed boundary agrees with its literal checked-in hash.
+3. FNV-1a-64 over the ordered newline-delimited boundary hashes agrees with
+   the pinned sequence digest.
+
+The authoritative values are:
+
+```text
+boundaries=7202
+final_hash=fcfe952aae2dfc42
+sequence_digest=b99bb535f5941496
+score=0-1
+outcome=away
+final_snapshot_bytes=17913
+```
+
+The complete match produced:
+
+```text
+catch=2 claim=1 header=3 pass=3 reception=1 shot=2
+tackle=146 touch=179
+```
+
+`sim.determinism_evidence` reports the causal tick and expected/actual hash on
+the first mismatch. A normal verification cannot regenerate its expectation.
+The deliberate refresh command is separate:
+
+```sh
+love . --determinism-refresh
+```
+
+Refreshing the recording is a snapshot/input contract change. During this v3
+schema migration, all 7,201 input wires remained byte-identical to the v2
+fixture on `origin/main` (SHA-256
+`d4419bed5842f4f54785ef5876b2c18e56b38212e716b91e76f36cc1c1556686`).
+Review the identity, wire comparison, every changed hash, event counts, score,
+and restore windows before committing it.
+
+## Restore/replay windows
+
+The complete pass captures start-of-window snapshots. Each window is later
+restored independently, advanced with the same frozen wires, and compared
+against every pinned boundary:
+
+| Scenario | Start boundary | Last boundary | Required transition |
+| --- | ---: | ---: | --- |
+| Tackle | 23 | 26 | `tackle` at causal tick 24 |
+| Keeper | 1688 | 1693 | `catch` at causal tick 1690 |
+| Aerial | 1784 | 1789 | `header` at causal tick 1786 |
+| Goal / kickoff | 5184 | 5189 | Away goal and home kickoff at causal tick 5186 |
+| Full time | 7198 | 7201 | `finished`, zero time at causal tick 7200 |
+
+This covers routine play in the uninterrupted complete run and the adversarial
+boundaries required before rollback work. The harness uses the same canonical
+identity, effective-frame, snapshot, and boundary-hash shapes as
+`sim.input_tape` and `sim.replay`, while exposing a bounded incremental step
+API so love.js yields to the browser between batches.
+
+## Commands and measurements
+
+The native gate launches two fresh LÖVE processes, compares their complete
+result markers, and then reports the existing snapshot microbenchmark:
+
+```sh
+./scripts/check_determinism.sh
+```
+
+On the development machine (Zorin OS 18.1, Linux x86_64, native LÖVE 11.5),
+1,000 operations at boundary tick 120 measured:
+
+```text
+snapshot_measure version=3 tick=120 bytes=16673 iterations=1000 hash=d77a9fe750157f53
+snapshot_measure encode_us_each=216.524
+snapshot_measure hash_with_encode_us_each=1404.533
+snapshot_measure restore_us_each=100.002
+```
+
+These are observations, not thresholds. The complete two-state native
+verification took approximately 25 seconds on that machine. Browser evidence
+records wall-clock duration per fresh process because WebAssembly timings are
+not interchangeable with native `os.clock` measurements.
+
+For the actual love.js runtime matrix:
+
+```sh
+./scripts/web_build.sh /tmp/omp1-web
+python3 scripts/browser_determinism.py \
+    --artifact /tmp/omp1-web \
+    --output /tmp/omp1-browser-determinism.json
+```
+
+The runner requires a boolean clean-source marker, validates every served byte
+against the manifest, pins the love.js repository/commit/archive, requires one
+result marker and no loader/runtime errors, and verifies bounded process-group
+cleanup. It launches two fresh profiles per required browser and fails, rather
+than skips, if Chrome or Firefox is missing.
+
+## Runtime verification
+
+The authoritative snapshot-v3 fixture passes the native evidence command
+above. CI builds a clean love.js artifact and runs the same current fixture in
+real Chrome and Firefox; that workflow, rather than a hand-edited evidence
+file, supplies the v3 browser integration proof. No historical browser
+evidence file was relabeled as a v3 run.
+
+### Historical snapshot-v1 browser evidence
+
+| Runtime | Executions | Wall time | Historical result |
+| --- | ---: | ---: | --- |
+| Linux Chrome 151.0.7922.34 / pinned love.js 11.5 | Two fresh browser profiles | 207.956 s, 196.828 s | Pass on snapshot v1 |
+| Linux Firefox 152.0.6 / pinned love.js 11.5 | Two fresh browser profiles | 217.953 s, 214.245 s | Pass on snapshot v1 |
+
+Those four historical browser executions produced final hash
+`b379a3a3ab5d7682` and sequence digest `0ff53075e3e626e0`. They are not presented
+as proof for the migrated v3 hashes.
+
+The clean browser artifact was built from source commit `16fad22`, with package
+SHA-256 `2ec87dfa91770ea6b6772444c490808bf4ef7eaf2eca9693a3e7fbca27187f4f`.
+Chrome exited normally. Firefox 152 reached the valid result in both runs but
+its normal quit exceeded 30 seconds; the runner's isolated-process-group
+fallback sent `TERM`, observed geckodriver exit code 0, verified the complete
+group disappeared, and left no Firefox/geckodriver orphan. This is a teardown
+limitation, not a simulation mismatch or silent skip.
+
+The immutable historical machine-readable record, including exact durations,
+driver versions, teardown outcomes, and raw-log hashes, is
+[`evidence/omp1_browser_linux_2026-07-20.json`](evidence/omp1_browser_linux_2026-07-20.json).
+
+## Offline-product compatibility
+
+The deterministic gate is additive and runs before the normal product
+bootstrap only when its explicit flag is present. Native evidence disables
+window/audio modules; browser evidence retains the ordinary love.js window and
+yields through `love.update`.
+
+The full headless suite continues to cover the title → squad → formation →
+tactic → result → rematch loop, repeated rematches, result exits, the real
+match adapter, and browser compatibility flow. The required compatibility
+commands are:
+
+```sh
+love . --test
+./scripts/web_smoke.sh
+```
+
+No offline input mapping, screen route, match request/result contract, or
+browser artifact packaging path is replaced by this evidence work.
+
+## Remaining OMP-2 risks
+
+- The checked-in browser artifact is historical snapshot-v1 evidence. Current
+  snapshot-v3 Chrome/Firefox proof runs in CI and is not a substitute for
+  Windows, macOS, or cross-architecture floating-point evidence.
+- The full-time boundary currently depends on floating countdown semantics
+  and consumes 7,201 inputs for a nominal 7,200-tick duration.
+- Canonical snapshots intentionally include all declared simulation state and
+  are about 15–17 KiB here. OMP-2 needs memory/bandwidth policy before keeping
+  rollback history.
+- The 850 KiB fixture favors auditability and exact per-tick regression
+  diagnosis over repository size. A future compressed format must preserve
+  canonical decoded bytes and versioning.
+- The now-total nearest-player comparator uses descending player index for an
+  exact-distance tie to preserve the existing native outcome, and quantization
+  now canonicalizes negative zero. Other new
+  rankings and numeric boundaries still need explicit total ordering and
+  cross-runtime evidence.
+- This suite proves deterministic replay only. It says nothing about late
+  input policy, prediction quality, resimulation cost, network packet shape,
+  state repair, or transport behavior.

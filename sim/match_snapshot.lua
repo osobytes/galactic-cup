@@ -21,7 +21,7 @@ local input_frame = require("sim.input_frame")
 ---@class MatchSnapshotModule
 local match_snapshot = {}
 
-match_snapshot.VERSION = 2
+match_snapshot.VERSION = 3
 
 match_snapshot.MATCH_FIELDS = {
     "field",
@@ -107,6 +107,8 @@ match_snapshot.PLAYER_FIELDS = {
     "save_pending",
     "save_timer",
     "save_vx",
+    "save_style",
+    "save_tip_emitted",
     "settle_timer",
     "header_cd",
     "aerial_timer",
@@ -143,6 +145,7 @@ local EVENT_FIELDS = {
     "x",
     "y",
     "player",
+    "save_style",
     "style",
     "outcome",
     "jumping",
