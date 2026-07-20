@@ -9,6 +9,13 @@ local tuning = require("sim.tuning")
 ---@class ShortMatchTapeFixture
 local short_match_tape = {}
 
+short_match_tape.EXPECTED_BOUNDARY_HASHES = {
+    "3cf951f32fb879d3",
+    "76138d7a723b3aae",
+    "54a802f8fcddc080",
+    "8a3f178609a0d1e7",
+}
+
 ---@return InputTape tape
 ---@return InputTapeIdentity identity
 function short_match_tape.make()
@@ -42,7 +49,19 @@ function short_match_tape.make()
         tick_rate = fixed_clock.TICK_RATE,
         ownership = ownership,
     }
-    return input_tape.new(identity, match_snapshot.capture(state), frames), identity
+    local tape = input_tape.new(identity, match_snapshot.capture(state), frames)
+    assert(#tape.boundary_hashes == #short_match_tape.EXPECTED_BOUNDARY_HASHES)
+    for index, expected in ipairs(short_match_tape.EXPECTED_BOUNDARY_HASHES) do
+        assert(
+            tape.boundary_hashes[index] == expected,
+            ("short tape boundary %d hash drifted: expected %s, got %s"):format(
+                index - 1,
+                expected,
+                tape.boundary_hashes[index]
+            )
+        )
+    end
+    return tape, identity
 end
 
 return short_match_tape

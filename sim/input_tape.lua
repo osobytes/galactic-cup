@@ -150,6 +150,80 @@ local function copy_ownership(ownership, path)
     return result
 end
 
+---@param ownership InputOwnership
+---@param state MatchState
+---@param path string
+local function assert_ownership_routes(ownership, state, path)
+    local player_index_by_id = {}
+    for index, player in ipairs(state.players) do
+        assert(not player_index_by_id[player.id], path .. " match player ids are not unique")
+        player_index_by_id[player.id] = index
+    end
+
+    local fixture_players = {}
+    local roster_members = { home = {}, away = {} }
+    local roster_count = 0
+    for _, team in ipairs({ "home", "away" }) do
+        local keeper_count = 0
+        for index = 1, input_frame.FIXTURE_TEAM_SIZE do
+            local player_id = ownership.rosters[team][index]
+            local player_index =
+                assert(player_index_by_id[player_id], path .. " roster player is not in the match")
+            local player = state.players[player_index]
+            assert(player.team == team, path .. " roster player belongs to the other match side")
+            assert(not fixture_players[player_id], path .. " fixture roster player is duplicated")
+            fixture_players[player_id] = true
+            roster_members[team][player_id] = true
+            roster_count = roster_count + 1
+            if player.is_keeper then
+                keeper_count = keeper_count + 1
+            end
+        end
+        assert(keeper_count == 1, path .. " fixture side must contain exactly one keeper")
+    end
+    assert(roster_count == #state.players, path .. " fixture rosters do not cover the match")
+
+    local assigned_players = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        local expected_slot = assert(input_frame.slot(index))
+        local assignment = ownership.slots[index]
+        assert(
+            assignment.slot == expected_slot.id and assignment.team == expected_slot.team,
+            path .. " assignments violate canonical slot order"
+        )
+        assert(
+            roster_members[expected_slot.team][assignment.player_id],
+            path .. " assignment is not a member of its fixture side"
+        )
+        local player_index = assert(
+            player_index_by_id[assignment.player_id],
+            path .. " assignment player is not in the match"
+        )
+        local player = state.players[player_index]
+        assert(not player.is_keeper, path .. " keeper cannot own an input slot")
+        assert(not assigned_players[player_index], path .. " player owns multiple input slots")
+        assigned_players[player_index] = true
+        assert(
+            state.slot_players[index] == player_index,
+            path .. " assignment disagrees with slot_players routing"
+        )
+        assert(
+            state.slot_for_player[player_index] == index,
+            path .. " assignment disagrees with slot_for_player routing"
+        )
+    end
+    for index, player in ipairs(state.players) do
+        if player.is_keeper then
+            assert(
+                state.slot_for_player[index] == nil,
+                path .. " keeper appears in inverse slot routing"
+            )
+        else
+            assert(assigned_players[index], path .. " outfielder has no input assignment")
+        end
+    end
+end
+
 ---@param identity any
 ---@return InputTapeIdentity
 function input_tape.copy_identity(identity)
@@ -252,6 +326,7 @@ function input_tape.new(identity, initial, frames)
     local initial_state = match_snapshot.restore(initial)
     assert(initial_state.slot_mode, "input tapes require a fixed-slot match")
     assert(initial_state.input_ownership, "input tape snapshot has no ownership")
+    assert_ownership_routes(copied_identity.ownership, initial_state, "identity.ownership")
     local snapshot_identity = {
         tape_version = input_tape.VERSION,
         input_version = input_frame.VERSION,
@@ -315,14 +390,14 @@ function input_tape.validate(tape)
         not ownership_diff,
         ownership_diff and ("tape " .. ownership_diff.path .. " differs from snapshot") or ""
     )
+    assert_ownership_routes(tape.identity.ownership, state, "tape.identity.ownership")
     assert_array(tape.frames, "tape.frames")
     assert_array(tape.boundary_hashes, "tape.boundary_hashes", #tape.frames + 1)
     for index = 1, #tape.frames do
         assert(input_frame.validate(tape.frames[index]))
-        assert(
-            tape.frames[index].tick == state.input_tick + index - 1,
-            "input tape frames are not contiguous"
-        )
+        assert(tape.frames[index].tick == state.input_tick, "input tape frames are not contiguous")
+        assert(not state.finished, "input tape contains a frame after the match finished")
+        match.step(state, fixed_clock.TICK_SECONDS, tape.frames[index])
     end
     for index = 1, #tape.boundary_hashes do
         assert(

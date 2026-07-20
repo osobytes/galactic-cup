@@ -23,7 +23,9 @@ t.describe("input tape replay", function()
         local replayed = assert(result, failure and failure.message)
         t.eq(#replayed.boundaries, #tape.frames + 1)
         for index = 1, #replayed.boundaries do
-            t.eq(replayed.boundaries[index].hash, tape.boundary_hashes[index])
+            local expected = short_match_tape.EXPECTED_BOUNDARY_HASHES[index]
+            t.eq(tape.boundary_hashes[index], expected, "constructed tape boundary " .. (index - 1))
+            t.eq(replayed.boundaries[index].hash, expected, "replay boundary " .. (index - 1))
         end
         t.is_true(replayed.state.finished, "the fixture reaches its match end")
         t.eq(replayed.state.input_tick, 3)
@@ -138,6 +140,51 @@ t.describe("input tape replay", function()
         t.is_true(
             not pcall(input_tape.new, complete_identity, complete.initial, frames),
             "a materialized frame cannot follow the finished boundary"
+        )
+
+        complete.frames[4] = assert(input_frame.neutral(3))
+        complete.boundary_hashes[5] = complete.boundary_hashes[4]
+        local appended, appended_failure = replay.run(complete, complete_identity)
+        t.eq(appended, nil)
+        local malformed = assert(appended_failure)
+        t.eq(malformed.code, "malformed")
+        t.is_true(malformed.message:match("frame after the match finished") ~= nil)
+    end)
+
+    t.it("rejects jointly malformed ownership and snapshot routing", function()
+        local tape, identity = short_match_tape.make()
+        local malformed_identity = input_tape.copy_identity(identity)
+        local malformed_snapshot = match_snapshot.capture(match_snapshot.restore(tape.initial))
+        malformed_identity.ownership.slots[1].team = "away"
+        malformed_snapshot.state.input_ownership.slots[1].team = "away"
+        t.is_true(
+            not pcall(input_tape.new, malformed_identity, malformed_snapshot, copy_frames(tape)),
+            "matching malformed slot semantics must still be rejected"
+        )
+
+        local duplicate_identity = input_tape.copy_identity(identity)
+        local duplicate_snapshot = match_snapshot.capture(match_snapshot.restore(tape.initial))
+        duplicate_identity.ownership.rosters.home[2] = duplicate_identity.ownership.rosters.home[1]
+        duplicate_snapshot.state.input_ownership.rosters.home[2] =
+            duplicate_snapshot.state.input_ownership.rosters.home[1]
+        t.is_true(
+            not pcall(input_tape.new, duplicate_identity, duplicate_snapshot, copy_frames(tape)),
+            "matching duplicate roster membership must still be rejected"
+        )
+
+        local route_snapshot = match_snapshot.capture(match_snapshot.restore(tape.initial))
+        route_snapshot.state.slot_players[1] = route_snapshot.state.slot_players[2]
+        t.is_true(
+            not pcall(input_tape.new, identity, route_snapshot, copy_frames(tape)),
+            "slot_players must agree with immutable ownership"
+        )
+
+        local inverse_snapshot = match_snapshot.capture(match_snapshot.restore(tape.initial))
+        local first_player = inverse_snapshot.state.slot_players[1]
+        inverse_snapshot.state.slot_for_player[first_player] = 2
+        t.is_true(
+            not pcall(input_tape.new, identity, inverse_snapshot, copy_frames(tape)),
+            "slot_for_player must agree with immutable ownership"
         )
     end)
 end)
