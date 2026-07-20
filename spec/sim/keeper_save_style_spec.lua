@@ -1,5 +1,6 @@
 local t = require("spec.support.runner")
 local match = require("sim.match")
+local match_snapshot = require("sim.match_snapshot")
 local teams = require("data.teams")
 local Vec2 = require("core.vec2")
 
@@ -132,6 +133,18 @@ t.describe("keeper save-style integration", function()
             t.eq(first_resolved.kind, second_resolved.kind)
             t.eq(first_resolved.save_style, second_resolved.save_style)
         end
+    end)
+
+    t.it("pins save timing for the cross-runtime travel ratio", function()
+        local ratio = 0.618234602637309
+        local speed = 200
+        local distance = ratio * speed / 1.2
+        local state, keeper = setup_attempt(distance, 0, speed)
+
+        match.step(state, 0, NO_INPUT)
+
+        t.is_true(keeper.save_pending ~= nil)
+        t.eq(match_snapshot.number_bytes(keeper.save_timer), "p:1:35314613:90526140")
     end)
 
     t.it("carries style on catch/parry then clears it at completed resolution", function()

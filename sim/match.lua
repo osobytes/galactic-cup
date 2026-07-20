@@ -2667,7 +2667,7 @@ local function ball_travel_time(dist, speed, k)
     if ratio >= 0.95 then
         return nil
     end
-    return -math.log(1 - ratio) / k
+    return require("core.deterministic_math").negative_log_one_minus(ratio) / k
 end
 
 -- Fire the actual dive lunge: aim at the freshest prediction of where the
