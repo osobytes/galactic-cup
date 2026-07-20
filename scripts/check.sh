@@ -35,6 +35,13 @@ else
     echo "   ! love not installed — skipping"
 fi
 
+echo "==> OMP-1 determinism (two fresh native processes)"
+if command -v love >/dev/null 2>&1; then
+    ./scripts/check_determinism.sh || fail=1
+else
+    echo "   ! love not installed — skipping"
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "CHECK FAILED"
     exit 1

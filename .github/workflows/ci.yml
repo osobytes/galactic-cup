@@ -74,6 +74,9 @@ jobs:
             - name: Run gameplay tripwire
               run: love . --tripwire
 
+            - name: Run OMP-1 deterministic replay twice
+              run: ./scripts/check_determinism.sh
+
     browser_artifact:
         name: Browser artifact smoke
         runs-on: ubuntu-24.04
@@ -84,3 +87,30 @@ jobs:
 
             - name: Build and smoke-test browser artifact
               run: ./scripts/web_smoke.sh
+
+    browser_determinism:
+        name: OMP-1 browser determinism
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+            - name: Install pinned browser evidence dependencies
+              run: |
+                  python3 -m venv "$RUNNER_TEMP/browser-evidence"
+                  "$RUNNER_TEMP/browser-evidence/bin/pip" install \
+                      --require-hashes \
+                      --requirement scripts/browser_matrix-requirements.txt
+
+            - name: Build the pinned love.js artifact
+              run: ./scripts/web_build.sh "$RUNNER_TEMP/omp1-web"
+
+            - name: Run two fresh Chrome and Firefox determinism campaigns
+              env:
+                  SE_CACHE_PATH: ${{ runner.temp }}/selenium
+              run: |
+                  "$RUNNER_TEMP/browser-evidence/bin/python" scripts/browser_determinism.py \
+                      --artifact "$RUNNER_TEMP/omp1-web" \
+                      --output "$RUNNER_TEMP/omp1-browser-determinism.json"

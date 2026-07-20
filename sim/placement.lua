@@ -3,6 +3,11 @@
 
 local Vec2 = require("core.vec2")
 
+---@class DistanceCandidate
+---@field idx integer
+---@field d number
+
+---@class PlacementModule
 local placement = {}
 
 ---@param formation FormationData
@@ -23,6 +28,16 @@ function placement.anchors(formation, side, field)
         out[#out + 1] = place(a.x, a.y)
     end
     return out
+end
+
+---@param a DistanceCandidate
+---@param b DistanceCandidate
+---@return boolean
+function placement.distance_candidate_before(a, b)
+    if a.d ~= b.d then
+        return a.d < b.d
+    end
+    return a.idx > b.idx
 end
 
 return placement
