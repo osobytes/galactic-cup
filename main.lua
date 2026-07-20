@@ -2,6 +2,7 @@
 --   love .                    -> run the game (screen stack)
 --   love . --test             -> run the headless test suite and exit with status code
 --   love . --sim [n]          -> play n unattended matches, print fun-proxy metrics, exit
+--   love . --snapshot-measure [n] -> measure canonical snapshot operations n times
 --   love . --rate-validate [n] -> validate frozen squad ratings over n paired seeds, exit
 --   love . --levers [n]       -> paired liveness checks for built-in manager levers, exit
 --   love . --sweep [n]        -> per-knob min/max sensitivity sweep over n seeds, exit
@@ -50,6 +51,83 @@ if has_flag("--sim") then
         local n = tonumber(n_arg) and math.floor(tonumber(n_arg) --[[@as number]]) or 20
         local headless = require("sim.headless")
         print(headless.report(headless.run_batch({ n = n })))
+        os.exit(0)
+    end
+    return
+end
+
+if has_flag("--snapshot-measure") then
+    function love.load()
+        local n_arg = args_after("--snapshot-measure")
+        local iterations = tonumber(n_arg) and math.floor(tonumber(n_arg) --[[@as number]]) or 1000
+        assert(iterations > 0, "--snapshot-measure needs a positive iteration count")
+        local fixed_clock = require("sim.fixed_clock")
+        local input_frame = require("sim.input_frame")
+        local sim_match = require("sim.match")
+        local match_snapshot = require("sim.match_snapshot")
+        local teams = require("data.teams")
+        local ownership = sim_match.ownership_for_teams(teams.nebula, teams.orion)
+        local state = sim_match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            duration = 120,
+            max_goals = 3,
+            seed = 38,
+            input_ownership = ownership,
+        })
+        for tick = 0, 119 do
+            sim_match.step(state, fixed_clock.TICK_SECONDS, assert(input_frame.neutral(tick)))
+        end
+        local snapshot = match_snapshot.capture(state)
+        local encoded = match_snapshot.encode(snapshot)
+
+        local started = os.clock()
+        for _ = 1, iterations do
+            encoded = match_snapshot.encode(snapshot)
+        end
+        local encode_ms = (os.clock() - started) * 1000
+
+        local hash = ""
+        started = os.clock()
+        for _ = 1, iterations do
+            hash = match_snapshot.hash(snapshot)
+        end
+        local hash_ms = (os.clock() - started) * 1000
+
+        local restored = state
+        started = os.clock()
+        for _ = 1, iterations do
+            restored = match_snapshot.restore(snapshot)
+        end
+        local restore_ms = (os.clock() - started) * 1000
+        print(
+            ("snapshot_measure version=%d tick=%d bytes=%d iterations=%d hash=%s"):format(
+                snapshot.version,
+                restored.input_tick,
+                #encoded,
+                iterations,
+                hash
+            )
+        )
+        print(
+            ("snapshot_measure encode_ms_total=%.3f encode_us_each=%.3f"):format(
+                encode_ms,
+                encode_ms * 1000 / iterations
+            )
+        )
+        print(
+            ("snapshot_measure hash_with_encode_ms_total=%.3f hash_with_encode_us_each=%.3f"):format(
+                hash_ms,
+                hash_ms * 1000 / iterations
+            )
+        )
+        print(
+            ("snapshot_measure restore_ms_total=%.3f restore_us_each=%.3f"):format(
+                restore_ms,
+                restore_ms * 1000 / iterations
+            )
+        )
         os.exit(0)
     end
     return

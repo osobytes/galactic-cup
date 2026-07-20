@@ -1,0 +1,859 @@
+-- Canonical start-of-tick snapshots for sim.match.
+--
+-- Capture is valid only between match.step calls. In slot mode `input_tick`
+-- names the next InputFrame to consume. The explicit allowlists below are both
+-- the copy contract and canonical serialization order: adding simulation state
+-- must fail capture/specs until this module is consciously versioned.
+
+local Vec2 = require("core.vec2")
+local fnv1a64 = require("core.fnv1a64")
+local input_frame = require("sim.input_frame")
+
+---@class MatchSnapshot
+---@field version integer
+---@field state MatchState
+
+---@class MatchSnapshotDifference
+---@field path string
+---@field expected any
+---@field actual any
+
+---@class MatchSnapshotModule
+local match_snapshot = {}
+
+match_snapshot.VERSION = 1
+
+match_snapshot.MATCH_FIELDS = {
+    "field",
+    "goal_home",
+    "goal_away",
+    "players",
+    "ball",
+    "ball_vel",
+    "ball_z",
+    "ball_vz",
+    "owner",
+    "controlled",
+    "human_controlled",
+    "score",
+    "time_left",
+    "max_goals",
+    "finished",
+    "pickup_cd",
+    "press",
+    "marking",
+    "marks",
+    "ball_spin",
+    "rng",
+    "block_grace",
+    "aerial_lock",
+    "kickoff_hold",
+    "events",
+    "slot_mode",
+    "input_ownership",
+    "slot_players",
+    "slot_for_player",
+    "input_tick",
+}
+
+match_snapshot.PLAYER_FIELDS = {
+    "id",
+    "name",
+    "team",
+    "pos",
+    "vel",
+    "run_vel",
+    "facing",
+    "anchor",
+    "species_id",
+    "owned_verb",
+    "move_speed",
+    "shot_speed",
+    "dribble",
+    "strength",
+    "first_touch",
+    "header_skill",
+    "volley_skill",
+    "bicycle_skill",
+    "is_keeper",
+    "radius",
+    "dash_cd",
+    "dodge_cd",
+    "dodge_timer",
+    "dodge_dir",
+    "reach",
+    "handling",
+    "dive_timer",
+    "dive_dir",
+    "dive_delay",
+    "dive_target",
+    "hold_timer",
+    "feet_ball",
+    "slide_timer",
+    "slide_dir",
+    "slide_vel",
+    "tackle_timer",
+    "tackle_cd",
+    "stun_timer",
+    "grab_timer",
+    "throw_timer",
+    "receive_timer",
+    "sprint_meter",
+    "sprint_dur",
+    "sprinting",
+    "save_pending",
+    "save_timer",
+    "save_vx",
+    "settle_timer",
+    "header_cd",
+    "aerial_timer",
+    "aerial_style",
+    "aerial_outcome",
+    "aerial_jump",
+    "aerial_recovery",
+    "charge",
+    "pass_charge",
+    "pass_target",
+    "windup_timer",
+    "windup_shot",
+    "jockey_timer",
+}
+
+local VECTOR_FIELDS = {
+    pos = true,
+    vel = true,
+    run_vel = true,
+    facing = true,
+    anchor = true,
+    dodge_dir = true,
+    dive_dir = true,
+    slide_dir = true,
+}
+
+local OPTIONAL_VECTOR_FIELDS = {
+    dive_target = true,
+}
+
+local EVENT_FIELDS = {
+    "kind",
+    "x",
+    "y",
+    "player",
+    "style",
+    "outcome",
+    "jumping",
+    "difficulty",
+}
+
+local MARKING_FIELDS = {
+    "scheme",
+    "man_marks",
+    "standoff",
+    "compactness",
+    "support",
+}
+
+local WINDUP_FIELDS = {
+    "dir",
+    "speed",
+    "vz",
+    "spin",
+}
+
+local ASSIGNMENT_FIELDS = {
+    "slot",
+    "team",
+    "player_id",
+}
+
+local MATCH_FIELD_SET = {}
+for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
+    MATCH_FIELD_SET[field] = true
+end
+
+local PLAYER_FIELD_SET = {}
+for _, field in ipairs(match_snapshot.PLAYER_FIELDS) do
+    PLAYER_FIELD_SET[field] = true
+end
+
+---@param fields string[]
+---@return table<string, boolean>
+local function field_set(fields)
+    local result = {}
+    for _, field in ipairs(fields) do
+        result[field] = true
+    end
+    return result
+end
+
+local VECTOR_FIELD_SET = field_set({ "x", "y" })
+local FIELD_FIELD_SET = field_set({ "w", "h" })
+local RECT_FIELD_SET = field_set({ "x", "y", "w", "h" })
+local TEAM_FIELD_SET = field_set({ "home", "away" })
+local MARKING_FIELD_SET = field_set(MARKING_FIELDS)
+local EVENT_FIELD_SET = field_set(EVENT_FIELDS)
+local WINDUP_FIELD_SET = field_set(WINDUP_FIELDS)
+local OWNERSHIP_FIELD_SET = field_set({ "version", "rosters", "slots" })
+local ASSIGNMENT_FIELD_SET = field_set(ASSIGNMENT_FIELDS)
+local SNAPSHOT_FIELD_SET = field_set({ "version", "state" })
+
+---@param value any
+---@return boolean
+local function is_finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+---@param value any
+---@param allowed table<string, boolean>
+---@param path string
+local function assert_fields(value, allowed, path)
+    assert(type(value) == "table", path .. " must be a table")
+    for key in pairs(value) do
+        assert(
+            type(key) == "string" and allowed[key],
+            path .. " has unknown field " .. tostring(key)
+        )
+    end
+end
+
+---@param value any
+---@param path string
+---@param expected integer?
+local function assert_array(value, path, expected)
+    assert(type(value) == "table", path .. " must be an array")
+    local count = #value
+    if expected then
+        assert(count == expected, path .. " has the wrong length")
+    end
+    for key in pairs(value) do
+        assert(
+            type(key) == "number" and key == math.floor(key) and key >= 1 and key <= count,
+            path .. " is not a canonical array"
+        )
+    end
+    for index = 1, count do
+        assert(value[index] ~= nil, path .. " has a hole")
+    end
+end
+
+---@param value any
+---@param path string
+---@param make_vec boolean
+---@return Vec2
+local function copy_vec(value, path, make_vec)
+    assert_fields(value, VECTOR_FIELD_SET, path)
+    assert(is_finite_number(value.x), path .. ".x must be finite")
+    assert(is_finite_number(value.y), path .. ".y must be finite")
+    if make_vec then
+        return Vec2.new(value.x, value.y)
+    end
+    return { x = value.x, y = value.y }
+end
+
+---@param value any
+---@param path string
+---@return any
+local function copy_scalar(value, path)
+    local kind = type(value)
+    if kind == "number" then
+        assert(is_finite_number(value), path .. " must be finite")
+    else
+        assert(
+            value == nil or kind == "string" or kind == "boolean",
+            path .. " has unsupported scalar type"
+        )
+    end
+    return value
+end
+
+---@param source any
+---@param path string
+---@param make_vec boolean
+---@return MatchPlayer
+local function copy_player(source, path, make_vec)
+    assert_fields(source, PLAYER_FIELD_SET, path)
+    local result = {}
+    for _, field in ipairs(match_snapshot.PLAYER_FIELDS) do
+        local field_path = path .. "." .. field
+        if VECTOR_FIELDS[field] then
+            result[field] = copy_vec(source[field], field_path, make_vec)
+        elseif OPTIONAL_VECTOR_FIELDS[field] then
+            result[field] = source[field] and copy_vec(source[field], field_path, make_vec) or nil
+        elseif field == "windup_shot" then
+            local shot = source.windup_shot
+            if shot then
+                assert_fields(shot, WINDUP_FIELD_SET, field_path)
+                result.windup_shot = {
+                    dir = copy_vec(shot.dir, field_path .. ".dir", make_vec),
+                    speed = copy_scalar(shot.speed, field_path .. ".speed"),
+                    vz = copy_scalar(shot.vz, field_path .. ".vz"),
+                    spin = copy_scalar(shot.spin, field_path .. ".spin"),
+                }
+            end
+        else
+            result[field] = copy_scalar(source[field], field_path)
+        end
+    end
+    ---@cast result MatchPlayer
+    return result
+end
+
+---@param source any
+---@param path string
+---@return MatchEvent
+local function copy_event(source, path)
+    assert_fields(source, EVENT_FIELD_SET, path)
+    local result = {}
+    for _, field in ipairs(EVENT_FIELDS) do
+        result[field] = copy_scalar(source[field], path .. "." .. field)
+    end
+    ---@cast result MatchEvent
+    return result
+end
+
+---@param source any
+---@param path string
+---@return MarkingConfig
+local function copy_marking(source, path)
+    assert_fields(source, MARKING_FIELD_SET, path)
+    local result = {}
+    for _, field in ipairs(MARKING_FIELDS) do
+        result[field] = copy_scalar(source[field], path .. "." .. field)
+    end
+    ---@cast result MarkingConfig
+    return result
+end
+
+---@param source any
+---@param path string
+---@return InputOwnership
+local function copy_ownership(source, path)
+    assert_fields(source, OWNERSHIP_FIELD_SET, path)
+    assert(source.version == input_frame.VERSION, path .. " version is unsupported")
+    assert_fields(source.rosters, TEAM_FIELD_SET, path .. ".rosters")
+    assert_array(source.rosters.home, path .. ".rosters.home", input_frame.FIXTURE_TEAM_SIZE)
+    assert_array(source.rosters.away, path .. ".rosters.away", input_frame.FIXTURE_TEAM_SIZE)
+    assert_array(source.slots, path .. ".slots", input_frame.SLOT_COUNT)
+    local rosters = { home = {}, away = {} }
+    for _, team in ipairs({ "home", "away" }) do
+        for index = 1, input_frame.FIXTURE_TEAM_SIZE do
+            rosters[team][index] =
+                copy_scalar(source.rosters[team][index], path .. ".rosters." .. team)
+        end
+    end
+    local slots = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        local assignment = source.slots[index]
+        assert_fields(assignment, ASSIGNMENT_FIELD_SET, path .. ".slots")
+        slots[index] = {}
+        for _, field in ipairs(ASSIGNMENT_FIELDS) do
+            slots[index][field] =
+                copy_scalar(assignment[field], path .. ".slots." .. index .. "." .. field)
+        end
+    end
+    return { version = source.version, rosters = rosters, slots = slots }
+end
+
+---@param source any
+---@param path string
+---@param count integer
+---@return table<integer, integer>
+local function copy_sparse_indices(source, path, count)
+    assert(type(source) == "table", path .. " must be a table")
+    local result = {}
+    for key, value in pairs(source) do
+        assert(
+            type(key) == "number" and key == math.floor(key) and key >= 1 and key <= count,
+            path .. " has an invalid index"
+        )
+        assert(
+            type(value) == "number" and value == math.floor(value),
+            path .. " has a non-integer value"
+        )
+        result[key] = value
+    end
+    return result
+end
+
+---@param source any
+---@param path string
+---@param make_vec boolean
+---@return MatchState
+local function copy_state(source, path, make_vec)
+    assert_fields(source, MATCH_FIELD_SET, path)
+    assert_array(source.players, path .. ".players", 10)
+    assert_array(source.events, path .. ".events")
+    assert_fields(source.field, FIELD_FIELD_SET, path .. ".field")
+    assert_fields(source.goal_home, RECT_FIELD_SET, path .. ".goal_home")
+    assert_fields(source.goal_away, RECT_FIELD_SET, path .. ".goal_away")
+    assert_fields(source.score, TEAM_FIELD_SET, path .. ".score")
+    assert_fields(source.press, TEAM_FIELD_SET, path .. ".press")
+    assert_fields(source.marking, TEAM_FIELD_SET, path .. ".marking")
+    assert_fields(source.marks, TEAM_FIELD_SET, path .. ".marks")
+
+    local result = {
+        field = {
+            w = copy_scalar(source.field.w, path .. ".field.w"),
+            h = copy_scalar(source.field.h, path .. ".field.h"),
+        },
+        goal_home = {},
+        goal_away = {},
+        players = {},
+        ball = copy_vec(source.ball, path .. ".ball", make_vec),
+        ball_vel = copy_vec(source.ball_vel, path .. ".ball_vel", make_vec),
+        score = {},
+        press = {},
+        marking = {},
+        marks = {},
+        events = {},
+        slot_players = {},
+        slot_for_player = {},
+    }
+    for _, goal_field in ipairs({ "x", "y", "w", "h" }) do
+        result.goal_home[goal_field] =
+            copy_scalar(source.goal_home[goal_field], path .. ".goal_home." .. goal_field)
+        result.goal_away[goal_field] =
+            copy_scalar(source.goal_away[goal_field], path .. ".goal_away." .. goal_field)
+    end
+    for index = 1, #source.players do
+        result.players[index] =
+            copy_player(source.players[index], path .. ".players." .. index, make_vec)
+    end
+    for _, field in ipairs({
+        "ball_z",
+        "ball_vz",
+        "owner",
+        "controlled",
+        "human_controlled",
+        "time_left",
+        "max_goals",
+        "finished",
+        "pickup_cd",
+        "ball_spin",
+        "rng",
+        "block_grace",
+        "aerial_lock",
+        "kickoff_hold",
+        "slot_mode",
+        "input_tick",
+    }) do
+        result[field] = copy_scalar(source[field], path .. "." .. field)
+    end
+    for _, team in ipairs({ "home", "away" }) do
+        result.score[team] = copy_scalar(source.score[team], path .. ".score." .. team)
+        result.press[team] = copy_scalar(source.press[team], path .. ".press." .. team)
+        result.marking[team] = copy_marking(source.marking[team], path .. ".marking." .. team)
+        result.marks[team] =
+            copy_sparse_indices(source.marks[team], path .. ".marks." .. team, #source.players)
+    end
+    for index = 1, #source.events do
+        result.events[index] = copy_event(source.events[index], path .. ".events." .. index)
+    end
+    result.input_ownership = source.input_ownership
+            and copy_ownership(source.input_ownership, path .. ".input_ownership")
+        or nil
+    result.slot_players =
+        copy_sparse_indices(source.slot_players, path .. ".slot_players", input_frame.SLOT_COUNT)
+    result.slot_for_player =
+        copy_sparse_indices(source.slot_for_player, path .. ".slot_for_player", #source.players)
+    ---@cast result MatchState
+    return result
+end
+
+---@param state MatchState
+---@return MatchSnapshot
+function match_snapshot.capture(state)
+    return {
+        version = match_snapshot.VERSION,
+        state = copy_state(state, "state", false),
+    }
+end
+
+---@param snapshot MatchSnapshot
+---@return MatchState
+function match_snapshot.restore(snapshot)
+    assert_fields(snapshot, SNAPSHOT_FIELD_SET, "snapshot")
+    assert(snapshot.version == match_snapshot.VERSION, "unsupported match snapshot version")
+    return copy_state(snapshot.state, "snapshot.state", true)
+end
+
+---@param number number
+---@return string
+function match_snapshot.number_bytes(number)
+    assert(is_finite_number(number), "canonical numbers must be finite")
+    if number == 0 then
+        return (1 / number == -math.huge) and "Z" or "z"
+    end
+    local sign = number < 0 and "m" or "p"
+    local mantissa, exponent = math.frexp(math.abs(number))
+    local high = math.floor(mantissa * 67108864)
+    local low = math.floor((mantissa * 67108864 - high) * 134217728 + 0.5)
+    return sign .. ":" .. tostring(exponent) .. ":" .. tostring(high) .. ":" .. tostring(low)
+end
+
+---@param output string[]
+---@param value any
+local function append_scalar(output, value)
+    local kind = type(value)
+    if value == nil then
+        output[#output + 1] = "z;"
+    elseif kind == "boolean" then
+        output[#output + 1] = value and "b1;" or "b0;"
+    elseif kind == "number" then
+        output[#output + 1] = "n" .. match_snapshot.number_bytes(value) .. ";"
+    elseif kind == "string" then
+        output[#output + 1] = "s" .. tostring(#value) .. ":" .. value .. ";"
+    else
+        assert(false, "unsupported canonical scalar")
+    end
+end
+
+---@param output string[]
+---@param name string
+local function append_name(output, name)
+    output[#output + 1] = "k" .. tostring(#name) .. ":" .. name .. ";"
+end
+
+---@param output string[]
+---@param value Vec2
+local function append_vec(output, value)
+    append_scalar(output, value.x)
+    append_scalar(output, value.y)
+end
+
+---@param output string[]
+---@param value MarkingConfig
+local function append_marking(output, value)
+    for _, field in ipairs(MARKING_FIELDS) do
+        append_name(output, field)
+        append_scalar(output, value[field])
+    end
+end
+
+---@param output string[]
+---@param value InputOwnership?
+local function append_ownership(output, value)
+    if not value then
+        append_scalar(output, nil)
+        return
+    end
+    append_scalar(output, value.version)
+    for _, team in ipairs({ "home", "away" }) do
+        append_name(output, team)
+        for index = 1, input_frame.FIXTURE_TEAM_SIZE do
+            append_scalar(output, value.rosters[team][index])
+        end
+    end
+    for index = 1, input_frame.SLOT_COUNT do
+        for _, field in ipairs(ASSIGNMENT_FIELDS) do
+            append_name(output, field)
+            append_scalar(output, value.slots[index][field])
+        end
+    end
+end
+
+---@param output string[]
+---@param player MatchPlayer
+local function append_player(output, player)
+    for _, field in ipairs(match_snapshot.PLAYER_FIELDS) do
+        append_name(output, field)
+        local value = player[field]
+        if VECTOR_FIELDS[field] then
+            append_vec(output, value)
+        elseif OPTIONAL_VECTOR_FIELDS[field] then
+            if value then
+                output[#output + 1] = "v;"
+                append_vec(output, value)
+            else
+                append_scalar(output, nil)
+            end
+        elseif field == "windup_shot" then
+            if value then
+                output[#output + 1] = "w;"
+                for _, windup_field in ipairs(WINDUP_FIELDS) do
+                    append_name(output, windup_field)
+                    if windup_field == "dir" then
+                        append_vec(output, value.dir)
+                    else
+                        append_scalar(output, value[windup_field])
+                    end
+                end
+            else
+                append_scalar(output, nil)
+            end
+        else
+            append_scalar(output, value)
+        end
+    end
+end
+
+---@param output string[]
+---@param values table<integer, integer>
+---@param count integer
+local function append_sparse_indices(output, values, count)
+    for index = 1, count do
+        append_scalar(output, values[index])
+    end
+end
+
+---@param snapshot MatchSnapshot
+---@return string
+function match_snapshot.encode(snapshot)
+    -- Restore performs the full explicit allowlist/type validation and gives
+    -- serialization a normalized independent source.
+    local state = match_snapshot.restore(snapshot)
+    local output = { "GCMS;" }
+    append_scalar(output, snapshot.version)
+    for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
+        append_name(output, field)
+        local value = state[field]
+        if field == "field" then
+            append_scalar(output, value.w)
+            append_scalar(output, value.h)
+        elseif field == "goal_home" or field == "goal_away" then
+            for _, rect_field in ipairs({ "x", "y", "w", "h" }) do
+                append_scalar(output, value[rect_field])
+            end
+        elseif field == "players" then
+            append_scalar(output, #value)
+            for index = 1, #value do
+                append_player(output, value[index])
+            end
+        elseif field == "ball" or field == "ball_vel" then
+            append_vec(output, value)
+        elseif field == "score" or field == "press" then
+            append_scalar(output, value.home)
+            append_scalar(output, value.away)
+        elseif field == "marking" then
+            append_marking(output, value.home)
+            append_marking(output, value.away)
+        elseif field == "marks" then
+            append_sparse_indices(output, value.home, #state.players)
+            append_sparse_indices(output, value.away, #state.players)
+        elseif field == "events" then
+            append_scalar(output, #value)
+            for index = 1, #value do
+                for _, event_field in ipairs(EVENT_FIELDS) do
+                    append_name(output, event_field)
+                    append_scalar(output, value[index][event_field])
+                end
+            end
+        elseif field == "input_ownership" then
+            append_ownership(output, value)
+        elseif field == "slot_players" then
+            append_sparse_indices(output, value, input_frame.SLOT_COUNT)
+        elseif field == "slot_for_player" then
+            append_sparse_indices(output, value, #state.players)
+        else
+            append_scalar(output, value)
+        end
+    end
+    return table.concat(output)
+end
+
+---@param snapshot MatchSnapshot
+---@return string
+function match_snapshot.hash(snapshot)
+    return fnv1a64.hash(match_snapshot.encode(snapshot))
+end
+
+---@param left any
+---@param right any
+---@return boolean
+local function same_scalar(left, right)
+    if left ~= right then
+        return false
+    end
+    if left == 0 and right == 0 then
+        return 1 / left == 1 / right
+    end
+    return true
+end
+
+---@param path string
+---@param expected any
+---@param actual any
+---@return MatchSnapshotDifference
+local function difference(path, expected, actual)
+    return { path = path, expected = expected, actual = actual }
+end
+
+---@param path string
+---@param left Vec2
+---@param right Vec2
+---@return MatchSnapshotDifference?
+local function compare_vec(path, left, right)
+    if not same_scalar(left.x, right.x) then
+        return difference(path .. ".x", left.x, right.x)
+    end
+    if not same_scalar(left.y, right.y) then
+        return difference(path .. ".y", left.y, right.y)
+    end
+    return nil
+end
+
+---@param left MatchSnapshot
+---@param right MatchSnapshot
+---@return MatchSnapshotDifference?
+function match_snapshot.first_difference(left, right)
+    local a = match_snapshot.capture(match_snapshot.restore(left))
+    local b = match_snapshot.capture(match_snapshot.restore(right))
+    if a.version ~= b.version then
+        return difference("version", a.version, b.version)
+    end
+    local sa, sb = a.state, b.state
+    for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
+        local path = "state." .. field
+        local av, bv = sa[field], sb[field]
+        if field == "field" then
+            for _, child in ipairs({ "w", "h" }) do
+                if not same_scalar(av[child], bv[child]) then
+                    return difference(path .. "." .. child, av[child], bv[child])
+                end
+            end
+        elseif field == "goal_home" or field == "goal_away" then
+            for _, child in ipairs({ "x", "y", "w", "h" }) do
+                if not same_scalar(av[child], bv[child]) then
+                    return difference(path .. "." .. child, av[child], bv[child])
+                end
+            end
+        elseif field == "players" then
+            if #av ~= #bv then
+                return difference(path .. ".length", #av, #bv)
+            end
+            for index = 1, #av do
+                for _, child in ipairs(match_snapshot.PLAYER_FIELDS) do
+                    local child_path = path .. "." .. index .. "." .. child
+                    local ac, bc = av[index][child], bv[index][child]
+                    if VECTOR_FIELDS[child] then
+                        local found = compare_vec(child_path, ac, bc)
+                        if found then
+                            return found
+                        end
+                    elseif OPTIONAL_VECTOR_FIELDS[child] then
+                        if (ac == nil) ~= (bc == nil) then
+                            return difference(child_path, ac, bc)
+                        elseif ac then
+                            local found = compare_vec(child_path, ac, bc)
+                            if found then
+                                return found
+                            end
+                        end
+                    elseif child == "windup_shot" then
+                        if (ac == nil) ~= (bc == nil) then
+                            return difference(child_path, ac, bc)
+                        elseif ac then
+                            local found = compare_vec(child_path .. ".dir", ac.dir, bc.dir)
+                            if found then
+                                return found
+                            end
+                            for _, shot_field in ipairs({ "speed", "vz", "spin" }) do
+                                if not same_scalar(ac[shot_field], bc[shot_field]) then
+                                    return difference(
+                                        child_path .. "." .. shot_field,
+                                        ac[shot_field],
+                                        bc[shot_field]
+                                    )
+                                end
+                            end
+                        end
+                    elseif not same_scalar(ac, bc) then
+                        return difference(child_path, ac, bc)
+                    end
+                end
+            end
+        elseif field == "ball" or field == "ball_vel" then
+            local found = compare_vec(path, av, bv)
+            if found then
+                return found
+            end
+        elseif field == "score" or field == "press" then
+            for _, team in ipairs({ "home", "away" }) do
+                if not same_scalar(av[team], bv[team]) then
+                    return difference(path .. "." .. team, av[team], bv[team])
+                end
+            end
+        elseif field == "marking" then
+            for _, team in ipairs({ "home", "away" }) do
+                for _, child in ipairs(MARKING_FIELDS) do
+                    if not same_scalar(av[team][child], bv[team][child]) then
+                        return difference(
+                            path .. "." .. team .. "." .. child,
+                            av[team][child],
+                            bv[team][child]
+                        )
+                    end
+                end
+            end
+        elseif field == "marks" then
+            for _, team in ipairs({ "home", "away" }) do
+                for index = 1, #sa.players do
+                    if not same_scalar(av[team][index], bv[team][index]) then
+                        return difference(
+                            path .. "." .. team .. "." .. index,
+                            av[team][index],
+                            bv[team][index]
+                        )
+                    end
+                end
+            end
+        elseif field == "events" then
+            if #av ~= #bv then
+                return difference(path .. ".length", #av, #bv)
+            end
+            for index = 1, #av do
+                for _, child in ipairs(EVENT_FIELDS) do
+                    if not same_scalar(av[index][child], bv[index][child]) then
+                        return difference(
+                            path .. "." .. index .. "." .. child,
+                            av[index][child],
+                            bv[index][child]
+                        )
+                    end
+                end
+            end
+        elseif field == "input_ownership" then
+            if (av == nil) ~= (bv == nil) then
+                return difference(path, av, bv)
+            elseif av then
+                if av.version ~= bv.version then
+                    return difference(path .. ".version", av.version, bv.version)
+                end
+                for _, team in ipairs({ "home", "away" }) do
+                    for index = 1, input_frame.FIXTURE_TEAM_SIZE do
+                        if av.rosters[team][index] ~= bv.rosters[team][index] then
+                            return difference(
+                                path .. ".rosters." .. team .. "." .. index,
+                                av.rosters[team][index],
+                                bv.rosters[team][index]
+                            )
+                        end
+                    end
+                end
+                for index = 1, input_frame.SLOT_COUNT do
+                    for _, child in ipairs(ASSIGNMENT_FIELDS) do
+                        if av.slots[index][child] ~= bv.slots[index][child] then
+                            return difference(
+                                path .. ".slots." .. index .. "." .. child,
+                                av.slots[index][child],
+                                bv.slots[index][child]
+                            )
+                        end
+                    end
+                end
+            end
+        elseif field == "slot_players" or field == "slot_for_player" then
+            local count = field == "slot_players" and input_frame.SLOT_COUNT or #sa.players
+            for index = 1, count do
+                if not same_scalar(av[index], bv[index]) then
+                    return difference(path .. "." .. index, av[index], bv[index])
+                end
+            end
+        elseif not same_scalar(av, bv) then
+            return difference(path, av, bv)
+        end
+    end
+    return nil
+end
+
+return match_snapshot
