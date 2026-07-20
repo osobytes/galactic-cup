@@ -107,11 +107,11 @@ from simulation-side history.
 | 8 | `dash` | Tackle/dash press occurred during this tick. |
 | 16 | `dodge` | Juke/dodge press occurred during this tick. |
 
-The edge names intentionally match existing match verbs, but this module does
-not decide how a future multi-slot match consumes the legacy `switch` edge.
-Online ownership will later make switching inapplicable without changing the
-recording format. No action has implicit edge semantics: every recorder must
-set the applicable `edges` bit explicitly and clear it on the next frame.
+The edge names intentionally match existing match verbs. The `switch` edge
+remains encodable for legacy offline recordings, while slot-mode matches ignore
+it because their ownership is fixed. No action has implicit edge semantics:
+every recorder must set the applicable `edges` bit explicitly and clear it on
+the next frame.
 
 ## Canonical bounded wire form
 
@@ -145,8 +145,8 @@ the tape or snapshot, never in an individual frame or transport envelope:
 - gameplay configuration identity, including tuning and fixture rules;
 - initial deterministic RNG seed;
 - the canonical `InputOwnership` selected home/away rosters and slot mapping; and
-- the fixed tick rate once issue #35 establishes it.
+- the fixed tick rate established by issue #35 (60 Hz).
 
-OMP-2 replay and rollback work must compare this identity before claiming a
-hash mismatch is a simulation divergence. It is deliberately independent of
-WebRTC, room, packet, or browser identities.
+Replay tooling and later OMP-2 rollback work must compare this identity before
+claiming a hash mismatch is a simulation divergence. It is deliberately
+independent of WebRTC, room, packet, or browser identities.

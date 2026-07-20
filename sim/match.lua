@@ -3340,7 +3340,7 @@ function match.step(s, dt, input)
         s.input_tick = s.input_tick + 1
     else
         ---@cast input MatchInput
-        inputs = { [s.controlled] = input }
+        inputs = {}
     end
 
     -- Discrete events are per-frame: clear last frame's before producing this one's.
@@ -3445,6 +3445,9 @@ function match.step(s, dt, input)
 
     if not s.slot_mode and s.human_controlled and input.switch then
         s.controlled = next_home_outfield(s, s.controlled)
+    end
+    if not s.slot_mode then
+        inputs[s.controlled] = input
     end
 
     local prev_ball_x = s.ball.x -- for edge-triggered goal-line crossing
