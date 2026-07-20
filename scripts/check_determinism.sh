@@ -4,10 +4,41 @@ set -euo pipefail
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 evidence_root="$(mktemp -d)"
 trap 'rm -rf "$evidence_root"' EXIT
+love_bin="${LOVE_BIN:-love}"
+
+if [ "${1:-}" = "--self-test" ]; then
+    fake_root="$evidence_root/fake"
+    mkdir -p "$fake_root"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'echo "synthetic determinism failure"' \
+        'exit 7' >"$fake_root/love"
+    chmod +x "$fake_root/love"
+    set +e
+    output="$(LOVE_BIN="$fake_root/love" "$0" 2>&1)"
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        echo "determinism failure self-test unexpectedly passed" >&2
+        exit 1
+    fi
+    if [[ "$output" != *"synthetic determinism failure"* ]] \
+        || [[ "$output" != *"determinism run 1 exited nonzero"* ]]; then
+        printf '%s\n' "$output"
+        echo "determinism failure self-test lost its diagnostic" >&2
+        exit 1
+    fi
+    echo "native determinism failure diagnostic: OK"
+    exit 0
+fi
 
 for run in 1 2; do
     started_ns="$(date +%s%N)"
-    love "$project_root" --determinism >"$evidence_root/run-$run.log" 2>&1
+    if ! "$love_bin" "$project_root" --determinism >"$evidence_root/run-$run.log" 2>&1; then
+        cat "$evidence_root/run-$run.log"
+        echo "determinism run $run exited nonzero" >&2
+        exit 1
+    fi
     finished_ns="$(date +%s%N)"
     printf '%s\n' "$(( (finished_ns - started_ns) / 1000000 ))" >"$evidence_root/run-$run.ms"
     marker="$(grep '^GC_DETERMINISM|result|' "$evidence_root/run-$run.log" || true)"

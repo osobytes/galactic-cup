@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -99,7 +101,11 @@ def launch(browser_name: str, binary: Path, driver: Path, log: Path) -> Any:
         ):
             options.add_argument(argument)
         return webdriver.Chrome(
-            service=Service(str(driver), log_output=str(log)),
+            service=Service(
+                str(driver),
+                log_output=str(log),
+                popen_kw={"start_new_session": True},
+            ),
             options=options,
         )
 
@@ -113,9 +119,94 @@ def launch(browser_name: str, binary: Path, driver: Path, log: Path) -> Any:
     options.set_preference("extensions.autoDisableScopes", 15)
     options.set_preference("extensions.enabledScopes", 0)
     return webdriver.Firefox(
-        service=Service(str(driver), log_output=str(log)),
+        service=Service(
+            str(driver),
+            log_output=str(log),
+            popen_kw={"start_new_session": True},
+        ),
         options=options,
     )
+
+
+def wait_process(process: Any, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return True
+        time.sleep(0.05)
+    return process.poll() is not None
+
+
+def process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def wait_group_gone(group_alive: Any, pgid: int, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not group_alive(pgid):
+            return True
+        time.sleep(0.05)
+    return not group_alive(pgid)
+
+
+def quit_browser_bounded(
+    driver: Any,
+    timeout_seconds: float = 30,
+    term_wait_seconds: float = 5,
+    kill_wait_seconds: float = 5,
+    getpgid: Any = os.getpgid,
+    killpg: Any = os.killpg,
+    group_alive: Any = process_group_alive,
+) -> dict[str, Any]:
+    process = getattr(getattr(driver, "service", None), "process", None)
+    if process is None or getattr(process, "pid", None) is None:
+        raise RuntimeError("WebDriver service process is unavailable for bounded teardown")
+    pgid = getpgid(process.pid)
+    quit_errors: list[str] = []
+
+    def quit_driver() -> None:
+        try:
+            driver.quit()
+        except Exception as error:  # teardown must still reap the process group
+            quit_errors.append(str(error))
+
+    thread = threading.Thread(target=quit_driver, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    service_exited = wait_process(process, 1)
+    group_exited = wait_group_gone(group_alive, pgid, 1)
+    fallback = thread.is_alive() or not service_exited or not group_exited
+    signals: list[str] = []
+    if fallback:
+        try:
+            killpg(pgid, signal.SIGTERM)
+            signals.append("TERM")
+        except ProcessLookupError:
+            pass
+        wait_process(process, term_wait_seconds)
+        if not wait_group_gone(group_alive, pgid, term_wait_seconds):
+            try:
+                killpg(pgid, signal.SIGKILL)
+                signals.append("KILL")
+            except ProcessLookupError:
+                pass
+            wait_process(process, kill_wait_seconds)
+            if not wait_group_gone(group_alive, pgid, kill_wait_seconds):
+                raise RuntimeError(
+                    f"WebDriver process group {pgid} survived bounded TERM/KILL teardown"
+                )
+    return {
+        "fallback": fallback,
+        "process_group": pgid,
+        "quit_error": quit_errors[0] if quit_errors else None,
+        "service_exit_code": process.poll(),
+        "signals": signals,
+    }
 
 
 def console_state(driver: Any) -> dict[str, Any]:
@@ -145,6 +236,7 @@ def run_once(
     started = time.monotonic()
     log = output / f"{browser_name}-{run_number}-webdriver.log"
     driver = launch(browser_name, binary, driver_path, log)
+    record: dict[str, Any] | None = None
     try:
         driver.set_page_load_timeout(90)
         driver.get(url)
@@ -181,7 +273,7 @@ def run_once(
                 f"{browser_name} loader status is {state.get('status')!r}, expected 'running'"
             )
         fields = parse_marker(markers[0])
-        return {
+        record = {
             "browser": browser_name,
             "browser_version": str(driver.capabilities.get("browserVersion")),
             "duration_seconds": round(time.monotonic() - started, 3),
@@ -190,13 +282,83 @@ def run_once(
             "run": run_number,
         }
     finally:
-        driver.quit()
+        teardown = quit_browser_bounded(driver)
+    if record is None:
+        raise RuntimeError(f"{browser_name} run {run_number} produced no record")
+    record["teardown"] = teardown
+    return record
+
+
+def self_test() -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 123
+            self.return_code: int | None = None
+
+        def poll(self) -> int | None:
+            return self.return_code
+
+    class FakeService:
+        def __init__(self, process: FakeProcess) -> None:
+            self.process = process
+
+    class FakeDriver:
+        def __init__(self, process: FakeProcess, blocked: bool) -> None:
+            self.service = FakeService(process)
+            self.blocked = blocked
+
+        def quit(self) -> None:
+            if self.blocked:
+                time.sleep(1)
+            else:
+                self.service.process.return_code = 0
+
+    process = FakeProcess()
+    normal = quit_browser_bounded(
+        FakeDriver(process, False),
+        timeout_seconds=0.01,
+        getpgid=lambda _pid: 456,
+        killpg=lambda _pgid, _signal: None,
+        group_alive=lambda _pgid: False,
+    )
+    if normal["fallback"] or normal["service_exit_code"] != 0:
+        raise RuntimeError("normal bounded-teardown self-test failed")
+
+    process = FakeProcess()
+    seen_signals: list[int] = []
+    fake_group_alive = True
+
+    def fake_killpg(_pgid: int, sent_signal: int) -> None:
+        nonlocal fake_group_alive
+        seen_signals.append(sent_signal)
+        process.return_code = -sent_signal
+        fake_group_alive = False
+
+    fallback = quit_browser_bounded(
+        FakeDriver(process, True),
+        timeout_seconds=0.01,
+        term_wait_seconds=0.01,
+        kill_wait_seconds=0.01,
+        getpgid=lambda _pid: 789,
+        killpg=fake_killpg,
+        group_alive=lambda _pgid: fake_group_alive,
+    )
+    if not fallback["fallback"] or seen_signals != [signal.SIGTERM]:
+        raise RuntimeError("forced bounded-teardown self-test failed")
+
+    fields = parse_marker(
+        "GC_DETERMINISM|result|"
+        + "|".join(f"{key}={value}" for key, value in REQUIRED_FIELDS.items())
+    )
+    if fields != REQUIRED_FIELDS:
+        raise RuntimeError("marker parser self-test failed")
+    print("browser determinism self-test: OK")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--artifact", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--browser",
         action="append",
@@ -207,7 +369,13 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--timeout-seconds", type=int, default=1200)
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+    if args.artifact is None or args.output is None:
+        parser.error("--artifact and --output are required unless --self-test is used")
     browsers = args.browsers or ["chrome", "firefox"]
     if args.runs < 2:
         raise SystemExit("--runs must be at least 2")

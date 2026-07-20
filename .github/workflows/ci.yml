@@ -75,7 +75,9 @@ jobs:
               run: love . --tripwire
 
             - name: Run OMP-1 deterministic replay twice
-              run: ./scripts/check_determinism.sh
+              run: |
+                  ./scripts/check_determinism.sh --self-test
+                  ./scripts/check_determinism.sh
 
     browser_artifact:
         name: Browser artifact smoke
@@ -105,7 +107,10 @@ jobs:
                       --requirement scripts/browser_matrix-requirements.txt
 
             - name: Build the pinned love.js artifact
-              run: ./scripts/web_build.sh "$RUNNER_TEMP/omp1-web"
+              run: |
+                  "$RUNNER_TEMP/browser-evidence/bin/python" \
+                      scripts/browser_determinism.py --self-test
+                  ./scripts/web_build.sh "$RUNNER_TEMP/omp1-web"
 
             - name: Run two fresh Chrome and Firefox determinism campaigns
               env:

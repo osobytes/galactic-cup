@@ -37,9 +37,17 @@ fi
 
 echo "==> OMP-1 determinism (two fresh native processes)"
 if command -v love >/dev/null 2>&1; then
+    ./scripts/check_determinism.sh --self-test || fail=1
     ./scripts/check_determinism.sh || fail=1
 else
     echo "   ! love not installed — skipping"
+fi
+
+echo "==> OMP-1 browser evidence harness self-test"
+if command -v python3 >/dev/null 2>&1; then
+    python3 -B scripts/browser_determinism.py --self-test || fail=1
+else
+    echo "   ! python3 not installed — skipping"
 fi
 
 if [ "$fail" -ne 0 ]; then
