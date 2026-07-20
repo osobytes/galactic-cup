@@ -1,0 +1,18 @@
+local t = require("spec.support.runner")
+local fnv1a64 = require("core.fnv1a64")
+
+t.describe("core.fnv1a64", function()
+    t.it("matches published FNV-1a-64 vectors without native integer support", function()
+        t.eq(fnv1a64.hash(""), "cbf29ce484222325")
+        t.eq(fnv1a64.hash("a"), "af63dc4c8601ec8c")
+        t.eq(fnv1a64.hash("foobar"), "85944171f73967e8")
+        t.eq(fnv1a64.hash("hello"), "a430d84680aabd0b")
+    end)
+
+    t.it("supports incremental byte updates", function()
+        local state = fnv1a64.new()
+        fnv1a64.update(state, "foo")
+        fnv1a64.update(state, "bar")
+        t.eq(fnv1a64.hex(state), fnv1a64.hash("foobar"))
+    end)
+end)
