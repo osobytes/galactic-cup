@@ -1,6 +1,8 @@
 # OMP-1 determinism evidence
 
-Status: **pass on the accepted Linux native/Chrome/Firefox scope**.
+Status: **native pass on the authoritative snapshot-v2 fixture; current
+Chrome/Firefox v2 verification is enforced by CI**. The accepted snapshot-v1
+browser evidence remains preserved as a historical artifact below.
 
 This report closes the OMP-1 evidence line. It proves that one complete,
 recorded eight-slot fixture has a stable state boundary after every fixed
@@ -20,7 +22,7 @@ the explicit refresh command is invoked.
 | Identity field | Frozen value |
 | --- | --- |
 | Fixture | `omp1-nebula-orion-eight-streams-v1` |
-| Tape / input / snapshot versions | `1 / 1 / 1` |
+| Tape / input / snapshot versions | `1 / 1 / 2` |
 | Build | `omp1-determinism-v1` |
 | Source | `issue-39-canonical-recording-v1` |
 | Content | `nebula-orion-showcase-content-v1` |
@@ -38,7 +40,7 @@ with an integer tick budget and version the fixture.
 
 ## Hash and repeated-run result
 
-Every boundary is encoded with canonical snapshot version 1 and hashed with
+Every boundary is encoded with canonical snapshot version 2 and hashed with
 the browser-safe FNV-1a-64 implementation. Verification performs these three
 checks:
 
@@ -51,11 +53,11 @@ The authoritative values are:
 
 ```text
 boundaries=7202
-final_hash=b379a3a3ab5d7682
-sequence_digest=0ff53075e3e626e0
+final_hash=79c494c29b3a5993
+sequence_digest=33be51fd81b0f02f
 score=0-1
 outcome=away
-final_snapshot_bytes=16859
+final_snapshot_bytes=17269
 ```
 
 The complete match produced:
@@ -110,10 +112,10 @@ On the development machine (Zorin OS 18.1, Linux x86_64, native LÖVE 11.5),
 1,000 operations at boundary tick 120 measured:
 
 ```text
-snapshot_measure version=1 tick=120 bytes=15411 iterations=1000 hash=752916a99d0b62e8
-snapshot_measure encode_us_each=185.695
-snapshot_measure hash_with_encode_us_each=1342.830
-snapshot_measure restore_us_each=85.426
+snapshot_measure version=2 tick=120 bytes=15821 iterations=1000 hash=05897347969cf789
+snapshot_measure encode_us_each=201.839
+snapshot_measure hash_with_encode_us_each=1455.804
+snapshot_measure restore_us_each=94.606
 ```
 
 These are observations, not thresholds. The complete two-state native
@@ -136,17 +138,23 @@ result marker and no loader/runtime errors, and verifies bounded process-group
 cleanup. It launches two fresh profiles per required browser and fails, rather
 than skips, if Chrome or Firefox is missing.
 
-## Supported runtime matrix
+## Runtime verification
 
-| Runtime | Executions | Wall time | Result |
+The authoritative snapshot-v2 fixture passes the two-fresh-process native
+command above. CI builds a clean love.js artifact and runs the same current
+fixture in real Chrome and Firefox; that workflow, rather than a hand-edited
+evidence file, supplies the v2 browser integration proof.
+
+### Historical snapshot-v1 browser evidence
+
+| Runtime | Executions | Wall time | Historical result |
 | --- | ---: | ---: | --- |
-| Linux native LÖVE 11.5 | Two fresh processes plus in-process independent-state comparison | 23–25 s per process | Pass |
-| Linux Chrome 151.0.7922.34 / pinned love.js 11.5 | Two fresh browser profiles | 207.956 s, 196.828 s | Pass |
-| Linux Firefox 152.0.6 / pinned love.js 11.5 | Two fresh browser profiles | 217.953 s, 214.245 s | Pass |
+| Linux Chrome 151.0.7922.34 / pinned love.js 11.5 | Two fresh browser profiles | 207.956 s, 196.828 s | Pass on snapshot v1 |
+| Linux Firefox 152.0.6 / pinned love.js 11.5 | Two fresh browser profiles | 217.953 s, 214.245 s | Pass on snapshot v1 |
 
-All runtime rows use the one checked-in per-tick baseline. There are no
-per-runtime expected hashes. All four browser executions produced final hash
-`b379a3a3ab5d7682` and sequence digest `0ff53075e3e626e0`.
+Those four historical browser executions produced final hash
+`b379a3a3ab5d7682` and sequence digest `0ff53075e3e626e0`. They are not presented
+as proof for the migrated v2 hashes.
 
 The clean browser artifact was built from source commit `16fad22`, with package
 SHA-256 `2ec87dfa91770ea6b6772444c490808bf4ef7eaf2eca9693a3e7fbca27187f4f`.
@@ -156,8 +164,8 @@ fallback sent `TERM`, observed geckodriver exit code 0, verified the complete
 group disappeared, and left no Firefox/geckodriver orphan. This is a teardown
 limitation, not a simulation mismatch or silent skip.
 
-The compact machine-readable record, including exact durations, driver
-versions, teardown outcomes, and raw-log hashes, is
+The immutable historical machine-readable record, including exact durations,
+driver versions, teardown outcomes, and raw-log hashes, is
 [`evidence/omp1_browser_linux_2026-07-20.json`](evidence/omp1_browser_linux_2026-07-20.json).
 
 ## Offline-product compatibility
@@ -182,8 +190,9 @@ browser artifact packaging path is replaced by this evidence work.
 
 ## Remaining OMP-2 risks
 
-- Evidence is authoritative for the accepted Linux native/Chrome/Firefox
-  scope, not Windows, macOS, or cross-architecture floating-point behavior.
+- The checked-in browser artifact is historical snapshot-v1 evidence. Current
+  snapshot-v2 Chrome/Firefox proof runs in CI and is not a substitute for
+  Windows, macOS, or cross-architecture floating-point evidence.
 - The full-time boundary currently depends on floating countdown semantics
   and consumes 7,201 inputs for a nominal 7,200-tick duration.
 - Canonical snapshots intentionally include all declared simulation state and

@@ -416,7 +416,7 @@ function determinism_evidence.report(result)
         "tick_rate=" .. fixed_clock.TICK_RATE,
         "ticks=" .. result.ticks,
         "boundaries=" .. result.boundaries,
-        "hash=fnv1a64-canonical-snapshot-v1",
+        ("hash=fnv1a64-canonical-snapshot-v%d"):format(match_snapshot.VERSION),
         "final_hash=" .. result.final_hash,
         "sequence_digest=" .. result.sequence_digest,
         "score=" .. result.score_home .. "-" .. result.score_away,
