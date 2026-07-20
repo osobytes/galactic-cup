@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -16,12 +17,14 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from browser_matrix import resolve_assets
+from browser_matrix import resolve_assets, validate_manifest
 from web_serve import ArtifactHandler
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_COMMIT = "495c5eb7eb55b54aaadfc21405c58f50a6d819c4"
+RUNTIME_REPOSITORY = "https://github.com/2dengine/love.js"
+RUNTIME_ARCHIVE_SHA256 = "89b56e7953935d6cb06c454d0ee0c0d8903e433b9a94d1d6d501fb8b516f5ff6"
 REQUIRED_FIELDS = {
     "schema": "1",
     "fixture": "omp1-nebula-orion-eight-streams-v1",
@@ -71,6 +74,28 @@ def parse_marker(line: str) -> dict[str, str]:
                 f"determinism marker {key} mismatch: expected {expected}, got {fields.get(key)}"
             )
     return fields
+
+
+def validate_provenance(manifest: dict[str, Any], allow_dirty: bool) -> None:
+    source_dirty = manifest.get("source_dirty")
+    if not isinstance(source_dirty, bool):
+        raise RuntimeError("browser artifact source_dirty must be a boolean")
+    if source_dirty and not allow_dirty:
+        raise RuntimeError("browser determinism refuses a dirty source manifest")
+    runtime = manifest.get("runtime")
+    if not isinstance(runtime, dict):
+        raise RuntimeError("browser artifact runtime metadata is missing")
+    expected = {
+        "archive_sha256": RUNTIME_ARCHIVE_SHA256,
+        "commit": RUNTIME_COMMIT,
+        "repository": RUNTIME_REPOSITORY,
+    }
+    for key, value in expected.items():
+        if runtime.get(key) != value:
+            raise RuntimeError(
+                f"browser artifact runtime {key} mismatch: "
+                f"expected {value}, got {runtime.get(key)}"
+            )
 
 
 def driver_version(path: Path) -> str:
@@ -352,6 +377,48 @@ def self_test() -> None:
     )
     if fields != REQUIRED_FIELDS:
         raise RuntimeError("marker parser self-test failed")
+
+    for invalid_dirty in (None, "false", 0):
+        invalid_manifest = {
+            "source_dirty": invalid_dirty,
+            "runtime": {
+                "archive_sha256": RUNTIME_ARCHIVE_SHA256,
+                "commit": RUNTIME_COMMIT,
+                "repository": RUNTIME_REPOSITORY,
+            },
+        }
+        try:
+            validate_provenance(invalid_manifest, allow_dirty=True)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("non-boolean source_dirty passed provenance self-test")
+
+    with tempfile.TemporaryDirectory(prefix="gc-browser-determinism-self-test-") as temp:
+        artifact = Path(temp)
+        (artifact / "payload.bin").write_bytes(b"tampered")
+        bad_hash = "0" * 64
+        manifest = {
+            "files": {"payload.bin": bad_hash},
+            "game_package": {"path": "payload.bin", "sha256": bad_hash},
+        }
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            lambda *a, **k: ArtifactHandler(*a, directory=str(artifact), **k),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            try:
+                validate_manifest(f"http://127.0.0.1:{server.server_port}/", manifest)
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError("tampered served artifact passed manifest self-test")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
     print("browser determinism self-test: OK")
 
 
@@ -382,26 +449,33 @@ def main() -> int:
 
     artifact = args.artifact.resolve()
     manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("runtime", {}).get("commit") != RUNTIME_COMMIT:
-        raise SystemExit("browser artifact does not use the pinned love.js runtime")
-    if manifest.get("source_dirty") and not args.allow_dirty:
-        raise SystemExit("browser determinism refuses a dirty source manifest")
+    validate_provenance(manifest, args.allow_dirty)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), lambda *a, **k: ArtifactHandler(*a, directory=str(artifact), **k))
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        lambda *a, **k: ArtifactHandler(*a, directory=str(artifact), **k),
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    query = urllib.parse.urlencode(
-        {"arg": json.dumps(["--determinism", "--browser-runtime"], separators=(",", ":"))}
-    )
-    url = f"http://127.0.0.1:{server.server_port}/?{query}"
-    output = args.output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    log_dir = output.parent / (output.stem + "-logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    records: list[dict[str, Any]] = []
-    assets: dict[str, dict[str, str]] = {}
+    base_url = f"http://127.0.0.1:{server.server_port}/"
     try:
+        validate_manifest(base_url, manifest)
+        query = urllib.parse.urlencode(
+            {
+                "arg": json.dumps(
+                    ["--determinism", "--browser-runtime"],
+                    separators=(",", ":"),
+                )
+            }
+        )
+        url = f"{base_url}?{query}"
+        output = args.output.resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        log_dir = output.parent / (output.stem + "-logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        records: list[dict[str, Any]] = []
+        assets: dict[str, dict[str, str]] = {}
         for browser_name in browsers:
             binary, driver_path = resolve_assets(browser_name, None, None)
             assets[browser_name] = {
