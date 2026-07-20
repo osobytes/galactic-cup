@@ -51,9 +51,13 @@ t.describe("offline match input adapter", function()
         t.is_true(consumed[1].shoot)
         t.is_true(consumed[1].lob, "the paired lob modifier is preserved for the release")
 
-        local _, later = match_input_adapter.next_tick(adapter)
+        local next_adapter, later = match_input_adapter.next_tick(adapter)
         t.is_true(not later.shoot)
-        t.is_true(not later.lob)
+        t.is_true(later.lob, "the modifier remains held until the next render sample")
+
+        next_adapter = match_input_adapter.sample(next_adapter, input())
+        local _, released = match_input_adapter.next_tick(next_adapter)
+        t.is_true(not released.lob)
     end)
 
     t.it("emits edges only on the first catch-up tick while preserving holds", function()
