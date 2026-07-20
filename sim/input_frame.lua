@@ -330,6 +330,9 @@ function input_frame.quantize_axis(raw_axis)
     local clamped = math.max(-1, math.min(1, raw_axis))
     local scaled = clamped * input_frame.MOVE_SCALE
     local quantized = scaled >= 0 and math.floor(scaled + 0.5) or math.ceil(scaled - 0.5)
+    if quantized == 0 then
+        return 0
+    end
     ---@cast quantized integer
     return quantized
 end

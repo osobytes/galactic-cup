@@ -847,9 +847,7 @@ local function nearest_n(s, team, count)
             cand[#cand + 1] = { idx = i, d = p.pos:dist(s.ball) }
         end
     end
-    table.sort(cand, function(a, b)
-        return a.d < b.d
-    end)
+    table.sort(cand, placement.distance_candidate_before)
     local set = {}
     for k = 1, math.min(count, #cand) do
         set[cand[k].idx] = true
