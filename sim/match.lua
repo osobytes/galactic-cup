@@ -961,6 +961,19 @@ function match._ground_pass_aim(owner, target)
     return target.pos:add(target.vel:scale(d / pass_speed * PASS_LEAD))
 end
 
+-- A moving receiver can lead the raw ground aim beyond the pitch. Establish a
+-- legal pre-error landing plan with enough inset for the fixed 4..20px miss;
+-- execution then preserves its sampled radius around this defensible ideal.
+---@param s MatchState
+---@param ideal Vec2
+---@return Vec2
+function match._legal_hand_throw_ideal(s, ideal)
+    return Vec2.new(
+        math.max(25, math.min(s.field.w - 25, ideal.x)),
+        math.max(25, math.min(s.field.h - 25, ideal.y))
+    )
+end
+
 -- Opposing outfielders as interception threats against a pass by `team`.
 -- Keepers are excluded: they hold their box instead of chasing lanes.
 ---@param s MatchState
@@ -1435,6 +1448,7 @@ end
 ---@param ideal Vec2
 ---@return Vec2 executed
 function match._apply_hand_throw_error(s, keeper, target_idx, ideal)
+    assert(s.players[target_idx], "hand-throw target is missing")
     local angle_roll, magnitude_roll
     s.distribution_rng, angle_roll = rng.roll(s.distribution_rng)
     s.distribution_rng, magnitude_roll = rng.roll(s.distribution_rng)
@@ -1445,19 +1459,18 @@ function match._apply_hand_throw_error(s, keeper, target_idx, ideal)
     local angle = angle_roll * math.pi * 2
     local error_offset = Vec2.new(math.cos(angle), math.sin(angle)):scale(radius)
 
-    local target = s.players[target_idx]
     local near_d, near_opp
     local safe_dir
     for _, opponent in ipairs(s.players) do
         if opponent.team ~= keeper.team then
-            local d = opponent.pos:dist(target.pos)
+            local d = opponent.pos:dist(ideal)
             if not near_d or d < near_d then
                 near_d, near_opp = d, opponent
             end
         end
     end
     if near_opp and near_d < THROW_COVER_DIST then
-        local away = target.pos:sub(near_opp.pos)
+        local away = ideal:sub(near_opp.pos)
         safe_dir = (away:length() > 1) and away:normalized() or keeper.facing
         local toward_safe = error_offset.x * safe_dir.x + error_offset.y * safe_dir.y
         if toward_safe < 0 then
@@ -1509,7 +1522,8 @@ end
 ---@param target_idx integer
 function match._release_ground_hand_throw(s, keeper_idx, target_idx)
     local keeper = s.players[keeper_idx]
-    local ideal = match._ground_pass_aim(keeper, s.players[target_idx])
+    local raw_ideal = match._ground_pass_aim(keeper, s.players[target_idx])
+    local ideal = match._legal_hand_throw_ideal(s, raw_ideal)
     local aim = match._apply_hand_throw_error(s, keeper, target_idx, ideal)
     -- release_pass still owns the established target-distance pace and any
     -- adjacent-body dink; accuracy changes direction only.

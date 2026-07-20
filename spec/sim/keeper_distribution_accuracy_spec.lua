@@ -236,6 +236,55 @@ t.describe("keeper hand-distribution accuracy", function()
         )
     end)
 
+    t.it("measures safe-side execution from a clamped ideal rather than the target", function()
+        local s = hand_scenario(0)
+        local keeper = s.players[1]
+        local target = s.players[2]
+        target.pos = Vec2.new(12, 12)
+        s.players[7].pos = Vec2.new(12, 42)
+        local ideal = Vec2.new(25, 25)
+        s.distribution_rng = 62446
+        local _, expected_radius = sampled_error(s.distribution_rng, keeper.distribution_accuracy)
+        local ideal_cover_distance = ideal:dist(s.players[7].pos)
+
+        local executed = match._apply_hand_throw_error(s, keeper, 2, ideal)
+
+        t.near(
+            executed:dist(ideal),
+            expected_radius,
+            1e-6,
+            "clamped-ideal execution preserves sampled magnitude"
+        )
+        assert_in_field(executed, s)
+        t.is_true(
+            executed:dist(s.players[7].pos) >= ideal_cover_distance,
+            "execution cannot move a clamped ideal closer to its nearest cover"
+        )
+    end)
+
+    t.it("legalizes an unbounded moving-receiver aim before applying elite error", function()
+        local s = hand_scenario(10)
+        local keeper = s.players[1]
+        local target = s.players[2]
+        target.pos = Vec2.new(12, 270)
+        target.vel = Vec2.new(-260, 0)
+        local raw_ideal = match._ground_pass_aim(keeper, target)
+        t.is_true(raw_ideal.x < 6, "fixture lead places the raw ideal outside the field")
+        local ideal = match._legal_hand_throw_ideal(s, raw_ideal)
+        t.eq(ideal.x, 25, "ground hand throw establishes an inset legal ideal")
+
+        local executed = match._apply_hand_throw_error(s, keeper, 2, ideal)
+        t.near(executed:dist(ideal), 4, 1e-6, "elite error remains 4px around the legal ideal")
+        assert_in_field(executed, s)
+
+        local release = hand_scenario(10)
+        release.players[2].pos = Vec2.new(12, 270)
+        release.players[2].vel = Vec2.new(-260, 0)
+        match._release_ground_hand_throw(release, 1, 2)
+        t.eq(receiver(release), 2, "legalizing execution does not change the selected outlet")
+        t.eq(release.ball_vz, 0, "legalizing execution retains the ground tier")
+    end)
+
     t.it("draws only when the hand release happens and always draws twice", function()
         local preview = hand_scenario(10)
         local preview_rng = preview.rng
