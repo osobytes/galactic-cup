@@ -389,8 +389,9 @@ function pitch.draw(s, vp, opts)
     -- Pass-target preview: a small pulsing double-ring at the intended receiver's
     -- feet while the pass button is held. Guards love.timer access so the smoke
     -- test (which stubs love.graphics but not love.timer) stays green.
-    if s.pass_target then
-        local tp = s.players[s.pass_target]
+    local cp = s.players[s.controlled]
+    if cp.pass_target then
+        local tp = s.players[cp.pass_target]
         local tsx, tsy, tscale = project(tp.pos.x, tp.pos.y)
         local t_now = (love.timer and love.timer.getTime and love.timer.getTime()) or 0
         local pulse = 0.65 + 0.35 * math.abs(math.sin(t_now * 5))
@@ -405,12 +406,11 @@ function pitch.draw(s, vp, opts)
 
     -- Charge meter under the controlled player (soccer-game power bar):
     -- warm while charging a shot/punt, cool while charging a pass range.
-    local cp = s.players[s.controlled]
     local amt, ccol, label
-    if s.charge > 0.02 then
-        amt, ccol, label = s.charge, { 1, 0.72, 0.3 }, "SHOT"
-    elseif s.pass_charge > 0.02 then
-        amt, ccol, label = s.pass_charge, { 0.45, 0.85, 1 }, "PASS"
+    if cp.charge > 0.02 then
+        amt, ccol, label = cp.charge, { 1, 0.72, 0.3 }, "SHOT"
+    elseif cp.pass_charge > 0.02 then
+        amt, ccol, label = cp.pass_charge, { 0.45, 0.85, 1 }, "PASS"
     end
     if amt then
         local sx, sy, scale = project(cp.pos.x, cp.pos.y)

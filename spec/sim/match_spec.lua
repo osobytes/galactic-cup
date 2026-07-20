@@ -137,7 +137,7 @@ t.describe("match.step charge shot", function()
     local function shot_speed(charge)
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(1, 0)
-        s.charge = charge
+        s.players[s.controlled].charge = charge
         match.step(s, 0.016, input({ shoot = true }))
         -- Step past the wind-up so the ball is in flight.
         step_frames(s, WINDUP_FRAMES)
@@ -151,7 +151,7 @@ t.describe("match.step charge shot", function()
     t.it("holding shoot builds charge", function()
         local s = new_match()
         match.step(s, 0.1, input({ shoot_held = true }))
-        t.is_true(s.charge > 0)
+        t.is_true(s.players[s.controlled].charge > 0)
     end)
 end)
 
@@ -1920,7 +1920,7 @@ t.describe("match human keeper control", function()
         local function punt(charge)
             local s = new_match()
             home_keeper_holding(s)
-            s.charge = charge
+            s.players[s.controlled].charge = charge
             match.step(s, 0.016, input({ shoot = true }))
             -- Step past the wind-up so the ball releases.
             step_frames(s, WINDUP_FRAMES)
@@ -1948,7 +1948,7 @@ t.describe("match human keeper control", function()
                     p.pos = Vec2.new(900, 40 + i * 40) -- both options genuinely open
                 end
             end
-            s.pass_charge = charge
+            s.players[s.controlled].pass_charge = charge
             match.step(s, 0.016, input({ pass = true }))
             for i, pl in ipairs(s.players) do
                 if pl.receive_timer > 0 then
@@ -2767,7 +2767,7 @@ t.describe("match.step pass-target preview", function()
     t.it("pass_target is nil when idle (not holding pass)", function()
         local s = new_match()
         match.step(s, 0.016, NO_INPUT)
-        t.eq(s.pass_target, nil, "pass_target is nil when idle")
+        t.eq(s.players[s.controlled].pass_target, nil, "pass_target is nil when idle")
     end)
 
     -- Acceptance 1: outfielder preview equals the actual receiver.
@@ -2796,8 +2796,8 @@ t.describe("match.step pass-target preview", function()
         local recorded_target
         for _ = 1, 10 do
             match.step(s, 0.016, input({ pass_held = true }))
-            if s.pass_target then
-                recorded_target = s.pass_target
+            if s.players[passer].pass_target then
+                recorded_target = s.players[passer].pass_target
             end
         end
         t.is_true(recorded_target ~= nil, "pass_target was set while charging")
@@ -2830,8 +2830,8 @@ t.describe("match.step pass-target preview", function()
         local recorded_target
         for _ = 1, 10 do
             match.step(s, 0.016, input({ pass_held = true, move = Vec2.new(1, 0) }))
-            if s.pass_target then
-                recorded_target = s.pass_target
+            if s.players[1].pass_target then
+                recorded_target = s.players[1].pass_target
             end
         end
         t.is_true(recorded_target ~= nil, "keeper pass_target was set while charging")
@@ -3010,7 +3010,7 @@ t.describe("match wind-up telegraphs (T5)", function()
         -- the player keeps holding shoot during the wind-up.
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(1, 0)
-        s.charge = 1 -- full charge captured on commit
+        s.players[s.controlled].charge = 1 -- full charge captured on commit
         match.step(s, 0.016, input({ shoot = true }))
         -- Hold shoot during wind-up — must not reset charge or re-commit.
         for _ = 1, WINDUP_FRAMES do

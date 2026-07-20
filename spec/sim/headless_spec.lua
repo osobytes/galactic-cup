@@ -25,6 +25,23 @@ local function recorded_frames(ticks)
     return frames
 end
 
+---@param ticks integer
+---@return InputFrame[]
+local function recorded_simultaneous_actions(ticks)
+    local frames = recorded_frames(ticks)
+    for tick = 0, math.min(4, ticks - 1) do
+        frames[tick + 1].slots[4] =
+            assert(input_frame.new_sample({ held = input_frame.HELD_BITS.pass }))
+        frames[tick + 1].slots[5] =
+            assert(input_frame.new_sample({ held = input_frame.HELD_BITS.jockey }))
+    end
+    if ticks > 5 then
+        frames[6].slots[4] = assert(input_frame.new_sample({ edges = input_frame.EDGE_BITS.pass }))
+        frames[6].slots[5] = assert(input_frame.new_sample({ edges = input_frame.EDGE_BITS.dash }))
+    end
+    return frames
+end
+
 ---@param a MatchMetrics
 ---@param b MatchMetrics
 local function assert_same_metrics(a, b)
@@ -221,23 +238,26 @@ t.describe("headless.run_match", function()
         assert_same_metrics(a.metrics, b.metrics)
     end)
 
-    t.it("replays a complete eight-stream recorded fixture deterministically", function()
-        local frames = recorded_frames(200)
-        local a = headless.run_match({
-            seed = 67,
-            duration = 3,
-            frames = frames,
-        })
-        local b = headless.run_match({
-            seed = 67,
-            duration = 3,
-            frames = frames,
-        })
-        t.is_true(a.metrics.duration >= 2.9)
-        t.eq(a.score.home, b.score.home)
-        t.eq(a.score.away, b.score.away)
-        assert_same_metrics(a.metrics, b.metrics)
-    end)
+    t.it(
+        "replays a complete eight-stream fixture with simultaneous actions deterministically",
+        function()
+            local frames = recorded_simultaneous_actions(200)
+            local a = headless.run_match({
+                seed = 67,
+                duration = 3,
+                frames = frames,
+            })
+            local b = headless.run_match({
+                seed = 67,
+                duration = 3,
+                frames = frames,
+            })
+            t.is_true(a.metrics.duration >= 2.9)
+            t.eq(a.score.home, b.score.home)
+            t.eq(a.score.away, b.score.away)
+            assert_same_metrics(a.metrics, b.metrics)
+        end
+    )
 
     t.it("defaults a complete recording to all frame sources", function()
         local ok, result, producer = run_capturing_producer({

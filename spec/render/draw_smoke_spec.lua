@@ -63,7 +63,7 @@ t.describe("renderer smoke", function()
                 away = teams.orion,
                 field = { w = 960, h = 540 },
             })
-            s.charge = 0.6 -- exercise the charge-meter path
+            s.players[s.controlled].charge = 0.6 -- exercise the charge-meter path
             pitch.draw(s, { w = 1280, h = 720 }, {
                 home_color = teams.nebula.color,
                 away_color = teams.orion.color,
@@ -80,7 +80,7 @@ t.describe("renderer smoke", function()
                 field = { w = 960, h = 540 },
             })
             -- Point at player index 2 (a home outfielder) as the preview target.
-            s.pass_target = 2
+            s.players[s.controlled].pass_target = 2
             pitch.draw(s, { w = 1280, h = 720 }, {
                 home_color = teams.nebula.color,
                 away_color = teams.orion.color,

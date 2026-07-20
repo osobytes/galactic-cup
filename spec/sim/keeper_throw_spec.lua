@@ -80,7 +80,7 @@ end
 ---@return string outcome
 local function play_throw(attacker_pos, aim, charge)
     local s = scenario(attacker_pos)
-    s.pass_charge = charge
+    s.players[s.controlled].pass_charge = charge
     match.step(s, 1 / 60, input({ pass = true, move = aim }))
     for _ = 1, 300 do
         match.step(s, 1 / 60, NO_MOVE)
@@ -144,7 +144,7 @@ t.describe("keeper hand-throw reliability (1 presser, 2 outlets)", function()
         -- Presser square on the lane to d2; throw at d2. The flight must be
         -- untouchable when it passes the presser: higher than any jump.
         local s = scenario(Vec2.new(160, 330))
-        s.pass_charge = 0.2
+        s.players[s.controlled].pass_charge = 0.2
         match.step(s, 1 / 60, input({ pass = true, move = Vec2.new(1, 1):normalized() }))
         local aerial = require("sim.aerial")
         local max_z_near_presser = 0

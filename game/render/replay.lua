@@ -106,6 +106,9 @@ function replay.record(s)
             aerial_outcome = p.aerial_outcome,
             aerial_jump = p.aerial_jump,
             sprint_meter = 1, -- keeps the HUD meter hidden during playback
+            charge = 0,
+            pass_charge = 0,
+            pass_target = nil,
             jockey_timer = 0,
         }
     end
@@ -127,9 +130,6 @@ function replay.record(s)
         ball_vel = Vec2.new(s.ball_vel.x, s.ball_vel.y),
         ball_z = s.ball_z,
         ball_vz = s.ball_vz,
-        charge = 0,
-        pass_charge = 0,
-        pass_target = nil,
         finished = false,
         players = players,
         events = events,

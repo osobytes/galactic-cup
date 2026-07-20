@@ -12,6 +12,21 @@ outfielder is routed from its permanent slot; neither possession nor selected
 player state participates in the routing. Both keepers have no slot and stay
 under deterministic keeper AI.
 
+Controller-specific action state follows the assigned player rather than the
+match. Each `MatchPlayer` owns its shot/punt charge, pass-range charge,
+pass-target preview, wind-up payload/timer, tackle and dodge cooldowns, and
+other action recovery. Only the current carrier can accumulate a shot or pass
+charge, and losing possession clears that player's charge, preview, and
+pending wind-up before another owner acts. Complete frame rows are still
+consumed independently in canonical player order, so one slot's simultaneous
+hold or release cannot overwrite another slot's movement, tackle, dodge, or
+aerial intent.
+
+The legacy `controlled` index remains offline presentation/input metadata. Slot
+mode ignores its switch edge and never changes it for a pass, turnover, aerial
+assist, keeper possession, or kickoff. The immutable `slot_players` and
+`slot_for_player` tables are the only slot-routing authority.
+
 ## Explicit empty-slot policy
 
 Every frame still carries all eight samples. The fixture also records one
@@ -52,6 +67,9 @@ later producer converts one of its tick `MatchInput`s with
 adapter's effective modifier intent: it may remain set on the shoot/pass release
 tick when the render-side latch pairs a just-released action with its preceding
 loft modifier. The simulation consumes that recorded tick value directly.
+Offline switching, pass-follow control, cross/aerial assistance, and temporary
+human keeper distribution remain enabled only outside slot mode; those rules
+select which player's own action state the single legacy input drives.
 
 ## Headless recordings
 

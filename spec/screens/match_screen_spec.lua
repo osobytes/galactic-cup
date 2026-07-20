@@ -204,7 +204,10 @@ t.describe("match screen lob latch (tier 2)", function()
             for _ = 1, 20 do -- a third of a second of holding K
                 m:update(1 / 60) -- (a full meter would auto-fire and reset)
             end
-            t.is_true(m.state.pass_charge > 0.5, "the pass range charged up")
+            t.is_true(
+                m.state.players[m.state.controlled].pass_charge > 0.5,
+                "the pass range charged up"
+            )
         end)
     end)
 end)
