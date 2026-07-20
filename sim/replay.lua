@@ -70,21 +70,33 @@ end
 ---@param expected_identity InputTapeIdentity
 ---@return boolean?, ReplayFailure?
 local function validate_context(tape, expected_identity)
-    local ok, err = pcall(input_tape.validate, tape)
-    if not ok then
-        return malformed(tostring(err))
+    if type(tape) ~= "table" then
+        return malformed("input tape must be a table")
     end
-    local identity_ok, difference =
-        pcall(input_tape.identity_difference, expected_identity, tape.identity)
-    if not identity_ok then
-        return malformed(tostring(difference))
+    local tape_identity_ok, tape_identity = pcall(input_tape.copy_identity, tape.identity)
+    if not tape_identity_ok then
+        return malformed(tostring(tape_identity))
     end
+    ---@cast tape_identity InputTapeIdentity
+    local expected_ok, copied_expected = pcall(input_tape.copy_identity, expected_identity)
+    if not expected_ok then
+        return malformed(tostring(copied_expected))
+    end
+    ---@cast copied_expected InputTapeIdentity
+    local difference = input_tape.identity_difference(copied_expected, tape_identity)
     if difference then
         return identity_failure(difference.path, difference.expected, difference.actual)
     end
     local active_tuning = tuning.serialize()
-    if active_tuning ~= tape.identity.tuning then
-        return identity_failure("identity.tuning", tape.identity.tuning, active_tuning)
+    if active_tuning ~= tape_identity.tuning then
+        return identity_failure("identity.tuning", tape_identity.tuning, active_tuning)
+    end
+    -- Full tape validation may step a restored state to prove that every frame
+    -- is consumable. Identity and active tuning must be accepted before that
+    -- simulation-aware path so configuration mismatches cannot be mislabeled.
+    local tape_ok, tape_err = pcall(input_tape.validate, tape)
+    if not tape_ok then
+        return malformed(tostring(tape_err))
     end
     return true
 end

@@ -70,6 +70,34 @@ t.describe("input tape replay", function()
         t.eq(tune_mismatch.path, "identity.tuning")
     end)
 
+    t.it("rejects identity before simulation-aware tape validation", function()
+        local tape, identity = short_match_tape.make()
+        tape.frames[4] = assert(input_frame.neutral(3))
+        tape.boundary_hashes[5] = tape.boundary_hashes[4]
+
+        local wrong = input_tape.copy_identity(identity)
+        wrong.content = "different-content"
+        local mismatched, mismatch_failure = replay.run(tape, wrong)
+        t.eq(mismatched, nil)
+        local mismatch = assert(mismatch_failure)
+        t.eq(mismatch.code, "identity_mismatch")
+        t.eq(mismatch.path, "identity.content")
+
+        tuning.set("AI_SHOOT_RANGE", tuning.values.AI_SHOOT_RANGE + 1)
+        local tuned, tune_failure = replay.run(tape, identity)
+        tuning.reset()
+        t.eq(tuned, nil)
+        local tune_mismatch = assert(tune_failure)
+        t.eq(tune_mismatch.code, "identity_mismatch")
+        t.eq(tune_mismatch.path, "identity.tuning")
+
+        local missing_identity, valid_identity = short_match_tape.make()
+        rawset(missing_identity, "identity", nil)
+        local malformed_result, malformed_failure = replay.run(missing_identity, valid_identity)
+        t.eq(malformed_result, nil)
+        t.eq(assert(malformed_failure).code, "malformed")
+    end)
+
     t.it("names the first causal input and differing state path", function()
         local reference, identity = short_match_tape.make()
         local changed_frames = copy_frames(reference)
