@@ -314,6 +314,8 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field save_pending "catch"|"parry"|nil  -- committed save verdict awaiting ball contact
 ---@field save_timer number  -- backstop countdown to force-resolve a pending save
 ---@field save_vx number  -- shot x-velocity at commit (sign flip = deflected, dive whiffs)
+---@field save_style SaveStyle?  -- deterministic presentation style for the active attempt
+---@field save_tip_emitted boolean  -- one-shot guard for the current released shot
 ---@field settle_timer number  -- AI first-touch control window (no pressured pass until settled)
 ---@field header_cd number  -- cooldown between aerial (header/volley) attempts
 ---@field aerial_timer number  -- transient aerial pose timer
@@ -350,10 +352,11 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 -- a frame's events are whatever happened during that frame. Positions are world
 -- space; `player` is the actor's id (nil for ball-only events).
 ---@class MatchEvent
----@field kind "shot"|"pass"|"touch"|"tackle"|"catch"|"parry"|"claim"|"block"|"header"|"volley"|"bicycle"|"reception"|"juke"
+---@field kind "shot"|"pass"|"touch"|"tackle"|"catch"|"parry"|"tip"|"claim"|"block"|"header"|"volley"|"bicycle"|"reception"|"juke"
 ---@field x number
 ---@field y number
 ---@field player string?
+---@field save_style SaveStyle?
 ---@field style AerialStyle?
 ---@field outcome AerialOutcome?
 ---@field jumping boolean?
@@ -543,6 +546,8 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             save_pending = nil,
             save_timer = 0,
             save_vx = 0,
+            save_style = nil,
+            save_tip_emitted = false,
             settle_timer = 0,
             header_cd = 0,
             aerial_timer = 0,
@@ -628,6 +633,8 @@ local function place_kickoff(s, kicking)
         p.save_pending = nil
         p.save_timer = 0
         p.save_vx = 0
+        p.save_style = nil
+        p.save_tip_emitted = false
         p.settle_timer = 0
         p.header_cd = 0
         p.aerial_timer = 0
@@ -919,6 +926,12 @@ end
 ---@param speed number?  -- defaults to the shooter's base shot speed
 ---@param vz number?  -- vertical launch (a chip); defaults to 0 (driven, on the ground)
 local function release_shot(s, owner, dir, speed, vz)
+    for _, player in ipairs(s.players) do
+        if player.is_keeper then
+            player.save_style = nil
+            player.save_tip_emitted = false
+        end
+    end
     s.events[#s.events + 1] = { kind = "shot", x = s.ball.x, y = s.ball.y, player = owner.id }
     s.owner = nil
     s.kickoff_hold = 0
@@ -2670,7 +2683,35 @@ local function attempt_save(s)
                 -- How far the keeper has to dive along its line to reach the shot.
                 local dive_dist = math.abs(keeper.pos.y - y_cross)
                 local block_reach = species.block_reach(keeper.owned_verb)
-                if on_target and dive_dist <= keeper.reach + block_reach and eta then
+                -- Physical save eligibility already includes the species block-reach
+                -- seam. Use that same effective reach for style and tip geometry;
+                -- catch/parry quality deliberately keeps its existing base-reach math.
+                local effective_reach = keeper.reach + block_reach
+                if on_target and eta then
+                    local dist_to_keeper = keeper.pos:dist(s.ball)
+                    local save_style
+                    if dist_to_keeper > KEEPER_SMOTHER then
+                        save_style = require("sim.keeper").save_style(
+                            dist_to_keeper,
+                            dive_dist,
+                            effective_reach
+                        )
+                    end
+
+                    if dive_dist > effective_reach then
+                        if dive_dist <= effective_reach * 1.1 and not keeper.save_tip_emitted then
+                            keeper.save_tip_emitted = true
+                            s.events[#s.events + 1] = {
+                                kind = "tip",
+                                x = keeper.pos.x,
+                                y = y_cross,
+                                player = keeper.id,
+                            }
+                        end
+                        return
+                    end
+
+                    keeper.save_style = save_style
                     -- Queue the dive so the lunge window covers the arrival:
                     -- a shot still half a second out gets a set keeper first,
                     -- then a dive that meets the ball, not one that finished
@@ -2727,18 +2768,30 @@ local function resolve_pending_save(s, dt)
             if reversed then
                 keeper.save_pending = nil -- the shot was deflected: the dive whiffs
                 keeper.dive_delay = 0 -- and a still-queued lunge stays holstered
+                keeper.save_style = nil
+                keeper.save_tip_emitted = false
             elseif s.ball_vel:length() < DEAD_SHOT_SPEED and not contact then
                 -- The shot died short of the gloves: it is a loose ball now.
                 -- Drop the commitment so the normal claim logic gathers it —
                 -- never vacuum a stationary ball across open grass.
                 keeper.save_pending = nil
                 keeper.dive_delay = 0
+                keeper.save_style = nil
+                keeper.save_tip_emitted = false
             elseif contact or crossed or keeper.save_timer <= 0 then
                 keeper.save_pending = nil
                 keeper.dive_delay = 0
+                local save_style = keeper.save_style
+                keeper.save_style = nil
+                keeper.save_tip_emitted = false
                 if pend == "catch" then
-                    s.events[#s.events + 1] =
-                        { kind = "catch", x = s.ball.x, y = s.ball.y, player = keeper.id }
+                    s.events[#s.events + 1] = {
+                        kind = "catch",
+                        x = s.ball.x,
+                        y = s.ball.y,
+                        player = keeper.id,
+                        save_style = save_style,
+                    }
                     s.ball = keeper_hold_pos(s, keeper)
                     s.owner = ki
                     s.ball_vel = Vec2.new(0, 0)
@@ -2753,8 +2806,13 @@ local function resolve_pending_save(s, dt)
                 -- Parry from the actual contact point: punch it clear — out AND
                 -- up, so the deflection sails over the shooter, never served
                 -- into their body. Keep the ball safely outside the goal line.
-                s.events[#s.events + 1] =
-                    { kind = "parry", x = s.ball.x, y = s.ball.y, player = keeper.id }
+                s.events[#s.events + 1] = {
+                    kind = "parry",
+                    x = s.ball.x,
+                    y = s.ball.y,
+                    player = keeper.id,
+                    save_style = save_style,
+                }
                 local goal = (keeper.team == "home") and s.goal_home or s.goal_away
                 local bx = s.ball.x
                 if keeper.team == "home" then
@@ -2971,6 +3029,8 @@ local function update_ball(s, dt, inputs)
         -- An owned ball invalidates any committed save still waiting on contact.
         for _, q in ipairs(s.players) do
             q.save_pending = nil
+            q.save_style = nil
+            q.save_tip_emitted = false
         end
         local owner = s.players[s.owner]
         local input = inputs[s.owner] or slot_input.neutral_match_input()
@@ -3207,6 +3267,8 @@ local function update_ball(s, dt, inputs)
                             -- ball any more (a keeper's save reflexes included).
                             for _, q in ipairs(s.players) do
                                 q.receive_timer = 0
+                                q.save_style = nil
+                                q.save_tip_emitted = false
                             end
                             break
                         end
@@ -3281,6 +3343,10 @@ local function update_ball(s, dt, inputs)
 
         if best then
             local bp = s.players[best]
+            for _, player in ipairs(s.players) do
+                player.save_style = nil
+                player.save_tip_emitted = false
+            end
             if bp.is_keeper and bp.receive_timer <= 0 then
                 -- A keeper gather: claim event + gather pose, then it surveys/holds.
                 -- Snap the ball into its hands so a claim right on the line can't
@@ -3413,6 +3479,8 @@ function match.step(s, dt, input)
             p.dive_timer = math.max(0, p.dive_timer - dt)
             if p.dive_timer == 0 then
                 p.dive_target = nil
+                p.save_style = nil
+                p.save_tip_emitted = false
             end
         end
         if p.dive_delay > 0 then
@@ -3423,6 +3491,9 @@ function match.step(s, dt, input)
                 local inbound = (p.team == "home") and (s.ball_vel.x < 0) or (s.ball_vel.x > 0)
                 if inbound then
                     launch_dive(s, p)
+                else
+                    p.save_style = nil
+                    p.save_tip_emitted = false
                 end
             end
         end
@@ -3555,6 +3626,10 @@ function match.step(s, dt, input)
 
     local scorer = check_goal(s, prev_ball_x)
     if scorer then
+        for _, player in ipairs(s.players) do
+            player.save_style = nil
+            player.save_tip_emitted = false
+        end
         if s.score.home >= s.max_goals or s.score.away >= s.max_goals then
             s.finished = true
         else

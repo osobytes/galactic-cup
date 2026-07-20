@@ -13,11 +13,16 @@ mode, `MatchState.input_tick` is the next causal `InputFrame.tick` to consume.
 The hash at boundary `N` therefore describes state after input `N - 1` and
 before input `N`.
 
-Snapshot version 1 explicitly lists every `MatchState` and `MatchPlayer` field
+Snapshot version 2 explicitly lists every `MatchState` and `MatchPlayer` field
 in canonical order. It includes match RNG, ball/player action state, fixed
 tick metadata, input ownership, both slot mappings, marking hysteresis,
 optional wind-up/dive payloads, and the current event list. Capture and restore
 deep-copy all tables, and restore reconstructs every `Vec2` metatable.
+
+Version 2 adds the keeper's transient `save_style` and one-shot tip-event guard
+to `MatchPlayer`, plus optional `save_style` data on catch/parry events.
+Version 1 snapshots and tapes are intentionally rejected rather than silently
+restored without this save-resolution state.
 
 The allowlists reject unknown fields, and a spec compares them with the
 LuaCATS declarations in `sim/match.lua`. Adding a state field must therefore
@@ -30,7 +35,7 @@ different match.
 
 ## Canonical bytes and hash
 
-The byte stream starts with `GCMS;` and snapshot version 1. Record names and
+The byte stream starts with `GCMS;` and snapshot version 2. Record names and
 strings are length-prefixed; nil, booleans, strings, and numbers have distinct
 tags. Arrays and sparse index maps are emitted in their declared numeric
 ranges. Records use the checked-in field arrays, never `pairs` iteration.
@@ -101,7 +106,8 @@ The numbers are machine/runtime observations for OMP-1 issue #39. They are not
 native/browser equality evidence or a performance guarantee. Native and
 love.js must be measured separately before making a cross-runtime cost claim.
 
-One native LÖVE 11.5 run on the project development machine produced:
+One native LÖVE 11.5 run of the historical version 1 schema on the project
+development machine produced:
 
 ```text
 snapshot_measure version=1 tick=120 bytes=15411 iterations=1000 hash=752916a99d0b62e8
