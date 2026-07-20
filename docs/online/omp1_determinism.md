@@ -1,6 +1,6 @@
 # OMP-1 determinism evidence
 
-Status: **implemented; authoritative Linux runtime results recorded below**.
+Status: **pass on the accepted Linux native/Chrome/Firefox scope**.
 
 This report closes the OMP-1 evidence line. It proves that one complete,
 recorded eight-slot fixture has a stable state boundary after every fixed
@@ -130,20 +130,35 @@ python3 scripts/browser_determinism.py \
     --output /tmp/omp1-browser-determinism.json
 ```
 
-The runner requires a clean artifact, the pinned love.js 11.5 runtime, one
-result marker and no loader/runtime errors. It launches two fresh profiles per
-required browser and fails, rather than skips, if Chrome or Firefox is missing.
+The runner requires a boolean clean-source marker, validates every served byte
+against the manifest, pins the love.js repository/commit/archive, requires one
+result marker and no loader/runtime errors, and verifies bounded process-group
+cleanup. It launches two fresh profiles per required browser and fails, rather
+than skips, if Chrome or Firefox is missing.
 
 ## Supported runtime matrix
 
-| Runtime | Executions | Result |
-| --- | ---: | --- |
-| Linux native LÖVE 11.5 | Two fresh processes plus in-process independent-state comparison | Pass |
-| Linux Chrome / pinned love.js 11.5 | Two fresh browser profiles | Recorded by the issue #39 PR check |
-| Linux Firefox / pinned love.js 11.5 | Two fresh browser profiles | Recorded by the issue #39 PR check |
+| Runtime | Executions | Wall time | Result |
+| --- | ---: | ---: | --- |
+| Linux native LÖVE 11.5 | Two fresh processes plus in-process independent-state comparison | 23–25 s per process | Pass |
+| Linux Chrome 151.0.7922.34 / pinned love.js 11.5 | Two fresh browser profiles | 207.956 s, 196.828 s | Pass |
+| Linux Firefox 152.0.6 / pinned love.js 11.5 | Two fresh browser profiles | 217.953 s, 214.245 s | Pass |
 
 All runtime rows use the one checked-in per-tick baseline. There are no
-per-runtime expected hashes.
+per-runtime expected hashes. All four browser executions produced final hash
+`b379a3a3ab5d7682` and sequence digest `0ff53075e3e626e0`.
+
+The clean browser artifact was built from source commit `16fad22`, with package
+SHA-256 `2ec87dfa91770ea6b6772444c490808bf4ef7eaf2eca9693a3e7fbca27187f4f`.
+Chrome exited normally. Firefox 152 reached the valid result in both runs but
+its normal quit exceeded 30 seconds; the runner's isolated-process-group
+fallback sent `TERM`, observed geckodriver exit code 0, verified the complete
+group disappeared, and left no Firefox/geckodriver orphan. This is a teardown
+limitation, not a simulation mismatch or silent skip.
+
+The compact machine-readable record, including exact durations, driver
+versions, teardown outcomes, and raw-log hashes, is
+[`evidence/omp1_browser_linux_2026-07-20.json`](evidence/omp1_browser_linux_2026-07-20.json).
 
 ## Offline-product compatibility
 
