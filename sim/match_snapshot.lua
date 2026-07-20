@@ -21,7 +21,7 @@ local input_frame = require("sim.input_frame")
 ---@class MatchSnapshotModule
 local match_snapshot = {}
 
-match_snapshot.VERSION = 1
+match_snapshot.VERSION = 2
 
 match_snapshot.MATCH_FIELDS = {
     "field",
@@ -83,6 +83,9 @@ match_snapshot.PLAYER_FIELDS = {
     "dodge_dir",
     "reach",
     "handling",
+    "keeper_aggression",
+    "keeper_anticipation",
+    "keeper_1v1_target",
     "dive_timer",
     "dive_dir",
     "dive_delay",
@@ -132,6 +135,7 @@ local VECTOR_FIELDS = {
 
 local OPTIONAL_VECTOR_FIELDS = {
     dive_target = true,
+    keeper_1v1_target = true,
 }
 
 local EVENT_FIELDS = {

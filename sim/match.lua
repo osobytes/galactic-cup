@@ -10,6 +10,7 @@ local Vec2 = require("core.vec2")
 local rng = require("core.rng")
 local TUNE = require("sim.tuning").values -- live-tunable knobs (F1 panel)
 local aerial = require("sim.aerial")
+local keeper = require("sim.keeper")
 local stats = require("sim.stats")
 local species = require("sim.species")
 local placement = require("sim.placement")
@@ -51,7 +52,6 @@ local DRIBBLE_ERR_SKILL = 0.85 -- top skill cancels this fraction of the touch e
 local DRIBBLE_CONTROL_SKILL = 26 -- extra control radius a top-skill carrier earns (px)
 local POSSESS_DIST = 22 -- outfield control radius
 local KEEPER_DIST = 18 -- keeper catch radius (small enough that corners stay open)
-local KEEPER_GUARD = 28 -- how far off-centre a keeper slides (< half the mouth)
 local KEEPER_BOX_DEPTH = 160 -- how far off its line the keeper will come to claim
 -- The PENALTY AREA (the drawn box): a keeper holding the ball may not carry it
 -- out of here. Exported for the renderer so the rule and the paint agree.
@@ -60,6 +60,8 @@ local PENALTY_H = 200
 local KEEPER_BOX_PAD = 30 -- vertical margin beyond the posts for the claim zone
 local KEEPER_CLAIM_DIST = 40 -- grab radius when actively claiming a ball in the box (priority)
 local KEEPER_LEAD = 0.01 -- anticipation lead when claiming a moving ball
+-- Conservative first pass: a nearby passing option keeps the keeper on its normal arc.
+local KEEPER_1V1_SUPPORT = 120
 local POSSESS_MAX_SPEED = 350 -- outfield can only collect a slow-enough ball
 local PASS_SPEED = 420 -- minimum pass pace; long passes are driven harder (see pass_speed_for)
 local PASS_ARRIVE_PACE = 120 -- ball speed left when a pass reaches its receiver
@@ -293,6 +295,9 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field dodge_dir Vec2  -- sidestep direction for the active juke
 ---@field reach number  -- keeper dive/save radius in px (0 for outfield)
 ---@field handling number  -- keeper clean-catch factor 0..1 (0 for outfield)
+---@field keeper_aggression number  -- positioning depth in px (0 for outfield)
+---@field keeper_anticipation number  -- 0..1 shot-reading quality (0 for outfield)
+---@field keeper_1v1_target Vec2?  -- locked hold-and-narrow target for a lone carrier
 ---@field dive_timer number  -- seconds of keeper dive lunge remaining
 ---@field dive_dir Vec2  -- unit direction of the active dive
 ---@field dive_delay number  -- countdown until a queued dive launches (synced to ball arrival)
@@ -522,6 +527,13 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             dodge_dir = Vec2.new(0, 0),
             reach = (pd.position == "keeper") and stats.keeper_reach(effective_stats) or 0,
             handling = (pd.position == "keeper") and stats.keeper_handling(effective_stats) or 0,
+            keeper_aggression = (pd.position == "keeper") and stats.keeper_aggression(
+                effective_stats
+            ) or 0,
+            keeper_anticipation = (pd.position == "keeper") and stats.keeper_anticipation(
+                effective_stats
+            ) or 0,
+            keeper_1v1_target = nil,
             dive_timer = 0,
             dive_dir = Vec2.new(0, 0),
             dive_delay = 0,
@@ -612,6 +624,7 @@ local function place_kickoff(s, kicking)
         p.dive_dir = Vec2.new(0, 0)
         p.dive_delay = 0
         p.dive_target = nil
+        p.keeper_1v1_target = nil
         p.hold_timer = 0
         p.feet_ball = false
         p.slide_timer = 0
@@ -697,14 +710,13 @@ local function place_kickoff(s, kicking)
     end
 end
 
--- Hybrid default so tactics authored before the marking block still work.
-local DEFAULT_MARKING =
-    { scheme = "hybrid", man_marks = 1, standoff = 32, compactness = 0.5, support = 0.5 }
-
 ---@param tactic TacticData
 ---@return MarkingConfig
 local function marking_of(tactic)
-    return tactic.marking or DEFAULT_MARKING
+    -- Keep the compatibility fallback function-local so this near-limit chunk
+    -- does not spend a permanent local on legacy data.
+    return tactic.marking
+        or { scheme = "hybrid", man_marks = 1, standoff = 32, compactness = 0.5, support = 0.5 }
 end
 
 ---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, human_controlled: boolean?, input_ownership: InputOwnership? }
@@ -2018,8 +2030,6 @@ end
 ---@param dt number
 ---@param inputs table<integer, MatchInput>
 local function move_players(s, dt, inputs)
-    local owner = s.owner and s.players[s.owner] or nil
-
     -- Snapshot positions so role targets read one consistent world state and we
     -- can derive each player's realized velocity after everyone has moved. Vec2 is
     -- immutable, so aliasing p.pos here is safe.
@@ -2030,6 +2040,9 @@ local function move_players(s, dt, inputs)
     local targets, urgent = offball_targets(s, prev)
 
     for i, p in ipairs(s.players) do
+        if p.is_keeper and s.owner == i then
+            p.keeper_1v1_target = nil
+        end
         if is_human_player(s, i) then
             local input = inputs[i] or slot_input.neutral_match_input()
             local aerial_requested = aerial.strike_requested(input)
@@ -2314,8 +2327,8 @@ local function move_players(s, dt, inputs)
             end
         elseif p.is_keeper then
             update_sprint(p, false, dt)
-            local opp_owns = owner ~= nil and owner.team ~= p.team
             if p.dive_timer > 0 then
+                p.keeper_1v1_target = nil
                 -- Diving: lunge hard toward the intercept point — and STOP
                 -- there. Unclamped, a near-straight shot (a 2px correction)
                 -- became a full-speed lunge PAST the ball: gloves closing on
@@ -2334,7 +2347,14 @@ local function move_players(s, dt, inputs)
                     p.facing = p.dive_dir
                 end
                 p.run_vel = Vec2.new(0, 0)
+            elseif p.save_pending or p.dive_delay > 0 then
+                -- A committed reaction owns the keeper until it launches or
+                -- resolves. Decelerate through locomotion instead of layering
+                -- positioning movement under the queued save.
+                p.keeper_1v1_target = nil
+                apply_locomotion(s, p, Vec2.new(0, 0), dt)
             elseif s.owner == nil and p.receive_timer > 0 then
+                p.keeper_1v1_target = nil
                 -- Meet a teammate's back-pass at the ball. Generic predictive
                 -- pursuit is wrong here: its horizon grows with distance, so an
                 -- incoming pass projects behind the keeper and sends it backward
@@ -2343,23 +2363,68 @@ local function move_players(s, dt, inputs)
                 local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
                     or Vec2.new(0, 0)
                 apply_locomotion(s, p, desired, dt)
-            elseif (s.owner == nil or opp_owns) and in_claim_zone(s, p) then
-                -- Come off the line to claim a loose ball in the box — or to close
-                -- down a carrier who brings it in (the 1v1 rush). Predictive
-                -- pursuit remains useful for these non-designated claims.
+            elseif s.owner == nil and in_claim_zone(s, p) then
+                p.keeper_1v1_target = nil
+                -- Come off the line to claim a loose ball in the box.
+                -- Predictive pursuit remains useful for non-designated claims.
                 local aim = ai.pursue(p.pos, s.ball, s.ball_vel, KEEPER_LEAD)
                 local _, dir = ai.steer(p.pos, aim, p.move_speed * dt)
                 local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
                     or Vec2.new(0, 0)
                 apply_locomotion(s, p, desired, dt)
             else
-                -- Hold the goal line, tracking the ball but only across a centre band
-                -- (KEEPER_GUARD) so well-placed corner shots stay scorable.
+                -- Hold the angle-bisected arc. A composed keeper facing a lone
+                -- carrier locks one hold-and-narrow target on entry; its
+                -- lateral component cannot chase feints before the shot.
                 local goal = (p.team == "home") and s.goal_home or s.goal_away
-                local line_x = (p.team == "home") and (goal.x + goal.w + 12) or (goal.x - 12)
-                local cy = goal.y + goal.h / 2
-                local ty = math.max(cy - KEEPER_GUARD, math.min(cy + KEEPER_GUARD, s.ball.y))
-                local _, dir = ai.steer(p.pos, Vec2.new(line_x, ty), p.move_speed * dt)
+                -- The support scan is scoped to this keeper branch: no
+                -- per-player global O(players^2) pass.
+                local carrier = s.owner and s.players[s.owner] or nil
+                if
+                    carrier
+                    and (carrier.is_keeper or carrier.team == p.team or not in_claim_zone(s, p))
+                then
+                    carrier = nil
+                end
+                if carrier then
+                    for _, support in ipairs(s.players) do
+                        if
+                            support ~= carrier
+                            and support.team == carrier.team
+                            and not support.is_keeper
+                            and support.pos:dist(carrier.pos) <= KEEPER_1V1_SUPPORT
+                        then
+                            carrier = nil
+                            break
+                        end
+                    end
+                end
+                local in_1v1 = carrier ~= nil and p.keeper_anticipation >= 0.6
+                local target
+                if in_1v1 then
+                    if not p.keeper_1v1_target then
+                        p.keeper_1v1_target = keeper.arc_target({
+                            keeper_pos = p.pos,
+                            ball_pos = s.ball,
+                            goal = goal,
+                            team = p.team,
+                            aggression = p.keeper_aggression,
+                            in_1v1 = true,
+                        })
+                    end
+                    target = assert(p.keeper_1v1_target)
+                else
+                    p.keeper_1v1_target = nil
+                    target = keeper.arc_target({
+                        keeper_pos = p.pos,
+                        ball_pos = s.ball,
+                        goal = goal,
+                        team = p.team,
+                        aggression = p.keeper_aggression,
+                        in_1v1 = false,
+                    })
+                end
+                local _, dir = ai.steer(p.pos, target, p.move_speed * dt)
                 local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
                     or Vec2.new(0, 0)
                 apply_locomotion(s, p, desired, dt)
@@ -3488,6 +3553,17 @@ function match.step(s, dt, input)
     move_players(s, dt, inputs)
     attempt_steals(s)
     update_ball(s, dt, inputs)
+
+    -- A possession transition ends every locked confrontation in the same
+    -- tick. This covers shots/passes (owner -> loose), claims/smothers, and
+    -- turnovers without adding transition hooks throughout the ball resolver.
+    if s.owner ~= prev_owner then
+        for _, p in ipairs(s.players) do
+            if p.is_keeper then
+                p.keeper_1v1_target = nil
+            end
+        end
+    end
 
     -- A gained ball resolves any in-flight pass: nobody is "running onto" it
     -- any more. In particular an INTERCEPTED back-pass ends the keeper's

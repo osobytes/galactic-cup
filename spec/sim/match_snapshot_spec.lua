@@ -54,6 +54,7 @@ t.describe("canonical match snapshots", function()
     t.it("captures and restores every nested payload as independent state", function()
         local state = new_state()
         state.players[2].dive_target = Vec2.new(10, 20)
+        state.players[1].keeper_1v1_target = Vec2.new(40, 285)
         state.players[2].windup_shot = {
             dir = Vec2.new(0.25, -0.75),
             speed = 456,
@@ -74,15 +75,21 @@ t.describe("canonical match snapshots", function()
         local restored = match_snapshot.restore(snapshot)
 
         state.players[2].pos.x = -100
+        state.players[1].keeper_1v1_target.x = -101
         state.players[2].windup_shot.dir.y = 99
         state.events[1].x = 999
         t.is_true(snapshot.state.players[2].pos.x ~= -100)
+        t.eq(snapshot.state.players[1].keeper_1v1_target.x, 40)
         t.eq(snapshot.state.players[2].windup_shot.dir.y, -0.75)
         t.eq(snapshot.state.events[1].x, 44)
 
         snapshot.state.players[2].pos.y = -200
+        snapshot.state.players[1].keeper_1v1_target.y = -201
         snapshot.state.players[2].windup_shot.speed = 1
         t.is_true(restored.players[2].pos.y ~= -200)
+        t.eq(restored.players[1].keeper_1v1_target.y, 285)
+        t.near(restored.players[1].keeper_aggression, state.players[1].keeper_aggression)
+        t.near(restored.players[1].keeper_anticipation, state.players[1].keeper_anticipation)
         t.eq(restored.players[2].windup_shot.speed, 456)
         t.near(restored.players[2].windup_shot.dir:length(), math.sqrt(0.625))
     end)
@@ -140,6 +147,12 @@ t.describe("canonical match snapshots", function()
         rawset(state, "future_match_field", nil)
         rawset(state.players[1], "future_player_field", true)
         t.is_true(not pcall(match_snapshot.capture, state))
+    end)
+
+    t.it("rejects the prior snapshot schema instead of inventing keeper state", function()
+        local snapshot = match_snapshot.capture(new_state())
+        snapshot.version = match_snapshot.VERSION - 1
+        t.is_true(not pcall(match_snapshot.restore, snapshot))
     end)
 
     t.it("uses exact canonical finite-number spelling", function()

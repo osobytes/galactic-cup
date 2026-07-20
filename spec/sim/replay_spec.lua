@@ -128,6 +128,18 @@ t.describe("input tape replay", function()
         t.eq(divergence.actual_state, 1)
     end)
 
+    t.it("diagnoses a changed locked keeper target before any causal input", function()
+        local reference, identity = short_match_tape.make()
+        local changed = match_snapshot.capture(match_snapshot.restore(reference.initial))
+        changed.state.players[1].keeper_1v1_target = { x = 40, y = 285 }
+        local candidate = input_tape.new(identity, changed, copy_frames(reference))
+        local comparison = assert(replay.compare(reference, candidate, identity))
+        local divergence = assert(comparison.divergence)
+        t.eq(divergence.causal_input_tick, nil)
+        t.eq(divergence.boundary_tick, 0)
+        t.eq(divergence.state_path, "state.players.1.keeper_1v1_target")
+    end)
+
     t.it("detects tampering against a tape's frozen boundary hashes", function()
         local tape, identity = short_match_tape.make()
         tape.frames[1].slots[1].move_x = -127
