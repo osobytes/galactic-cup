@@ -53,6 +53,8 @@ t.describe("canonical match snapshots", function()
 
     t.it("captures and restores every nested payload as independent state", function()
         local state = new_state()
+        state.distribution_rng = 1234
+        state.players[1].distribution_accuracy = 0.73
         state.players[2].dive_target = Vec2.new(10, 20)
         state.players[2].windup_shot = {
             dir = Vec2.new(0.25, -0.75),
@@ -85,6 +87,8 @@ t.describe("canonical match snapshots", function()
         t.is_true(restored.players[2].pos.y ~= -200)
         t.eq(restored.players[2].windup_shot.speed, 456)
         t.near(restored.players[2].windup_shot.dir:length(), math.sqrt(0.625))
+        t.eq(restored.distribution_rng, 1234)
+        t.eq(restored.players[1].distribution_accuracy, 0.73)
     end)
 
     t.it("converges snapshot advance restore and replay at every boundary", function()

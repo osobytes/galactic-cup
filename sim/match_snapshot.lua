@@ -21,7 +21,7 @@ local input_frame = require("sim.input_frame")
 ---@class MatchSnapshotModule
 local match_snapshot = {}
 
-match_snapshot.VERSION = 1
+match_snapshot.VERSION = 2
 
 match_snapshot.MATCH_FIELDS = {
     "field",
@@ -45,6 +45,7 @@ match_snapshot.MATCH_FIELDS = {
     "marks",
     "ball_spin",
     "rng",
+    "distribution_rng",
     "block_grace",
     "aerial_lock",
     "kickoff_hold",
@@ -83,6 +84,7 @@ match_snapshot.PLAYER_FIELDS = {
     "dodge_dir",
     "reach",
     "handling",
+    "distribution_accuracy",
     "dive_timer",
     "dive_dir",
     "dive_delay",
@@ -431,6 +433,7 @@ local function copy_state(source, path, make_vec)
         "pickup_cd",
         "ball_spin",
         "rng",
+        "distribution_rng",
         "block_grace",
         "aerial_lock",
         "kickoff_hold",

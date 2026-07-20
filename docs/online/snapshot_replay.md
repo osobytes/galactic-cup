@@ -13,11 +13,12 @@ mode, `MatchState.input_tick` is the next causal `InputFrame.tick` to consume.
 The hash at boundary `N` therefore describes state after input `N - 1` and
 before input `N`.
 
-Snapshot version 1 explicitly lists every `MatchState` and `MatchPlayer` field
-in canonical order. It includes match RNG, ball/player action state, fixed
-tick metadata, input ownership, both slot mappings, marking hysteresis,
-optional wind-up/dive payloads, and the current event list. Capture and restore
-deep-copy all tables, and restore reconstructs every `Vec2` metatable.
+Snapshot version 2 explicitly lists every `MatchState` and `MatchPlayer` field
+in canonical order. It includes match RNG, the domain-separated goalkeeper
+distribution RNG, ball/player action state, fixed tick metadata, input
+ownership, both slot mappings, marking hysteresis, optional wind-up/dive
+payloads, and the current event list. Capture and restore deep-copy all tables,
+and restore reconstructs every `Vec2` metatable.
 
 The allowlists reject unknown fields, and a spec compares them with the
 LuaCATS declarations in `sim/match.lua`. Adding a state field must therefore
@@ -30,7 +31,7 @@ different match.
 
 ## Canonical bytes and hash
 
-The byte stream starts with `GCMS;` and snapshot version 1. Record names and
+The byte stream starts with `GCMS;` and snapshot version 2. Record names and
 strings are length-prefixed; nil, booleans, strings, and numbers have distinct
 tags. Arrays and sparse index maps are emitted in their declared numeric
 ranges. Records use the checked-in field arrays, never `pairs` iteration.

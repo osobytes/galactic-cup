@@ -293,6 +293,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field dodge_dir Vec2  -- sidestep direction for the active juke
 ---@field reach number  -- keeper dive/save radius in px (0 for outfield)
 ---@field handling number  -- keeper clean-catch factor 0..1 (0 for outfield)
+---@field distribution_accuracy number  -- keeper hand-throw accuracy 0..1 (0 for outfield)
 ---@field dive_timer number  -- seconds of keeper dive lunge remaining
 ---@field dive_dir Vec2  -- unit direction of the active dive
 ---@field dive_delay number  -- countdown until a queued dive launches (synced to ball arrival)
@@ -381,6 +382,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field marks { home: table<integer, integer>, away: table<integer, integer> }  -- prev marking assignment (hysteresis)
 ---@field ball_spin number  -- lateral curve applied to the loose ball
 ---@field rng integer  -- seeded PRNG state (core.rng): same seed = same match
+---@field distribution_rng integer  -- domain-separated hand-throw execution PRNG state
 ---@field block_grace number  -- body-blocking re-enabled when this hits 0 (set on release)
 ---@field aerial_lock number  -- seconds until this loose ball can take another aerial contact
 ---@field kickoff_hold number  -- seconds left of post-restart defensive hold (0 = press resumes)
@@ -392,6 +394,8 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field input_tick integer -- InputFrame tick expected by the next slot-mode step.
 
 local match = {}
+
+match._DISTRIBUTION_RNG_DOMAIN = 104729
 
 ---@return table<string, PlayerData>
 local function pool_by_id()
@@ -522,6 +526,9 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             dodge_dir = Vec2.new(0, 0),
             reach = (pd.position == "keeper") and stats.keeper_reach(effective_stats) or 0,
             handling = (pd.position == "keeper") and stats.keeper_handling(effective_stats) or 0,
+            distribution_accuracy = (pd.position == "keeper")
+                    and stats.keeper_distribution_accuracy(effective_stats)
+                or 0,
             dive_timer = 0,
             dive_dir = Vec2.new(0, 0),
             dive_delay = 0,
@@ -722,6 +729,12 @@ function match.new(opts)
     for _ = 1, 3 do
         rstate = rng.roll(rstate)
     end
+    -- Hand-distribution execution has its own domain-separated stream so its
+    -- two release-time draws cannot perturb later saves, touches, or contests.
+    local distribution_rstate = rng.seed((opts.seed or 42) + match._DISTRIBUTION_RNG_DOMAIN)
+    for _ = 1, 3 do
+        distribution_rstate = rng.roll(distribution_rstate)
+    end
 
     local home = build_team(
         opts.home,
@@ -802,6 +815,7 @@ function match.new(opts)
         kickoff_hold = 0,
         ball_spin = 0,
         rng = rstate,
+        distribution_rng = distribution_rstate,
         events = {},
         slot_mode = opts.input_ownership ~= nil,
         input_ownership = opts.input_ownership and assert(
@@ -938,6 +952,15 @@ local function pass_speed_for(d)
     return math.min(PASS_SPEED_MAX, math.max(PASS_SPEED, PASS_ARRIVE_PACE + FRICTION * d))
 end
 
+---@param owner MatchPlayer
+---@param target MatchPlayer
+---@return Vec2
+function match._ground_pass_aim(owner, target)
+    local d = owner.pos:dist(target.pos)
+    local pass_speed = pass_speed_for(d) * species.link_pass_speed(owner.owned_verb)
+    return target.pos:add(target.vel:scale(d / pass_speed * PASS_LEAD))
+end
+
 -- Opposing outfielders as interception threats against a pass by `team`.
 -- Keepers are excluded: they hold their box instead of chasing lanes.
 ---@param s MatchState
@@ -973,7 +996,8 @@ end
 ---@param blocker_f number?  -- lob over this lane fraction; nil = driven ground pass
 ---@param clear_h number?  -- loft clearance height (defaults to a foot lob)
 ---@param land_pos Vec2?  -- planned landing point (keeper throws); default: the receiver
-local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h, land_pos)
+---@param ground_aim Vec2?  -- execution aim for a ground keeper throw
+local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h, land_pos, ground_aim)
     local owner = s.players[owner_idx]
     local target = s.players[target_idx]
     -- Control follows a HUMAN pass to its receiver (standard soccer-game
@@ -1022,14 +1046,18 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h, land_p
     s.pickup_cd = RELEASE_CD
     s.block_grace = BLOCK_GRACE
     if blocker_f then
-        s.ball_vel, s.ball_vz =
-            lob_launch(owner.pos, land_pos or target.pos, blocker_f, clear_h or LOB_CLEAR_H)
+        s.ball_vel, s.ball_vz = lob_launch(
+            owner.pos,
+            land_pos or ground_aim or target.pos,
+            blocker_f,
+            clear_h or LOB_CLEAR_H
+        )
     else
         local d = owner.pos:dist(target.pos)
         local pass_speed = pass_speed_for(d) * species.link_pass_speed(owner.owned_verb)
         -- Lead a MOVING receiver into their run (a fraction of the flight
         -- time) so the ball meets their stride instead of their heels.
-        local aim_pt = target.pos:add(target.vel:scale(d / pass_speed * PASS_LEAD))
+        local aim_pt = ground_aim or match._ground_pass_aim(owner, target)
         s.ball_vel = aim_pt:sub(owner.pos):normalized():scale(pass_speed)
         s.ball_vz = 0
     end
@@ -1307,6 +1335,102 @@ local function plan_throw(s, keeper, target_idx)
     return land, 0.5, THROW_CLEAR_H
 end
 
+-- Apply execution error only after the keeper has selected an outlet and tier.
+-- Every actual hand release consumes the same two project-RNG draws, including
+-- accuracy 1, so matched seeds keep the same error direction/sample. The
+-- positive floor prevents any keeper from receiving a guaranteed perfect aim.
+-- Covered outlets reflect only the error direction away from their nearest
+-- cover; magnitude remains technique-derived and the safe-side plan cannot be
+-- turned back toward the presser.
+---@param s MatchState
+---@param keeper MatchPlayer
+---@param target_idx integer
+---@param ideal Vec2
+---@return Vec2 executed
+function match._apply_hand_throw_error(s, keeper, target_idx, ideal)
+    local angle_roll, magnitude_roll
+    s.distribution_rng, angle_roll = rng.roll(s.distribution_rng)
+    s.distribution_rng, magnitude_roll = rng.roll(s.distribution_rng)
+
+    -- The 4..20 px envelope stays below both the collection radius and the
+    -- established minimum outlet openness.
+    local radius = 4 + (1 - keeper.distribution_accuracy) * 16 * (0.5 + 0.5 * magnitude_roll)
+    local angle = angle_roll * math.pi * 2
+    local error_offset = Vec2.new(math.cos(angle), math.sin(angle)):scale(radius)
+
+    local target = s.players[target_idx]
+    local near_d, near_opp
+    for _, opponent in ipairs(s.players) do
+        if opponent.team ~= keeper.team then
+            local d = opponent.pos:dist(target.pos)
+            if not near_d or d < near_d then
+                near_d, near_opp = d, opponent
+            end
+        end
+    end
+    if near_opp and near_d < THROW_COVER_DIST then
+        local away = target.pos:sub(near_opp.pos)
+        local safe_dir = (away:length() > 1) and away:normalized() or keeper.facing
+        local toward_safe = error_offset.x * safe_dir.x + error_offset.y * safe_dir.y
+        if toward_safe < 0 then
+            error_offset = error_offset:sub(safe_dir:scale(2 * toward_safe))
+        end
+    end
+
+    local executed = ideal:add(error_offset)
+    return Vec2.new(
+        math.max(25, math.min(s.field.w - 25, executed.x)),
+        math.max(25, math.min(s.field.h - 25, executed.y))
+    )
+end
+
+-- Execution error may move a lofted hand throw onto a busier flight line.
+-- Re-check only that released line: outlet/tier are already fixed, the planned
+-- arc is never lowered, and a newly exposed blocker can only strengthen it.
+---@param s MatchState
+---@param keeper MatchPlayer
+---@param land Vec2
+---@param f number
+---@param clear_h number
+---@return number f
+---@return number clear_h
+function match._strengthen_hand_throw_arc(s, keeper, land, f, clear_h)
+    local opponents = {}
+    for _, opponent in ipairs(s.players) do
+        if opponent.team ~= keeper.team then
+            opponents[#opponents + 1] = opponent.pos
+        end
+    end
+    local blocker_f = ai.lane_blocker(keeper.pos, land, opponents, THROW_LANE_W)
+    if blocker_f then
+        return math.max(0.2, math.min(0.8, blocker_f)), math.max(clear_h, THROW_SAFE_CLEAR)
+    end
+    return f, clear_h
+end
+
+---@param s MatchState
+---@param keeper_idx integer
+---@param target_idx integer
+function match._release_lofted_hand_throw(s, keeper_idx, target_idx)
+    local keeper = s.players[keeper_idx]
+    local ideal, f, clear_h = plan_throw(s, keeper, target_idx)
+    local land = match._apply_hand_throw_error(s, keeper, target_idx, ideal)
+    f, clear_h = match._strengthen_hand_throw_arc(s, keeper, land, f, clear_h)
+    release_pass(s, keeper_idx, target_idx, f, clear_h, land)
+end
+
+---@param s MatchState
+---@param keeper_idx integer
+---@param target_idx integer
+function match._release_ground_hand_throw(s, keeper_idx, target_idx)
+    local keeper = s.players[keeper_idx]
+    local ideal = match._ground_pass_aim(keeper, s.players[target_idx])
+    local aim = match._apply_hand_throw_error(s, keeper, target_idx, ideal)
+    -- release_pass still owns the established target-distance pace and any
+    -- adjacent-body dink; accuracy changes direction only.
+    release_pass(s, keeper_idx, target_idx, nil, nil, nil, aim)
+end
+
 -- Human keeper throw: aimed like a pass (facing cone), the charged range
 -- picking WHICH teammate; the flight comes from plan_throw (uninterferable).
 ---@param s MatchState
@@ -1319,8 +1443,7 @@ local function keeper_throw(s, keeper_idx, range, aim)
     if not target_idx then
         return
     end
-    local land, f, clear_h = plan_throw(s, keeper, target_idx)
-    release_pass(s, keeper_idx, target_idx, f, clear_h, land)
+    match._release_lofted_hand_throw(s, keeper_idx, target_idx)
     keeper.throw_timer = KEEPER_THROW_POSE
 end
 
@@ -2483,10 +2606,9 @@ local function keeper_distribute(s, keeper_idx)
         if kicked then
             release_pass(s, keeper_idx, idx, f, LOB_CLEAR_H)
         elseif f then
-            local land, pf, clear_h = plan_throw(s, keeper, idx)
-            release_pass(s, keeper_idx, idx, pf, clear_h, land)
+            match._release_lofted_hand_throw(s, keeper_idx, idx)
         else
-            release_pass(s, keeper_idx, idx, nil, nil) -- clear ground lane: bowl it
+            match._release_ground_hand_throw(s, keeper_idx, idx) -- clear ground lane: bowl it
         end
     end
     if best then
