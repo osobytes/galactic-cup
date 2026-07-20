@@ -108,7 +108,7 @@ jobs:
 
             - name: Build the pinned love.js artifact
               run: |
-                  "$RUNNER_TEMP/browser-evidence/bin/python" \
+                  "$RUNNER_TEMP/browser-evidence/bin/python" -B \
                       scripts/browser_determinism.py --self-test
                   ./scripts/web_build.sh "$RUNNER_TEMP/omp1-web"
 
@@ -116,6 +116,6 @@ jobs:
               env:
                   SE_CACHE_PATH: ${{ runner.temp }}/selenium
               run: |
-                  "$RUNNER_TEMP/browser-evidence/bin/python" scripts/browser_determinism.py \
+                  "$RUNNER_TEMP/browser-evidence/bin/python" -B scripts/browser_determinism.py \
                       --artifact "$RUNNER_TEMP/omp1-web" \
                       --output "$RUNNER_TEMP/omp1-browser-determinism.json"
