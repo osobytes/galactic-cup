@@ -15,6 +15,8 @@ local species = require("sim.species")
 local placement = require("sim.placement")
 local ai = require("sim.ai")
 local passing = require("sim.passing")
+local input_frame = require("sim.input_frame")
+local slot_input = require("sim.slot_input")
 local formations = require("data.formations")
 local tactics = require("data.tactics")
 local player_pool = require("data.players")
@@ -382,6 +384,12 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field aerial_lock number  -- seconds until this loose ball can take another aerial contact
 ---@field kickoff_hold number  -- seconds left of post-restart defensive hold (0 = press resumes)
 ---@field events MatchEvent[]  -- discrete actions this frame (see MatchEvent)
+---@field slot_mode boolean -- True when the fixture uses stable eight-slot InputFrame routing.
+---@field input_ownership InputOwnership? -- Stable fixture slot-to-player identity.
+---@field slot_players table<integer, integer> -- Canonical slot index -> MatchState player index.
+---@field slot_for_player table<integer, integer> -- Outfielder player index -> canonical slot index.
+---@field slot_input_state MatchSlotInputState? -- Explicit frame/bot/neutral source policy.
+---@field input_tick integer -- InputFrame tick expected by the next slot-mode step.
 
 local match = {}
 
@@ -392,6 +400,48 @@ local function pool_by_id()
         by_id[p.id] = p
     end
     return by_id
+end
+
+---@param team TeamData
+---@param players_by_id table<string, PlayerData>
+---@return string[]
+local function fixture_outfield_ids(team, players_by_id)
+    local ids = {}
+    for _, id in ipairs(team.roster) do
+        local player = assert(players_by_id[id], "unknown player: " .. tostring(id))
+        if player.position ~= "keeper" then
+            ids[#ids + 1] = id
+        end
+    end
+    assert(#ids == input_frame.HOME_SLOT_COUNT, team.id .. " must have four outfielders")
+    return ids
+end
+
+-- Construct the canonical input ownership for the two authored fixture teams.
+-- This is useful to local/headless adapters; callers with a selected fixture
+-- roster may instead pass their validated InputOwnership directly to match.new.
+---@param home TeamData
+---@param away TeamData
+---@param players_by_id table<string, PlayerData>?
+---@return InputOwnership
+function match.ownership_for_teams(home, away, players_by_id)
+    local by_id = players_by_id or pool_by_id()
+    local home_outfield = fixture_outfield_ids(home, by_id)
+    local away_outfield = fixture_outfield_ids(away, by_id)
+    local assignments = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        local slot = assert(input_frame.slot(index))
+        local ids = slot.team == "home" and home_outfield or away_outfield
+        assignments[index] = {
+            slot = slot.id,
+            team = slot.team,
+            player_id = ids[slot.outfield_index],
+        }
+    end
+    return assert(input_frame.new_ownership(assignments, {
+        home = home.roster,
+        away = away.roster,
+    }, by_id))
 end
 
 ---@param team TeamData
@@ -528,6 +578,9 @@ end
 ---@param player_idx integer
 ---@return boolean
 local function is_human_player(s, player_idx)
+    if s.slot_mode then
+        return s.slot_for_player[player_idx] ~= nil
+    end
     return s.human_controlled and player_idx == s.controlled
 end
 
@@ -647,7 +700,7 @@ local function marking_of(tactic)
     return tactic.marking or DEFAULT_MARKING
 end
 
----@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, human_controlled: boolean? }
+---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, human_controlled: boolean?, input_ownership: InputOwnership?, slot_sources: MatchSlotSource[]? }
 ---@return MatchState
 function match.new(opts)
     local field = opts.field
@@ -680,6 +733,37 @@ function match.new(opts)
     end
     for _, p in ipairs(away) do
         players[#players + 1] = p
+    end
+
+    local slot_players = {}
+    local slot_for_player = {}
+    if opts.input_ownership then
+        assert(input_frame.validate_ownership(opts.input_ownership, by_id))
+        for _, team in ipairs({ "home", "away" }) do
+            local expected = team == "home" and opts.home.roster or opts.away.roster
+            local recorded = opts.input_ownership.rosters[team]
+            assert(#recorded == #expected, "input ownership roster does not match fixture team")
+            for index = 1, #expected do
+                assert(
+                    recorded[index] == expected[index],
+                    "input ownership roster does not match fixture team"
+                )
+            end
+        end
+        local index_by_id = {}
+        for index, player in ipairs(players) do
+            index_by_id[player.id] = index
+        end
+        for slot_index = 1, input_frame.SLOT_COUNT do
+            local assignment = opts.input_ownership.slots[slot_index]
+            local player_index =
+                assert(index_by_id[assignment.player_id], "slot player is not in match")
+            local player = players[player_index]
+            assert(player.team == assignment.team, "slot team does not match match player")
+            assert(not player.is_keeper, "keeper cannot be mapped to an input slot")
+            slot_players[slot_index] = player_index
+            slot_for_player[player_index] = slot_index
+        end
     end
 
     local mouth_y = field.h / 2 - GOAL_MOUTH / 2
@@ -715,6 +799,14 @@ function match.new(opts)
         ball_spin = 0,
         rng = rstate,
         events = {},
+        slot_mode = opts.input_ownership ~= nil,
+        input_ownership = opts.input_ownership and assert(
+            input_frame.copy_ownership(opts.input_ownership, by_id)
+        ) or nil,
+        slot_players = slot_players,
+        slot_for_player = slot_for_player,
+        slot_input_state = opts.input_ownership and slot_input.new(opts.slot_sources) or nil,
+        input_tick = 0,
     }
     place_kickoff(s)
     return s
@@ -1915,7 +2007,9 @@ local function update_sprint(p, want, dt)
 end
 
 ---@param s MatchState
-local function move_players(s, dt, input)
+---@param dt number
+---@param inputs table<integer, MatchInput>
+local function move_players(s, dt, inputs)
     local owner = s.owner and s.players[s.owner] or nil
 
     -- Snapshot positions so role targets read one consistent world state and we
@@ -1929,6 +2023,7 @@ local function move_players(s, dt, input)
 
     for i, p in ipairs(s.players) do
         if is_human_player(s, i) then
+            local input = inputs[i] or slot_input.neutral_match_input()
             local aerial_requested = aerial.strike_requested(input)
             local aerial_active = i ~= s.owner
                 and p.aerial_recovery <= 0
@@ -2820,7 +2915,9 @@ local function ai_outfield_decision(s, owner_idx, owner)
 end
 
 ---@param s MatchState
-local function update_ball(s, dt, input)
+---@param dt number
+---@param inputs table<integer, MatchInput>
+local function update_ball(s, dt, inputs)
     -- Only the controlled carrier accumulates charge; drop it otherwise.
     if not (s.owner and is_human_player(s, s.owner)) then
         s.charge = 0
@@ -2852,6 +2949,7 @@ local function update_ball(s, dt, input)
             q.save_pending = nil
         end
         local owner = s.players[s.owner]
+        local input = inputs[s.owner] or slot_input.neutral_match_input()
         if owner.is_keeper and not owner.feet_ball then
             -- A keeper holds the ball in its hands, clamped clear of its own line.
             s.ball = keeper_hold_pos(s, owner)
@@ -3097,7 +3195,7 @@ local function update_ball(s, dt, input)
 
     -- Descending high-ball reception and first-time strikes. Geometry,
     -- difficulty, and seeded quality live in sim.aerial.
-    aerial.resolve_play(s, input, {
+    aerial.resolve_play(s, inputs, {
         ground_grab_height = GROUND_GRAB_HEIGHT,
         stick_ahead = STICK_AHEAD,
         gravity = GRAVITY,
@@ -3175,7 +3273,12 @@ local function update_ball(s, dt, input)
             s.ball_spin = 0
             -- Auto-switch: the human takes over whichever home outfielder wins the
             -- ball (like FIFA / Mario Strikers). Keepers stay AI.
-            if s.human_controlled and bp.team == "home" and not bp.is_keeper then
+            if
+                not s.slot_mode
+                and s.human_controlled
+                and bp.team == "home"
+                and not bp.is_keeper
+            then
                 s.controlled = best
             end
         end
@@ -3209,11 +3312,25 @@ end
 
 ---@param s MatchState
 ---@param dt number
----@param input MatchInput
+---@param input InputFrame|MatchInput
 ---@return MatchState
 function match.step(s, dt, input)
     if s.finished then
         return s
+    end
+
+    local inputs ---@type table<integer, MatchInput>
+    if s.slot_mode then
+        assert(s.slot_input_state, "slot-mode match input state is required")
+        -- Slot mode has no legacy-input fallback. A complete, tick-numbered
+        -- InputFrame is the simulation boundary; adapters must construct it.
+        assert(input_frame.validate(input), "slot-mode match requires an InputFrame")
+        ---@cast input InputFrame
+        inputs = slot_input.resolve(s.slot_input_state, s, input)
+        s.input_tick = s.input_tick + 1
+    else
+        ---@cast input MatchInput
+        inputs = { [s.controlled] = input }
     end
 
     -- Discrete events are per-frame: clear last frame's before producing this one's.
@@ -3316,16 +3433,16 @@ function match.step(s, dt, input)
         end
     end
 
-    if s.human_controlled and input.switch then
+    if not s.slot_mode and s.human_controlled and input.switch then
         s.controlled = next_home_outfield(s, s.controlled)
     end
 
     local prev_ball_x = s.ball.x -- for edge-triggered goal-line crossing
     local prev_owner = s.owner
     local prev_owner_team = s.owner and s.players[s.owner].team or nil
-    move_players(s, dt, input)
+    move_players(s, dt, inputs)
     attempt_steals(s)
-    update_ball(s, dt, input)
+    update_ball(s, dt, inputs)
 
     -- A gained ball resolves any in-flight pass: nobody is "running onto" it
     -- any more. In particular an INTERCEPTED back-pass ends the keeper's
@@ -3340,7 +3457,12 @@ function match.step(s, dt, input)
     -- control to the home outfielder best placed to defend (nearest the ball)
     -- — mirroring the existing auto-switch when a home player wins it.
     local owner_team = s.owner and s.players[s.owner].team or nil
-    if s.human_controlled and owner_team == "away" and prev_owner_team ~= "away" then
+    if
+        not s.slot_mode
+        and s.human_controlled
+        and owner_team == "away"
+        and prev_owner_team ~= "away"
+    then
         s.controlled = best_defender(s)
     end
 
@@ -3348,7 +3470,8 @@ function match.step(s, dt, input)
     -- the human isn't already on it, hand control to the attacker best placed to
     -- meet it — so a single strike (with the aerial magnet) finishes the cross.
     if
-        s.human_controlled
+        not s.slot_mode
+        and s.human_controlled
         and owner_team ~= "home"
         and s.ball_z > CROSS_AID_Z
         and s.ball.x > s.field.w * CROSS_AID_THIRD
@@ -3370,7 +3493,7 @@ function match.step(s, dt, input)
     -- Keeper control: the human takes over the HOME keeper while it holds the
     -- ball (to pick the distribution), and control returns to an outfielder
     -- the moment the keeper no longer has it.
-    if s.human_controlled then
+    if not s.slot_mode and s.human_controlled then
         if s.owner and s.players[s.owner].team == "home" and s.players[s.owner].is_keeper then
             if s.owner ~= prev_owner then
                 s.controlled = s.owner

@@ -39,8 +39,9 @@ in this contract. Ownership does not move when possession changes. Keepers
 remain AI-only and have no input slot.
 
 An absent human source must still contribute its row: use the deterministic
-neutral sample or replace the row with deterministic bot input in a later
-adapter. A frame never omits slots.
+neutral sample or replace the row with deterministic bot input. A frame never
+omits slots. The implemented fixture source policy, bot seed identity, and
+offline adapter are documented in [`slot_match.md`](slot_match.md).
 
 ## One frame per simulation tick
 

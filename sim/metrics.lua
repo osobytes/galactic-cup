@@ -7,6 +7,19 @@ local TUNE = require("sim.tuning").values
 
 local metrics = {}
 
+---@param s MatchState
+---@param player_index integer
+---@return "controlled"|"ai"
+local function dribble_role_for_index(s, player_index)
+    if s.slot_mode then
+        local slot_index = s.slot_for_player[player_index]
+        local sources = s.slot_input_state and s.slot_input_state.sources or nil
+        return slot_index and sources and sources[slot_index].kind == "frame" and "controlled"
+            or "ai"
+    end
+    return s.human_controlled and player_index == s.controlled and "controlled" or "ai"
+end
+
 -- Seconds a team must hold the ball before its possession is "settled" —
 -- the unit turnovers are counted in (see observe).
 metrics.SETTLE_HOLD = 0.7
@@ -110,7 +123,7 @@ function metrics.new(s)
     local prev_owner = s.owner and s.players[s.owner] or nil
     local prev_role = nil
     if prev_owner and not prev_owner.is_keeper then
-        prev_role = s.human_controlled and s.owner == s.controlled and "controlled" or "ai"
+        prev_role = dribble_role_for_index(s, s.owner)
     end
     local function dribble_bucket()
         return {
@@ -160,7 +173,7 @@ local function dribble_role(s, player_id)
             break
         end
     end
-    return s.human_controlled and index == s.controlled and "controlled" or "ai"
+    return index and dribble_role_for_index(s, index) or "ai"
 end
 
 -- Observe one frame, AFTER match.step(s, dt, ...) for the same dt (so
@@ -241,7 +254,7 @@ function metrics.observe(c, s, dt)
     if s.owner then
         local owner = s.players[s.owner]
         if not owner.is_keeper then
-            local role = s.human_controlled and s.owner == s.controlled and "controlled" or "ai"
+            local role = dribble_role_for_index(s, s.owner)
             local bucket = c.dribble[role]
             bucket.carry_s = bucket.carry_s + dt
             if owner.vel:length() < owner.move_speed * TUNE.DRIBBLE_CLOSE then

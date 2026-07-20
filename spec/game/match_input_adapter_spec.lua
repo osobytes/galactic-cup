@@ -1,6 +1,7 @@
 local Vec2 = require("core.vec2")
 local match_input_adapter = require("game.match_input_adapter")
 local fixed_clock = require("sim.fixed_clock")
+local input_frame = require("sim.input_frame")
 local t = require("spec.support.runner")
 
 ---@param opts { shoot: boolean?, shoot_held: boolean?, pass: boolean?, pass_held: boolean?, switch: boolean?, dash: boolean?, dodge: boolean?, lob: boolean?, sprint: boolean?, jockey: boolean? }?
@@ -75,5 +76,24 @@ t.describe("offline match input adapter", function()
         t.is_true(second.pass_held)
         t.is_true(second.sprint)
         t.is_true(second.jockey)
+    end)
+
+    t.it("adapts one local control stream into one row of a complete fixed frame", function()
+        local adapter = match_input_adapter.sample(
+            match_input_adapter.new(),
+            input({ pass = true, pass_held = true, sprint = true })
+        )
+        local _, frame = match_input_adapter.next_frame(adapter, 19, 4)
+        t.eq(frame.tick, 19)
+        t.eq(#frame.slots, input_frame.SLOT_COUNT)
+        t.is_true(assert(input_frame.has_edge(frame.slots[4], "pass")))
+        t.is_true(assert(input_frame.is_held(frame.slots[4], "sprint")))
+        for index = 1, input_frame.SLOT_COUNT do
+            if index ~= 4 then
+                t.eq(frame.slots[index].move_x, 0)
+                t.eq(frame.slots[index].held, 0)
+                t.eq(frame.slots[index].edges, 0)
+            end
+        end
     end)
 end)

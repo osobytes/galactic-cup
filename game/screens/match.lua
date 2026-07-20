@@ -54,6 +54,7 @@ local FIELD_H = 540
 ---@field _space_held_prev boolean  -- tracks Space held off the ball for jockey stance
 ---@field _clock FixedClockState
 ---@field _input_adapter MatchInputAdapterState
+---@field _input_slot_index integer -- The stable home outfield slot owned by the local adapter.
 ---@field _frame_events MatchEvent[] -- Events produced by every simulation tick in the latest render update.
 local Match = {}
 Match.__index = Match
@@ -81,13 +82,27 @@ end
 -- Start a fresh match with the same pre-match choices (formation/tactic).
 -- Used at construction and for the full-time rematch.
 function Match:restart()
+    local home = self._opts.home or teams.nebula
+    local away = self._opts.away or teams.orion
+    local ownership = sim_match.ownership_for_teams(home, away)
+    local sources = {}
+    -- The initial controlled player has historically been the most advanced
+    -- home outfielder, which is the fourth canonical home slot for the three
+    -- shipped formations. Its ownership remains fixed for this fixture.
+    self._input_slot_index = 4
+    for index = 1, 8 do
+        sources[index] = index == self._input_slot_index and { kind = "frame" }
+            or { kind = "bot", seed = (self._opts.seed or 42) * 97 + index }
+    end
     self.state = sim_match.new({
-        home = self._opts.home or teams.nebula,
-        away = self._opts.away or teams.orion,
+        home = home,
+        away = away,
         field = { w = FIELD_W, h = FIELD_H },
         home_formation = self._opts.formation,
         tactic = self._opts.tactic and tactics[self._opts.tactic] or nil,
         seed = self._opts.seed,
+        input_ownership = ownership,
+        slot_sources = sources,
     })
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     self._shoot_held_prev = false
@@ -313,8 +328,9 @@ function Match:update(dt)
     -- zero simulation progress.
     self._input_adapter = match_input_adapter.sample(self._input_adapter, frame_input)
     self._frame_events = {}
-    fixed_clock.advance(self._clock, dt, function(_)
-        local next, tick_input = match_input_adapter.next_tick(self._input_adapter)
+    fixed_clock.advance(self._clock, dt, function(tick)
+        local next, tick_input =
+            match_input_adapter.next_frame(self._input_adapter, tick, self._input_slot_index)
         self._input_adapter = next
         return tick_input
     end, function(_, tick_input)

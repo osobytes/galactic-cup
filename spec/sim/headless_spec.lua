@@ -2,10 +2,27 @@ local t = require("spec.support.runner")
 local headless = require("sim.headless")
 local match = require("sim.match")
 local bot = require("sim.bot")
+local input_frame = require("sim.input_frame")
 local tuning = require("sim.tuning")
 local players = require("data.players")
 local teams = require("data.teams")
 local tactics = require("data.tactics")
+
+---@param ticks integer
+---@return InputFrame[]
+local function recorded_frames(ticks)
+    local frames = {}
+    for tick = 0, ticks - 1 do
+        local slots = {}
+        for index = 1, input_frame.SLOT_COUNT do
+            slots[index] = input_frame.neutral_sample()
+        end
+        slots[1] = assert(input_frame.new_sample({ move_x = 127 }))
+        slots[5] = assert(input_frame.new_sample({ move_x = -127 }))
+        frames[tick + 1] = assert(input_frame.new(tick, slots))
+    end
+    return frames
+end
 
 ---@param a MatchMetrics
 ---@param b MatchMetrics
@@ -159,6 +176,53 @@ t.describe("headless.run_match", function()
         ---@cast a MatchResult
         local b = headless.run_match({ seed = 43, duration = 20, bot = "none" })
         t.is_true(a.metrics.duration >= 19, "the AI/AI fixture ran to full time")
+        assert_same_metrics(a.metrics, b.metrics)
+    end)
+
+    t.it("replays a complete eight-stream recorded fixture deterministically", function()
+        local frames = recorded_frames(200)
+        local sources = {}
+        for index = 1, input_frame.SLOT_COUNT do
+            sources[index] = { kind = "frame" }
+        end
+        local a = headless.run_match({
+            seed = 67,
+            duration = 3,
+            frames = frames,
+            slot_sources = sources,
+        })
+        local b = headless.run_match({
+            seed = 67,
+            duration = 3,
+            frames = frames,
+            slot_sources = sources,
+        })
+        t.is_true(a.metrics.duration >= 2.9)
+        t.eq(a.score.home, b.score.home)
+        t.eq(a.score.away, b.score.away)
+        assert_same_metrics(a.metrics, b.metrics)
+    end)
+
+    t.it("supports a deterministic mixture of recorded and explicitly bot-filled slots", function()
+        local sources = {}
+        for index = 1, input_frame.SLOT_COUNT do
+            sources[index] = index == 1 and { kind = "frame" }
+                or { kind = "bot", seed = 800 + index }
+        end
+        local frames = recorded_frames(200)
+        local a = headless.run_match({
+            seed = 71,
+            duration = 3,
+            frames = frames,
+            slot_sources = sources,
+        })
+        local b = headless.run_match({
+            seed = 71,
+            duration = 3,
+            frames = frames,
+            slot_sources = sources,
+        })
+        t.is_true(a.metrics.duration >= 2.9)
         assert_same_metrics(a.metrics, b.metrics)
     end)
 end)
