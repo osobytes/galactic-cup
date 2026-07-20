@@ -314,10 +314,15 @@ t.describe("match.step switching", function()
         s.owner = nil
         s.pickup_cd = 1
         s.ball = Vec2.new(s.players[target].pos.x + 30, s.players[target].pos.y)
-        match.step(s, 0.016, input({ switch = true }))
+        s.players[target].run_vel = Vec2.new(0, 0)
+        match.step(s, 0.016, input({ switch = true, move = Vec2.new(1, 0) }))
         t.eq(s.controlled, target, "switch picks the player closest to the ball")
         t.is_true(s.players[s.controlled].team == "home")
         t.is_true(not s.players[s.controlled].is_keeper)
+        t.is_true(
+            s.players[target].run_vel.x > 0,
+            "the newly selected player receives this tick's movement"
+        )
     end)
 end)
 

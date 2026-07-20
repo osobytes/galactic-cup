@@ -352,7 +352,29 @@ end
 ---@param player_idx integer
 ---@return boolean
 local function is_human_player(s, player_idx)
+    if s.slot_mode then
+        return s.slot_for_player[player_idx] ~= nil
+    end
     return s.human_controlled and player_idx == s.controlled
+end
+
+---@return MatchInput
+local function neutral_input()
+    return {
+        move = Vec2.new(0, 0),
+        shoot = false,
+        shoot_held = false,
+        pass = false,
+        pass_held = false,
+        switch = false,
+        dash = false,
+        dodge = false,
+        lob = false,
+        sprint = false,
+        jockey = false,
+        aerial_strike = false,
+        aerial_acrobatic = false,
+    }
 end
 
 ---@param input MatchInput
@@ -450,11 +472,12 @@ end
 
 ---@param s MatchState
 ---@param player_idx integer
----@param input MatchInput
+---@param inputs table<integer, MatchInput>
 ---@return AerialIntent
-local function match_intent(s, player_idx, input)
+local function match_intent(s, player_idx, inputs)
     local player = s.players[player_idx]
     if is_human_player(s, player_idx) then
+        local input = inputs[player_idx] or neutral_input()
         if aerial.strike_requested(input) then
             return aerial.acrobatic_requested(input) and "acrobatic" or "strike"
         end
@@ -473,9 +496,9 @@ local function match_intent(s, player_idx, input)
 end
 
 ---@param s MatchState
----@param input MatchInput
+---@param inputs table<integer, MatchInput>
 ---@return MatchAerialCandidate?
-local function choose_candidate(s, input)
+local function choose_candidate(s, inputs)
     local best ---@type MatchAerialCandidate?
     for i, player in ipairs(s.players) do
         if
@@ -486,7 +509,7 @@ local function choose_candidate(s, input)
             and player.slide_timer <= 0
             and player.dodge_timer <= 0
         then
-            local intent = match_intent(s, i, input)
+            local intent = match_intent(s, i, inputs)
             local context, contact = contact_for_intent(s, i, intent)
 
             if intent == "strike" and not is_human_player(s, i) then
@@ -562,11 +585,12 @@ end
 
 ---@param s MatchState
 ---@param candidate MatchAerialCandidate
----@param input MatchInput
+---@param inputs table<integer, MatchInput>
 ---@param resolution AerialResolution
 ---@param config AerialMatchConfig
-local function apply_reception(s, candidate, input, resolution, config)
+local function apply_reception(s, candidate, inputs, resolution, config)
     local player = s.players[candidate.index]
+    local input = inputs[candidate.index] or neutral_input()
     s.events[#s.events + 1] = {
         kind = "reception",
         x = s.ball.x,
@@ -607,11 +631,12 @@ end
 
 ---@param s MatchState
 ---@param candidate MatchAerialCandidate
----@param input MatchInput
+---@param inputs table<integer, MatchInput>
 ---@param resolution AerialResolution
 ---@param config AerialMatchConfig
-local function apply_strike(s, candidate, input, resolution, config)
+local function apply_strike(s, candidate, inputs, resolution, config)
     local player = s.players[candidate.index]
+    local input = inputs[candidate.index] or neutral_input()
     local style = candidate.contact.style
     assert(style == "header" or style == "volley" or style == "bicycle", "strike style")
     ---@type "header"|"volley"|"bicycle"
@@ -698,9 +723,9 @@ local function apply_strike(s, candidate, input, resolution, config)
 end
 
 ---@param s MatchState
----@param input MatchInput
+---@param inputs table<integer, MatchInput>
 ---@param config AerialMatchConfig
-function aerial.resolve_play(s, input, config)
+function aerial.resolve_play(s, inputs, config)
     if
         s.ball_z <= config.ground_grab_height
         or s.ball_vz >= 0
@@ -709,7 +734,7 @@ function aerial.resolve_play(s, input, config)
     then
         return
     end
-    local candidate = choose_candidate(s, input)
+    local candidate = choose_candidate(s, inputs)
     if not candidate then
         return
     end
@@ -723,9 +748,9 @@ function aerial.resolve_play(s, input, config)
     )
     s.aerial_lock = AERIAL_LOCK_TIME
     if candidate.intent == "receive" then
-        apply_reception(s, candidate, input, resolution, config)
+        apply_reception(s, candidate, inputs, resolution, config)
     else
-        apply_strike(s, candidate, input, resolution, config)
+        apply_strike(s, candidate, inputs, resolution, config)
     end
 end
 

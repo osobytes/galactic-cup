@@ -1,6 +1,6 @@
--- Headless match batches: play unattended seeded matches with either the
--- human-proxy bot on the controlled slot or the match AI on both teams, then
--- fold each into fun-proxy metrics (sim/metrics.lua). Pure — no love, no I/O;
+-- Headless match batches preserve the legacy MatchInput fixture by default.
+-- Supplying frames or slot_sources opts into fixed-slot input production. Both
+-- paths fold into fun-proxy metrics (sim/metrics.lua). Pure — no love, no I/O;
 -- `report` returns a string and the caller decides where it goes. Entry point:
 -- `love . --sim [n]` in main.lua.
 
@@ -8,7 +8,9 @@ local Vec2 = require("core.vec2")
 local match = require("sim.match")
 local bot = require("sim.bot")
 local fixed_clock = require("sim.fixed_clock")
+local input_frame = require("sim.input_frame")
 local metrics = require("sim.metrics")
+local slot_input = require("sim.slot_input")
 local tuning = require("sim.tuning")
 local teams = require("data.teams")
 
@@ -53,6 +55,8 @@ local NO_INPUT = {
 ---@field species_by_id table<string, SpeciesData>?
 ---@field field { w: number, h: number }?
 ---@field bot HeadlessBot?  -- defaults to "home"; "none" is match AI vs match AI
+---@field frames InputFrame[]? -- Complete canonical recorded rows, indexed by tick + 1.
+---@field slot_sources MatchSlotSource[]? -- Upstream frame/bot/neutral producer policy.
 
 ---@class MatchResult
 ---@field seed number
@@ -95,9 +99,12 @@ function headless.run_match(opts)
     assert(bot_mode == "home" or bot_mode == "none", "unknown headless bot mode: " .. bot_mode)
     local field = opts.field or FIELD
     local duration = opts.duration or DEFAULT_DURATION
-    local s = match.new({
-        home = opts.home or teams.nebula,
-        away = with_formation(opts.away or teams.orion, opts.away_formation),
+    local home = opts.home or teams.nebula
+    local away = with_formation(opts.away or teams.orion, opts.away_formation)
+    local slot_mode = opts.frames ~= nil or opts.slot_sources ~= nil
+    local match_opts = {
+        home = home,
+        away = away,
         field = { w = field.w, h = field.h },
         home_formation = opts.home_formation,
         tactic = opts.tactic,
@@ -108,10 +115,28 @@ function headless.run_match(opts)
         duration = duration,
         max_goals = opts.max_goals or DEFAULT_MAX_GOALS,
         seed = opts.seed,
-    })
+    }
+    if slot_mode then
+        match_opts.input_ownership = match.ownership_for_teams(home, away, opts.players_by_id)
+    end
+    local s = match.new(match_opts)
+    ---@type SlotInputProducerState?
+    local producer = nil
+    if slot_mode then
+        local sources = opts.slot_sources
+        if not sources then
+            sources = {}
+            for index = 1, input_frame.SLOT_COUNT do
+                -- A recording is complete by definition: without an explicit
+                -- override, every canonical row comes from its tape.
+                sources[index] = { kind = "frame" }
+            end
+        end
+        producer = slot_input.new_producer(sources)
+    end
     ---@type BotState?
     local b = nil
-    if bot_mode == "home" then
+    if not slot_mode and bot_mode == "home" then
         b = bot.new({ seed = opts.seed, reaction = opts.reaction })
     end
     -- Metrics only fold MatchState/events; they never read bot or controlled-side
@@ -124,7 +149,19 @@ function headless.run_match(opts)
         if s.finished then
             break
         end
-        local input = b and bot.input(b, s, DT) or NO_INPUT
+        local input
+        if producer then
+            local base_frame
+            if opts.frames then
+                base_frame =
+                    assert(opts.frames[clock.tick + 1], "recorded frame missing for headless tick")
+            else
+                base_frame = assert(input_frame.neutral(clock.tick))
+            end
+            input = slot_input.materialize(producer, s, base_frame)
+        else
+            input = b and bot.input(b, s, DT) or NO_INPUT
+        end
         local _, continue = fixed_clock.step(clock, input, function(_, tick_input)
             match.step(s, DT, tick_input)
             metrics.observe(c, s, DT)
@@ -174,6 +211,8 @@ end
 ---@field species_by_id table<string, SpeciesData>?
 ---@field field { w: number, h: number }?
 ---@field bot HeadlessBot?
+---@field frames InputFrame[]?
+---@field slot_sources MatchSlotSource[]?
 
 ---@class BatchResult
 ---@field matches MatchResult[]
@@ -209,6 +248,8 @@ function headless.run_batch(opts)
             species_by_id = opts.species_by_id,
             field = opts.field,
             bot = opts.bot,
+            frames = opts.frames,
+            slot_sources = opts.slot_sources,
         })
         matches[#matches + 1] = r
         all[#all + 1] = r.metrics

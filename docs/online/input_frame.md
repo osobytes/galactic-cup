@@ -39,8 +39,9 @@ in this contract. Ownership does not move when possession changes. Keepers
 remain AI-only and have no input slot.
 
 An absent human source must still contribute its row: use the deterministic
-neutral sample or replace the row with deterministic bot input in a later
-adapter. A frame never omits slots.
+neutral sample or replace the row with deterministic bot input. A frame never
+omits slots. The implemented fixture source policy, bot seed identity, and
+offline adapter are documented in [`slot_match.md`](slot_match.md).
 
 ## One frame per simulation tick
 
@@ -76,11 +77,17 @@ representation.
 
 ## Holds and edges
 
-`held` and `edges` are independent bitmasks. A held bit describes the state
-for this tick; it remains set on every tick while the source is down. An edge
-bit is supplied by the input producer and is true only for the tick containing
-that transition. Edges are **not** derived by replaying consecutive frames, so
-a tape remains valid if a history starts at any tick.
+`held` and `edges` are independent bitmasks. A held bit describes the
+producer's effective intent for this tick; it normally remains set while the
+source is down. An edge bit is supplied by the input producer and is true only
+for the tick containing that transition. Edges are **not** derived by replaying
+consecutive frames, so a tape remains valid if a history starts at any tick.
+
+The legacy render-side latch may retain the `lob` held bit through the tick that
+contains a paired shoot/pass release edge. That makes a modifier lifted a
+render frame earlier still part of the same committed action; if converted to a
+frame, this explicit adapter decision is recorded there rather than inferred
+from simulation-side history.
 
 | Mask | Held action | Meaning |
 | --- | --- | --- |
@@ -88,7 +95,7 @@ a tape remains valid if a history starts at any tick.
 | 2 | `pass` | Pass/charge button currently down. |
 | 4 | `sprint` | Sprint currently down. |
 | 8 | `jockey` | Jockey currently down. |
-| 16 | `lob` | Loft modifier currently down. |
+| 16 | `lob` | Effective loft modifier intent for this tick. |
 | 32 | `aerial_strike` | First-time aerial intent currently down. |
 | 64 | `aerial_acrobatic` | Acrobatic aerial modifier currently down. |
 
@@ -100,11 +107,11 @@ a tape remains valid if a history starts at any tick.
 | 8 | `dash` | Tackle/dash press occurred during this tick. |
 | 16 | `dodge` | Juke/dodge press occurred during this tick. |
 
-The edge names intentionally match existing match verbs, but this module does
-not decide how a future multi-slot match consumes the legacy `switch` edge.
-Online ownership will later make switching inapplicable without changing the
-recording format. No action has implicit edge semantics: every recorder must
-set the applicable `edges` bit explicitly and clear it on the next frame.
+The edge names intentionally match existing match verbs. The `switch` edge
+remains encodable for legacy offline recordings, while slot-mode matches ignore
+it because their ownership is fixed. No action has implicit edge semantics:
+every recorder must set the applicable `edges` bit explicitly and clear it on
+the next frame.
 
 ## Canonical bounded wire form
 
@@ -138,8 +145,8 @@ the tape or snapshot, never in an individual frame or transport envelope:
 - gameplay configuration identity, including tuning and fixture rules;
 - initial deterministic RNG seed;
 - the canonical `InputOwnership` selected home/away rosters and slot mapping; and
-- the fixed tick rate once issue #35 establishes it.
+- the fixed tick rate established by issue #35 (60 Hz).
 
-OMP-2 replay and rollback work must compare this identity before claiming a
-hash mismatch is a simulation divergence. It is deliberately independent of
-WebRTC, room, packet, or browser identities.
+Replay tooling and later OMP-2 rollback work must compare this identity before
+claiming a hash mismatch is a simulation divergence. It is deliberately
+independent of WebRTC, room, packet, or browser identities.

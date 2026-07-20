@@ -1,0 +1,65 @@
+# OMP-1 fixed-slot match adapter
+
+`sim.match` has a slot mode for an `InputOwnership` fixture. Its state retains
+the validated ownership record, `slot_players` (canonical frame index to match
+player index), the inverse `slot_for_player`, and the next expected input tick.
+Those values are fixture diagnostics: they do not change after kickoff, a goal,
+a turnover, an aerial contact, or a legacy `controlled` metadata change.
+
+In slot mode `match.step` accepts only a valid, complete `InputFrame` whose
+tick matches `input_tick`. A legacy `MatchInput` is rejected loudly. Every
+outfielder is routed from its permanent slot; neither possession nor selected
+player state participates in the routing. Both keepers have no slot and stay
+under deterministic keeper AI.
+
+## Explicit empty-slot policy
+
+Every frame still carries all eight samples. The fixture also records one
+source for each canonical slot in an **upstream producer state**, beside the
+tape or adapter rather than inside `MatchState`:
+
+- `frame` consumes the corresponding recorded `InputFrame` sample;
+- `bot` replaces that row with the deterministic bot stream seeded by that
+  source's required integer `seed`; and
+- `neutral` replaces it with the canonical neutral sample.
+
+Only a slot explicitly configured as `bot` receives bot behavior. Each bot
+owns its own RNG state, so changing one bot's decisions does not consume or
+perturb another slot's seed stream. A finite integer bot seed is canonicalized
+to its Park–Miller state when the producer is configured; `frame` and `neutral`
+sources cannot carry a seed.
+
+`slot_input.materialize(producer, state, base_frame)` produces the complete
+effective frame for one tick. Frame rows are copied, neutral rows are rewritten
+to canonical neutral input, and bot `MatchInput`s are round-tripped through
+`to_sample` before being inserted. `sim.match` then consumes every effective
+row uniformly and holds no source policy or bot RNG state. The effective frame
+is therefore the record/replay artifact, not an implementation detail hidden in
+the match.
+
+## Offline showcase adapter
+
+The showcase product screen remains on its existing fixed-clock, legacy-input
+path. Its render-side `MatchInput` adapter is deliberately separate from the
+fixed-slot simulation boundary while the per-player mode and presentation work
+is defined later. The headless harness also preserves that legacy `MatchInput`
+path whenever both `frames` and `slot_sources` are omitted; this is the normal
+CI gameplay tripwire.
+
+`game.match_input_adapter` is the explicit offline compatibility adapter. If a
+later producer converts one of its tick `MatchInput`s with
+`slot_input.to_sample`, the canonical frame's `lob` held bit preserves the
+adapter's effective modifier intent: it may remain set on the shoot/pass release
+tick when the render-side latch pairs a just-released action with its preceding
+loft modifier. The simulation consumes that recorded tick value directly.
+
+## Headless recordings
+
+`headless.run_match({ frames = complete_recording })` treats a complete tape as
+the source for all eight rows when `slot_sources` is omitted. Callers that need
+recorded/bot or recorded/neutral mixtures must provide the explicit producer
+policy. Providing either `frames` or `slot_sources` opts into fixed-slot mode.
+When only `slot_sources` is supplied, every base row starts neutral and the
+producer applies exactly the declared frame, bot, and neutral sources—there is
+no implicit human-proxy or bot injection. This keeps offline legacy behavior
+and fixed-slot recording behavior independently reproducible.
