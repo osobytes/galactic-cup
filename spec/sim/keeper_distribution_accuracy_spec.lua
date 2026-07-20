@@ -110,6 +110,26 @@ local function after_two_rolls(state)
     return state
 end
 
+---@param state integer
+---@param accuracy number
+---@return Vec2 offset
+---@return number radius
+local function sampled_error(state, accuracy)
+    local angle_roll, magnitude_roll
+    state, angle_roll = rng.roll(state)
+    state, magnitude_roll = rng.roll(state)
+    local radius = 4 + (1 - accuracy) * 16 * (0.5 + 0.5 * magnitude_roll)
+    local angle = angle_roll * math.pi * 2
+    return Vec2.new(math.cos(angle), math.sin(angle)):scale(radius), radius
+end
+
+---@param point Vec2
+---@param s MatchState
+local function assert_in_field(point, s)
+    t.is_true(point.x >= 6 and point.x <= s.field.w - 6, "landing x stays in the field")
+    t.is_true(point.y >= 6 and point.y <= s.field.h - 6, "landing y stays in the field")
+end
+
 t.describe("keeper hand-distribution accuracy", function()
     t.it("tightens seeded landing error monotonically without changing outlet or tier", function()
         local previous_error = math.huge
@@ -146,6 +166,74 @@ t.describe("keeper hand-distribution accuracy", function()
                 t.near(error_distance, 4, 1e-6, "elite accuracy retains nonzero error")
             end
         end
+    end)
+
+    t.it("preserves the sampled error magnitude at an uncovered field edge", function()
+        local elite = hand_scenario(10)
+        local elite_keeper = elite.players[1]
+        local elite_target = elite.players[2]
+        elite_target.pos = Vec2.new(25, 270)
+        local elite_ideal = elite_target.pos
+        local elite_executed = match._apply_hand_throw_error(elite, elite_keeper, 2, elite_ideal)
+        t.near(elite_executed:dist(elite_ideal), 4, 1e-6, "edge elite retains its 4px floor")
+        assert_in_field(elite_executed, elite)
+
+        local s = hand_scenario(0)
+        local keeper = s.players[1]
+        local target = s.players[2]
+        target.pos = Vec2.new(12, 270)
+        local ideal = target.pos
+        s.distribution_rng = 38217 -- sampled raw x is outside the left ball boundary
+        local raw_offset, expected_radius =
+            sampled_error(s.distribution_rng, keeper.distribution_accuracy)
+        t.is_true(ideal:add(raw_offset).x < 6, "fixture exercises edge handling")
+
+        local executed = match._apply_hand_throw_error(s, keeper, 2, ideal)
+        local distance = executed:dist(ideal)
+
+        t.is_true(distance >= 4 and distance <= 20, "edge handling retains the error envelope")
+        t.near(distance, assert(expected_radius), 1e-6, "edge handling preserves sampled magnitude")
+        assert_in_field(executed, s)
+    end)
+
+    t.it("preserves magnitude and safe-side separation at a covered corner", function()
+        local s = hand_scenario(0)
+        local keeper = s.players[1]
+        local target = s.players[2]
+        target.pos = Vec2.new(25, 25)
+        s.players[7].pos = Vec2.new(45, 45)
+        local ideal = target.pos
+        local safe_dir = target.pos:sub(s.players[7].pos):normalized()
+        s.distribution_rng = 7 -- reflected safe-side error crosses the top ball boundary
+        local raw_offset, expected_radius =
+            sampled_error(s.distribution_rng, keeper.distribution_accuracy)
+        local raw_projection = raw_offset.x * safe_dir.x + raw_offset.y * safe_dir.y
+        if raw_projection < 0 then
+            raw_offset = raw_offset:sub(safe_dir:scale(2 * raw_projection))
+        end
+        local raw = ideal:add(raw_offset)
+        t.is_true(raw.x < 6 or raw.y < 6, "fixture exercises covered-corner handling")
+
+        local executed = match._apply_hand_throw_error(s, keeper, 2, ideal)
+        local offset = executed:sub(ideal)
+        local distance = offset:length()
+
+        t.is_true(distance >= 4 and distance <= 20, "corner handling retains the error envelope")
+        t.near(
+            distance,
+            assert(expected_radius),
+            1e-6,
+            "corner handling preserves sampled magnitude"
+        )
+        assert_in_field(executed, s)
+        t.is_true(
+            offset.x * safe_dir.x + offset.y * safe_dir.y >= 0,
+            "corner handling keeps nonnegative safe-side projection"
+        )
+        t.is_true(
+            executed:dist(s.players[7].pos) >= ideal:dist(s.players[7].pos),
+            "corner handling cannot reduce cover separation"
+        )
     end)
 
     t.it("draws only when the hand release happens and always draws twice", function()

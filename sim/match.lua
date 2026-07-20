@@ -1343,6 +1343,93 @@ end
 -- cover; magnitude remains technique-derived and the safe-side plan cannot be
 -- turned back toward the presser.
 ---@param s MatchState
+---@param ideal Vec2
+---@param offset Vec2
+---@param safe_dir Vec2?
+---@return boolean
+function match._hand_throw_offset_is_legal(s, ideal, offset, safe_dir)
+    local executed = ideal:add(offset)
+    if
+        executed.x < BALL_RADIUS
+        or executed.x > s.field.w - BALL_RADIUS
+        or executed.y < BALL_RADIUS
+        or executed.y > s.field.h - BALL_RADIUS
+    then
+        return false
+    end
+    return not safe_dir or offset.x * safe_dir.x + offset.y * safe_dir.y >= 0
+end
+
+-- Choose the nearest feasible error direction on the same radius. Candidate
+-- angles are the exact boundaries of the field and safe-side half-planes,
+-- nudged on both sides for floating-point boundary stability. A nearest point
+-- in the feasible angular set is either the desired direction or one of these
+-- boundaries, so this preserves magnitude without coordinate clamping.
+---@param s MatchState
+---@param ideal Vec2
+---@param desired Vec2
+---@param safe_dir Vec2?
+---@return Vec2
+function match._bound_hand_throw_offset(s, ideal, desired, safe_dir)
+    local radius = desired:length()
+    assert(radius > 0, "hand-throw execution error needs a positive radius")
+    if match._hand_throw_offset_is_legal(s, ideal, desired, safe_dir) then
+        return desired
+    end
+    local desired_angle = math.atan2(desired.y, desired.x)
+    local boundaries = {}
+
+    for _, bound in ipairs({ BALL_RADIUS, s.field.w - BALL_RADIUS }) do
+        local cosine = (bound - ideal.x) / radius
+        if cosine >= -1 and cosine <= 1 then
+            local angle = math.acos(cosine)
+            boundaries[#boundaries + 1] = angle
+            boundaries[#boundaries + 1] = -angle
+        end
+    end
+    for _, bound in ipairs({ BALL_RADIUS, s.field.h - BALL_RADIUS }) do
+        local sine = (bound - ideal.y) / radius
+        if sine >= -1 and sine <= 1 then
+            local angle = math.asin(sine)
+            boundaries[#boundaries + 1] = angle
+            boundaries[#boundaries + 1] = math.pi - angle
+        end
+    end
+    if safe_dir then
+        local safe_angle = math.atan2(safe_dir.y, safe_dir.x)
+        boundaries[#boundaries + 1] = safe_angle - math.pi / 2
+        boundaries[#boundaries + 1] = safe_angle + math.pi / 2
+    end
+
+    local candidates = {
+        desired_angle,
+        0,
+        math.pi / 2,
+        math.pi,
+        -math.pi / 2,
+    }
+    for _, boundary in ipairs(boundaries) do
+        candidates[#candidates + 1] = boundary
+        candidates[#candidates + 1] = boundary - 1e-9
+        candidates[#candidates + 1] = boundary + 1e-9
+    end
+
+    local best, best_delta
+    for _, candidate in ipairs(candidates) do
+        local offset = Vec2.new(math.cos(candidate), math.sin(candidate)):scale(radius)
+        if match._hand_throw_offset_is_legal(s, ideal, offset, safe_dir) then
+            local delta = math.abs(
+                math.atan2(math.sin(candidate - desired_angle), math.cos(candidate - desired_angle))
+            )
+            if not best_delta or delta < best_delta then
+                best, best_delta = offset, delta
+            end
+        end
+    end
+    return assert(best, "no legal hand-throw error direction")
+end
+
+---@param s MatchState
 ---@param keeper MatchPlayer
 ---@param target_idx integer
 ---@param ideal Vec2
@@ -1360,6 +1447,7 @@ function match._apply_hand_throw_error(s, keeper, target_idx, ideal)
 
     local target = s.players[target_idx]
     local near_d, near_opp
+    local safe_dir
     for _, opponent in ipairs(s.players) do
         if opponent.team ~= keeper.team then
             local d = opponent.pos:dist(target.pos)
@@ -1370,18 +1458,15 @@ function match._apply_hand_throw_error(s, keeper, target_idx, ideal)
     end
     if near_opp and near_d < THROW_COVER_DIST then
         local away = target.pos:sub(near_opp.pos)
-        local safe_dir = (away:length() > 1) and away:normalized() or keeper.facing
+        safe_dir = (away:length() > 1) and away:normalized() or keeper.facing
         local toward_safe = error_offset.x * safe_dir.x + error_offset.y * safe_dir.y
         if toward_safe < 0 then
             error_offset = error_offset:sub(safe_dir:scale(2 * toward_safe))
         end
     end
 
-    local executed = ideal:add(error_offset)
-    return Vec2.new(
-        math.max(25, math.min(s.field.w - 25, executed.x)),
-        math.max(25, math.min(s.field.h - 25, executed.y))
-    )
+    error_offset = match._bound_hand_throw_offset(s, ideal, error_offset, safe_dir)
+    return ideal:add(error_offset)
 end
 
 -- Execution error may move a lofted hand throw onto a busier flight line.
