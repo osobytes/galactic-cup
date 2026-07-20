@@ -63,6 +63,8 @@ t.describe("canonical match snapshots", function()
         }
         state.players[2].save_style = "stretch"
         state.players[2].save_tip_emitted = true
+        state.players[2].keeper_anticipation = 0.75
+        state.players[2].keeper_set = 0.125
         state.events[1] = {
             kind = "header",
             x = 44,
@@ -93,6 +95,8 @@ t.describe("canonical match snapshots", function()
         t.eq(snapshot.state.players[2].windup_shot.dir.y, -0.75)
         t.eq(snapshot.state.players[2].save_style, "stretch")
         t.is_true(snapshot.state.players[2].save_tip_emitted)
+        t.eq(snapshot.state.players[2].keeper_anticipation, 0.75)
+        t.eq(snapshot.state.players[2].keeper_set, 0.125)
         t.eq(snapshot.state.events[1].x, 44)
         t.eq(snapshot.state.events[2].save_style, "spread")
 
@@ -105,6 +109,8 @@ t.describe("canonical match snapshots", function()
         t.near(restored.players[1].keeper_anticipation, state.players[1].keeper_anticipation)
         t.eq(restored.players[2].windup_shot.speed, 456)
         t.near(restored.players[2].windup_shot.dir:length(), math.sqrt(0.625))
+        t.eq(restored.players[2].keeper_anticipation, 0.75)
+        t.eq(restored.players[2].keeper_set, 0.125)
         t.eq(restored.events[2].save_style, "spread")
     end)
 

@@ -298,6 +298,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field keeper_aggression number  -- positioning depth in px (0 for outfield)
 ---@field keeper_anticipation number  -- 0..1 shot-reading quality (0 for outfield)
 ---@field keeper_1v1_target Vec2?  -- locked hold-and-narrow target for a lone carrier
+---@field keeper_set number  -- seconds the pre-release set/lean has been visible (0 = inactive)
 ---@field dive_timer number  -- seconds of keeper dive lunge remaining
 ---@field dive_dir Vec2  -- unit direction of the active dive
 ---@field dive_delay number  -- countdown until a queued dive launches (synced to ball arrival)
@@ -537,6 +538,7 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
                 effective_stats
             ) or 0,
             keeper_1v1_target = nil,
+            keeper_set = 0,
             dive_timer = 0,
             dive_dir = Vec2.new(0, 0),
             dive_delay = 0,
@@ -646,6 +648,7 @@ local function place_kickoff(s, kicking)
         p.save_pending = nil
         p.save_timer = 0
         p.save_vx = 0
+        p.keeper_set = 0
         p.save_style = nil
         p.save_tip_emitted = false
         p.settle_timer = 0
@@ -1581,6 +1584,9 @@ local function attempt_steals(s)
                 -- Cancel any pending wind-up on the carrier: the tackle beats the shot.
                 owner.windup_timer = 0
                 owner.windup_shot = nil
+                for _, player in ipairs(s.players) do
+                    player.keeper_set = 0
+                end
                 s.owner = nil
                 s.ball_vel = dir:normalized():scale(TACKLE_POP_SPEED)
                 s.pickup_cd = 0.12
@@ -2755,6 +2761,10 @@ local function attempt_save(s)
                 -- catch/parry quality deliberately keeps its existing base-reach math.
                 local effective_reach = keeper.reach + block_reach
                 if on_target and eta then
+                    -- Any pre-release set has now reached the real save-processing
+                    -- seam. The existing verdict and contact-timed dive own the
+                    -- presentation from here.
+                    keeper.keeper_set = 0
                     local dist_to_keeper = keeper.pos:dist(s.ball)
                     local save_style
                     if dist_to_keeper > KEEPER_SMOTHER then
@@ -3175,6 +3185,9 @@ local function update_ball(s, dt, inputs)
                     owner.windup_timer = 0
                     owner.windup_shot = nil
                 end
+                for _, player in ipairs(s.players) do
+                    player.keeper_set = 0
+                end
                 s.owner = nil -- the touch got away from the feet: it's loose now
                 return -- no owner actions this frame; the ball plays loose next
             end
@@ -3224,6 +3237,7 @@ local function update_ball(s, dt, inputs)
     local airborne = s.ball_z > GROUND_GRAB_HEIGHT
     local hfric = airborne and AIR_FRICTION or FRICTION
     s.ball_vel = s.ball_vel:scale(math.max(0, 1 - hfric * dt))
+    local trajectory_bounced = false
     -- Spin only bends a ball rolling on the grass.
     if not airborne and s.ball_spin ~= 0 and s.ball_vel:length() > 1 then
         local v = s.ball_vel
@@ -3240,6 +3254,7 @@ local function update_ball(s, dt, inputs)
         s.ball_z = CAGE_CEILING
         if s.ball_vz > 0 then
             s.ball_vz = -s.ball_vz * CEIL_BOUNCE
+            trajectory_bounced = true
         end
     end
     if s.ball_z <= 0 then
@@ -3256,9 +3271,11 @@ local function update_ball(s, dt, inputs)
     if s.ball.y < BALL_RADIUS then
         s.ball.y = BALL_RADIUS
         s.ball_vel.y = -s.ball_vel.y
+        trajectory_bounced = true
     elseif s.ball.y > s.field.h - BALL_RADIUS then
         s.ball.y = s.field.h - BALL_RADIUS
         s.ball_vel.y = -s.ball_vel.y
+        trajectory_bounced = true
     end
     -- X walls: through a goal mouth the ball plays on into the net box behind
     -- the line; anywhere else it bounces back in. Inside a net box the side
@@ -3282,6 +3299,7 @@ local function update_ball(s, dt, inputs)
         else
             s.ball.x = BALL_RADIUS
             s.ball_vel.x = -s.ball_vel.x
+            trajectory_bounced = true
         end
     elseif s.ball.x > s.field.w - BALL_RADIUS then
         if in_mouth(s.ball, s.goal_away) then
@@ -3301,6 +3319,12 @@ local function update_ball(s, dt, inputs)
         else
             s.ball.x = s.field.w - BALL_RADIUS
             s.ball_vel.x = -s.ball_vel.x
+            trajectory_bounced = true
+        end
+    end
+    if trajectory_bounced then
+        for _, player in ipairs(s.players) do
+            player.keeper_set = 0
         end
     end
 
@@ -3334,6 +3358,7 @@ local function update_ball(s, dt, inputs)
                             -- ball any more (a keeper's save reflexes included).
                             for _, q in ipairs(s.players) do
                                 q.receive_timer = 0
+                                q.keeper_set = 0
                                 q.save_style = nil
                                 q.save_tip_emitted = false
                             end
@@ -3374,6 +3399,7 @@ local function update_ball(s, dt, inputs)
         -- but preserve the pre-existing verdict/dive timing: #44 must not change
         -- whether the keeper catches, parries, or is beaten.
         for _, player in ipairs(s.players) do
+            player.keeper_set = 0
             player.save_style = nil
             player.save_tip_emitted = false
         end
@@ -3421,6 +3447,7 @@ local function update_ball(s, dt, inputs)
         if best then
             local bp = s.players[best]
             for _, player in ipairs(s.players) do
+                player.keeper_set = 0
                 player.save_style = nil
                 player.save_tip_emitted = false
             end
@@ -3495,6 +3522,9 @@ end
 ---@return MatchState
 function match.step(s, dt, input)
     if s.finished then
+        for _, player in ipairs(s.players) do
+            player.keeper_set = 0
+        end
         return s
     end
 
@@ -3527,6 +3557,9 @@ function match.step(s, dt, input)
     if s.time_left <= 0 then
         s.time_left = 0
         s.finished = true
+        for _, player in ipairs(s.players) do
+            player.keeper_set = 0
+        end
         return s
     end
 
@@ -3648,6 +3681,62 @@ function match.step(s, dt, input)
         end
     end
 
+    -- Anticipation is presentation-only. A keeper may enter a set/lean during
+    -- an opponent outfielder's captured, on-target wind-up, then carries that
+    -- signal through release until the real SAVE_ZONE evaluation. Released
+    -- geometry can only preserve an already-active signal; it can never create
+    -- one after the fact (anticipation 0 therefore keeps the reactive path).
+    do
+        local shot_owner = s.owner and s.players[s.owner] or nil
+        for _, candidate in ipairs(s.players) do
+            if candidate.is_keeper then
+                if
+                    shot_owner
+                    and not shot_owner.is_keeper
+                    and shot_owner.windup_shot
+                    and shot_owner.windup_timer > 0
+                then
+                    local pending = assert(shot_owner.windup_shot)
+                    local goal = candidate.team == "home" and s.goal_home or s.goal_away
+                    if
+                        require("sim.keeper").should_set({
+                            defending_team = candidate.team,
+                            shooter_team = shot_owner.team,
+                            origin = shot_owner.pos,
+                            direction = pending.dir,
+                            goal = goal,
+                            anticipation = candidate.keeper_anticipation,
+                            windup_duration = TUNE.SHOT_WINDUP,
+                            windup_remaining = shot_owner.windup_timer,
+                        })
+                    then
+                        candidate.keeper_set = candidate.keeper_set + dt
+                    else
+                        candidate.keeper_set = 0
+                    end
+                elseif not s.owner and candidate.keeper_set > 0 then
+                    local goal = candidate.team == "home" and s.goal_home or s.goal_away
+                    local shooter_team = candidate.team == "home" and "away" or "home"
+                    if
+                        require("sim.keeper").shot_targets_goal({
+                            defending_team = candidate.team,
+                            shooter_team = shooter_team,
+                            origin = s.ball,
+                            direction = s.ball_vel,
+                            goal = goal,
+                        })
+                    then
+                        candidate.keeper_set = candidate.keeper_set + dt
+                    else
+                        candidate.keeper_set = 0
+                    end
+                else
+                    candidate.keeper_set = 0
+                end
+            end
+        end
+    end
+
     -- A gained ball resolves any in-flight pass: nobody is "running onto" it
     -- any more. In particular an INTERCEPTED back-pass ends the keeper's
     -- receive window, so its save reflexes come straight back online.
@@ -3715,6 +3804,7 @@ function match.step(s, dt, input)
     local scorer = check_goal(s, prev_ball_x)
     if scorer then
         for _, player in ipairs(s.players) do
+            player.keeper_set = 0
             player.save_style = nil
             player.save_tip_emitted = false
         end

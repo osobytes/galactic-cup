@@ -1,7 +1,7 @@
 # OMP-1 determinism evidence
 
-Status: **native pass on the authoritative snapshot-v3 fixture; current
-Chrome/Firefox v3 verification is enforced by CI**. The accepted snapshot-v1
+Status: **native pass on the authoritative snapshot-v4 fixture; current
+Chrome/Firefox v4 verification is enforced by CI**. The accepted snapshot-v1
 browser evidence remains preserved as a historical artifact below.
 
 This report closes the OMP-1 evidence line. It proves that one complete,
@@ -16,15 +16,13 @@ The checked-in `data.omp1_determinism` table is the immutable tape artifact.
 It contains 7,201 canonical `InputFrame` wires (all eight stable outfield rows
 on every frame), the matching 7,202 start-of-tick snapshot hashes, identity,
 event counts, and restore windows. The source bot policy and its RNG are not
-used during verification. A same-schema explicit refresh materializes a
-replacement recording from those sources; a snapshot-schema migration replays
-and preserves the existing canonical wires while regenerating state hashes and
-outcomes.
+used during verification; they only materialize a replacement recording when
+the explicit refresh command is invoked.
 
 | Identity field | Frozen value |
 | --- | --- |
 | Fixture | `omp1-nebula-orion-eight-streams-v1` |
-| Tape / input / snapshot versions | `1 / 1 / 3` |
+| Tape / input / snapshot versions | `1 / 1 / 4` |
 | Build | `omp1-determinism-v1` |
 | Source | `issue-39-canonical-recording-v1` |
 | Content | `nebula-orion-showcase-content-v1` |
@@ -42,7 +40,7 @@ with an integer tick budget and version the fixture.
 
 ## Hash and repeated-run result
 
-Every boundary is encoded with canonical snapshot version 3 and hashed with
+Every boundary is encoded with canonical snapshot version 4 and hashed with
 the browser-safe FNV-1a-64 implementation. Verification performs these three
 checks:
 
@@ -55,11 +53,11 @@ The authoritative values are:
 
 ```text
 boundaries=7202
-final_hash=fcfe952aae2dfc42
-sequence_digest=b99bb535f5941496
+final_hash=7bcf8d2e681de522
+sequence_digest=1d2cd788626ac997
 score=0-1
 outcome=away
-final_snapshot_bytes=17913
+final_snapshot_bytes=18093
 ```
 
 The complete match produced:
@@ -77,12 +75,25 @@ The deliberate refresh command is separate:
 love . --determinism-refresh
 ```
 
-Refreshing the recording is a snapshot/input contract change. During this v3
-schema migration, all 7,201 input wires remained byte-identical to the v2
-fixture on `origin/main` (SHA-256
-`d4419bed5842f4f54785ef5876b2c18e56b38212e716b91e76f36cc1c1556686`).
-Review the identity, wire comparison, every changed hash, event counts, score,
-and restore windows before committing it.
+Refreshing the recording is a snapshot/input contract change. Review the
+identity, every changed wire/hash, event counts, score, and restore windows
+before committing it.
+
+When the checked-in snapshot version differs from the current schema, refresh
+validates a migration identity that changes only `snapshot_version`, decodes
+the frozen frame wires, and consumes every one in order to regenerate snapshot
+hashes. It never rematerializes bot inputs for a schema-only migration. Bot
+materialization remains available only for an intentional same-schema
+re-recording.
+
+The snapshot-v4 migration retained all 7,201 snapshot-v3 input wires
+byte-for-byte
+(`SHA-256 a717c094e69229e7149e6d184a8a3dcc7a12476a0c07109eff1552de01bf2292`).
+The migration source was the exact fixture on `main`; only the schema identity
+and regenerated evidence changed. The match result remained fixed, while event
+counts, restore windows, boundary hashes, the sequence digest, and snapshot
+sizes changed because keeper positioning now affects the same frozen-input
+simulation.
 
 ## Restore/replay windows
 
@@ -117,10 +128,10 @@ On the development machine (Zorin OS 18.1, Linux x86_64, native LÖVE 11.5),
 1,000 operations at boundary tick 120 measured:
 
 ```text
-snapshot_measure version=3 tick=120 bytes=16673 iterations=1000 hash=d77a9fe750157f53
-snapshot_measure encode_us_each=216.524
-snapshot_measure hash_with_encode_us_each=1404.533
-snapshot_measure restore_us_each=100.002
+snapshot_measure version=4 tick=120 bytes=16853 iterations=1000 hash=8306cf06dcd57735
+snapshot_measure encode_us_each=184.890
+snapshot_measure hash_with_encode_us_each=1380.689
+snapshot_measure restore_us_each=78.360
 ```
 
 These are observations, not thresholds. The complete two-state native
@@ -145,11 +156,10 @@ than skips, if Chrome or Firefox is missing.
 
 ## Runtime verification
 
-The authoritative snapshot-v3 fixture passes the native evidence command
-above. CI builds a clean love.js artifact and runs the same current fixture in
-real Chrome and Firefox; that workflow, rather than a hand-edited evidence
-file, supplies the v3 browser integration proof. No historical browser
-evidence file was relabeled as a v3 run.
+The authoritative snapshot-v4 fixture passes the two-fresh-process native
+command above. CI builds a clean love.js artifact and runs the same current
+fixture in real Chrome and Firefox; that workflow, rather than a hand-edited
+evidence file, supplies the v4 browser integration proof.
 
 ### Historical snapshot-v1 browser evidence
 
@@ -160,7 +170,7 @@ evidence file was relabeled as a v3 run.
 
 Those four historical browser executions produced final hash
 `b379a3a3ab5d7682` and sequence digest `0ff53075e3e626e0`. They are not presented
-as proof for the migrated v3 hashes.
+as proof for the migrated v4 hashes.
 
 The clean browser artifact was built from source commit `16fad22`, with package
 SHA-256 `2ec87dfa91770ea6b6772444c490808bf4ef7eaf2eca9693a3e7fbca27187f4f`.
@@ -197,7 +207,7 @@ browser artifact packaging path is replaced by this evidence work.
 ## Remaining OMP-2 risks
 
 - The checked-in browser artifact is historical snapshot-v1 evidence. Current
-  snapshot-v3 Chrome/Firefox proof runs in CI and is not a substitute for
+  snapshot-v4 Chrome/Firefox proof runs in CI and is not a substitute for
   Windows, macOS, or cross-architecture floating-point evidence.
 - The full-time boundary currently depends on floating countdown semantics
   and consumes 7,201 inputs for a nominal 7,200-tick duration.

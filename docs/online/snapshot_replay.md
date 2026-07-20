@@ -13,19 +13,20 @@ mode, `MatchState.input_tick` is the next causal `InputFrame.tick` to consume.
 The hash at boundary `N` therefore describes state after input `N - 1` and
 before input `N`.
 
-Snapshot version 3 explicitly lists every `MatchState` and `MatchPlayer` field
+Snapshot version 4 explicitly lists every `MatchState` and `MatchPlayer` field
 in canonical order. It includes match RNG, ball/player action state, fixed
 tick metadata, input ownership, both slot mappings, marking hysteresis,
-optional wind-up/dive payloads, derived keeper positioning attributes, the
-optional locked 1v1 target, and the current event list. Capture and restore
+optional wind-up/dive payloads, and the current event list. Capture and restore
 deep-copy all tables, and restore reconstructs every `Vec2` metatable.
 
 Version 2 adds the keeper's transient `save_style` and one-shot tip-event guard
 to `MatchPlayer`, plus optional `save_style` data on catch/parry events.
-Version 3 adds derived keeper positioning attributes and the optional locked
-1v1 target. Snapshots and tapes carrying snapshot versions 1 or 2 are
-intentionally rejected rather than silently restored without deterministic
-keeper state. The input-tape envelope remains version 1.
+Version 3 adds the keeper's derived `keeper_anticipation` and transient
+`keeper_set` duration. Version 4 adds the keeper's derived
+`keeper_aggression` and optional locked `keeper_1v1_target`. Snapshots and
+tapes carrying snapshot version 3 or earlier are intentionally rejected rather
+than silently restored without this positioning state. The input-tape envelope
+remains version 1.
 
 The allowlists reject unknown fields, and a spec compares them with the
 LuaCATS declarations in `sim/match.lua`. Adding a state field must therefore
@@ -38,7 +39,7 @@ different match.
 
 ## Canonical bytes and hash
 
-The byte stream starts with `GCMS;` and snapshot version 3. Record names and
+The byte stream starts with `GCMS;` and snapshot version 4. Record names and
 strings are length-prefixed; nil, booleans, strings, and numbers have distinct
 tags. Arrays and sparse index maps are emitted in their declared numeric
 ranges. Records use the checked-in field arrays, never `pairs` iteration.
@@ -109,27 +110,20 @@ The numbers are machine/runtime observations for OMP-1 issue #39. They are not
 native/browser equality evidence or a performance guarantee. Native and
 love.js must be measured separately before making a cross-runtime cost claim.
 
-One native LÖVE 11.5 run of the version 2 schema on the project development
-machine produced the historical pre-positioning reference:
+One native LÖVE 11.5 run of the version 4 schema on the project development
+machine produced:
 
 ```text
-snapshot_measure version=2 tick=120 bytes=15821 iterations=1000 hash=05897347969cf789
-snapshot_measure encode_ms_total=201.839 encode_us_each=201.839
-snapshot_measure hash_with_encode_ms_total=1455.804 hash_with_encode_us_each=1455.804
-snapshot_measure restore_ms_total=94.606 restore_us_each=94.606
-```
-
-After migrating the goalkeeper positioning state to version 3, the same
-machine and command produced:
-
-```text
-snapshot_measure version=3 tick=120 bytes=16673 iterations=1000 hash=d77a9fe750157f53
-snapshot_measure encode_ms_total=216.524 encode_us_each=216.524
-snapshot_measure hash_with_encode_ms_total=1404.533 hash_with_encode_us_each=1404.533
-snapshot_measure restore_ms_total=100.002 restore_us_each=100.002
+snapshot_measure version=4 tick=120 bytes=16853 iterations=1000 hash=8306cf06dcd57735
+snapshot_measure encode_ms_total=184.890 encode_us_each=184.890
+snapshot_measure hash_with_encode_ms_total=1380.689 hash_with_encode_us_each=1380.689
+snapshot_measure restore_ms_total=78.360 restore_us_each=78.360
 ```
 
 This is a reference report shape and local baseline for #39, not a threshold.
+The prior version 3 measurement remains available in repository history; it is
+not comparable byte-for-byte because version 4 extends the canonical player
+shape.
 
 ## OMP-1 evidence
 

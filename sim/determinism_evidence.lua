@@ -65,30 +65,29 @@ local REQUIRED_EVENT_KINDS = {
     aerial = "header",
 }
 
----@param refresh boolean?
----@return MatchState
-local function new_state(refresh)
-    local seed
-    local ownership
-    if refresh then
-        -- The explicit generator is also the migration path between snapshot
-        -- schemas, so it must be able to read the prior fixture's stable
-        -- simulation identity while writing the current snapshot version.
-        seed = fixture.identity.seed
-        ownership = match.ownership_for_teams(teams.nebula, teams.orion)
-    else
-        local identity = input_tape.copy_identity(fixture.identity)
-        seed = identity.seed
-        ownership = identity.ownership
+---@param source InputTapeIdentity
+---@return InputTapeIdentity
+function determinism_evidence.migration_identity(source)
+    local migrated = {}
+    for field, value in pairs(source) do
+        migrated[field] = value
     end
+    migrated.snapshot_version = match_snapshot.VERSION
+    return input_tape.copy_identity(migrated)
+end
+
+---@param identity InputTapeIdentity?
+---@return MatchState
+local function new_state(identity)
+    identity = input_tape.copy_identity(identity or fixture.identity)
     return match.new({
         home = teams.nebula,
         away = teams.orion,
         field = { w = 960, h = 540 },
         duration = fixture.duration_seconds,
         max_goals = 3,
-        seed = seed,
-        input_ownership = ownership,
+        seed = identity.seed,
+        input_ownership = identity.ownership,
     })
 end
 
@@ -100,6 +99,21 @@ local function split_lines(lines)
         result[#result + 1] = line
     end
     return result
+end
+
+---@return InputFrame[]
+---@return string[]
+local function fixture_frames()
+    local wires = split_lines(fixture.frame_wires)
+    assert(#wires == fixture.frame_count, "fixture frame count does not match its recording")
+    local frames = {}
+    for index, wire in ipairs(wires) do
+        local decoded, err = input_frame.decode(wire)
+        assert(decoded, ("fixture frame %d is malformed: %s"):format(index - 1, tostring(err)))
+        assert(decoded.tick == index - 1, "fixture frames are not contiguous from tick zero")
+        frames[index] = decoded
+    end
+    return frames, wires
 end
 
 ---@param state MatchState
@@ -184,25 +198,16 @@ function determinism_evidence.new_campaign(compare_fresh)
     assert(identity.tick_rate == fixed_clock.TICK_RATE, "fixture tick rate drifted")
     assert(identity.tuning == tuning.serialize(), "fixture tuning identity drifted")
     assert(identity.fixture == fixture.fixture_id, "fixture identity disagrees with fixture id")
-    local wires = split_lines(fixture.frame_wires)
+    local frames, wires = fixture_frames()
     local expected_hashes = split_lines(fixture.boundary_hashes)
-    assert(#wires == fixture.frame_count, "fixture frame count does not match its recording")
     assert(
         #expected_hashes == fixture.boundary_count,
         "fixture boundary count does not match its baseline"
     )
     assert(#expected_hashes == #wires + 1, "fixture needs one hash per boundary")
 
-    local frames = {}
-    for index, wire in ipairs(wires) do
-        local decoded, err = input_frame.decode(wire)
-        assert(decoded, ("fixture frame %d is malformed: %s"):format(index - 1, tostring(err)))
-        assert(decoded.tick == index - 1, "fixture frames are not contiguous from tick zero")
-        frames[index] = decoded
-    end
-
-    local reference = new_state()
-    local candidate = compare_fresh ~= false and new_state() or nil
+    local reference = new_state(identity)
+    local candidate = compare_fresh ~= false and new_state(identity) or nil
     local initial_hash = state_hash(reference)
     if candidate then
         assert(initial_hash == state_hash(candidate), "fresh matches disagree at boundary zero")
@@ -363,20 +368,17 @@ end
 
 ---@return Omp1Recording
 function determinism_evidence.record()
-    local state = new_state(true)
-    local migrating_snapshot = fixture.identity.snapshot_version ~= match_snapshot.VERSION
-    local frame_wires = {}
-    local frozen_frames = {}
-    local producer
-    if migrating_snapshot then
-        frame_wires = split_lines(fixture.frame_wires)
-        assert(#frame_wires == fixture.frame_count, "fixture frame count drifted before migration")
-        for index, wire in ipairs(frame_wires) do
-            local frame, err = input_frame.decode(wire)
-            assert(frame, ("fixture frame %d is malformed: %s"):format(index - 1, tostring(err)))
-            assert(frame.tick == index - 1, "fixture frames are not contiguous from tick zero")
-            frozen_frames[index] = frame
-        end
+    local migrating = fixture.identity.snapshot_version ~= match_snapshot.VERSION
+    local identity = migrating and determinism_evidence.migration_identity(fixture.identity)
+        or input_tape.copy_identity(fixture.identity)
+    assert(identity.tick_rate == fixed_clock.TICK_RATE, "fixture tick rate drifted")
+    assert(identity.tuning == tuning.serialize(), "fixture tuning identity drifted")
+    assert(identity.fixture == fixture.fixture_id, "fixture identity disagrees with fixture id")
+    local state = new_state(identity)
+    local frozen_frames, frozen_wires
+    local producer ---@type SlotInputProducerState?
+    if migrating then
+        frozen_frames, frozen_wires = fixture_frames()
     else
         local sources = {}
         for index, seed in ipairs(fixture.source_seeds) do
@@ -384,19 +386,27 @@ function determinism_evidence.record()
         end
         producer = slot_input.new_producer(sources)
     end
+    local frame_wires = {}
     local boundary_hashes = { state_hash(state) }
     local event_ticks = {}
     local event_counts = {}
     while not state.finished do
         local tick = state.input_tick
         local frame
-        if migrating_snapshot then
-            frame = assert(frozen_frames[tick + 1], "fixture ended before the migrated match")
+        if frozen_frames then
+            frame = assert(
+                frozen_frames[tick + 1],
+                "frozen fixture frames were exhausted before full time"
+            )
         else
             local neutral = assert(input_frame.neutral(tick))
             frame = slot_input.materialize(assert(producer), state, neutral)
-            frame_wires[#frame_wires + 1] = assert(input_frame.encode(frame))
         end
+        local wire = assert(input_frame.encode(frame))
+        if frozen_wires then
+            assert(wire == frozen_wires[tick + 1], "frozen fixture frame failed canonical replay")
+        end
+        frame_wires[#frame_wires + 1] = wire
         match.step(state, fixed_clock.TICK_SECONDS, frame)
         boundary_hashes[#boundary_hashes + 1] = state_hash(state)
         for _, event in ipairs(state.events) do
@@ -412,10 +422,14 @@ function determinism_evidence.record()
             event_ticks.full_time = tick
         end
     end
-    if migrating_snapshot then
+    if frozen_frames then
         assert(
-            state.input_tick == #frozen_frames,
-            "migrated match did not consume every frozen fixture frame"
+            #frame_wires == #frozen_frames,
+            "full time arrived before every frozen fixture frame was consumed"
+        )
+        assert(
+            state.input_tick == fixture.frame_count,
+            "migration did not consume the exact frozen fixture frame count"
         )
     end
     return {
@@ -537,7 +551,8 @@ function determinism_evidence.serialize_recording(recording)
     for index, name in ipairs(event_names) do
         event_counts[index] = ("%s = %d"):format(name, recording.event_counts[name])
     end
-    local ownership = match.ownership_for_teams(teams.nebula, teams.orion)
+    local identity = determinism_evidence.migration_identity(fixture.identity)
+    local ownership = identity.ownership
     local home_roster = {}
     local away_roster = {}
     for index = 1, #ownership.rosters.home do
@@ -590,19 +605,19 @@ function determinism_evidence.serialize_recording(recording)
         ("    frame_count = %d,"):format(#recording.frame_wires),
         ("    boundary_count = %d,"):format(#recording.boundary_hashes),
         "    identity = {",
-        ("        tape_version = %d,"):format(input_tape.VERSION),
-        ("        input_version = %d,"):format(input_frame.VERSION),
-        ("        snapshot_version = %d,"):format(match_snapshot.VERSION),
-        '        build = "omp1-determinism-v1",',
-        '        source = "issue-39-canonical-recording-v1",',
-        '        content = "nebula-orion-showcase-content-v1",',
-        ("        tuning = %q,"):format(tuning.serialize()),
-        '        config = "field=960x540;duration=120;max_goals=3;tick_rate=60",',
-        ("        fixture = %q,"):format(fixture.fixture_id),
-        "        seed = 19,",
-        ("        tick_rate = %d,"):format(fixed_clock.TICK_RATE),
+        ("        tape_version = %d,"):format(identity.tape_version),
+        ("        input_version = %d,"):format(identity.input_version),
+        ("        snapshot_version = %d,"):format(identity.snapshot_version),
+        ("        build = %q,"):format(identity.build),
+        ("        source = %q,"):format(identity.source),
+        ("        content = %q,"):format(identity.content),
+        ("        tuning = %q,"):format(identity.tuning),
+        ("        config = %q,"):format(identity.config),
+        ("        fixture = %q,"):format(identity.fixture),
+        ("        seed = %d,"):format(identity.seed),
+        ("        tick_rate = %d,"):format(identity.tick_rate),
         "        ownership = {",
-        ("            version = %d,"):format(input_frame.VERSION),
+        ("            version = %d,"):format(ownership.version),
         "            rosters = {",
         ("                home = { %s },"):format(table.concat(home_roster, ", ")),
         ("                away = { %s },"):format(table.concat(away_roster, ", ")),

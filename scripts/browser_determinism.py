@@ -37,17 +37,14 @@ REQUIRED_FIELDS = {
     "tick_rate": "60",
     "ticks": "7201",
     "boundaries": "7202",
-    "hash": "fnv1a64-canonical-snapshot-v3",
-    "final_hash": "fcfe952aae2dfc42",
-    "sequence_digest": "b99bb535f5941496",
+    "hash": "fnv1a64-canonical-snapshot-v4",
+    "final_hash": "7bcf8d2e681de522",
+    "sequence_digest": "1d2cd788626ac997",
     "score": "0-1",
     "outcome": "away",
-    "snapshot_bytes": "17913",
+    "snapshot_bytes": "18093",
     "coverage": "goal_kickoff,tackle,aerial,keeper,full_time",
-    "events": (
-        "catch:2,claim:1,header:3,pass:3,reception:1,shot:2,"
-        "tackle:146,touch:179"
-    ),
+    "events": "catch:2,claim:1,header:3,pass:3,reception:1,shot:2,tackle:146,touch:179",
     "love": "11.5.0",
 }
 ERROR_MARKERS = (
