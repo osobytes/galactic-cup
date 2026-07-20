@@ -162,3 +162,75 @@ t.describe("keeper.commit_lead", function()
         end
     end)
 end)
+
+t.describe("keeper early-set eligibility", function()
+    local home_goal = { x = -30, y = 215, w = 30, h = 110 }
+    local away_goal = { x = 960, y = 215, w = 30, h = 110 }
+
+    t.it("projects captured directions into either defending goal mouth", function()
+        t.is_true(keeper.shot_targets_goal({
+            defending_team = "away",
+            shooter_team = "home",
+            origin = Vec2.new(700, 250),
+            direction = Vec2.new(260, 20),
+            goal = away_goal,
+        }))
+        t.is_true(keeper.shot_targets_goal({
+            defending_team = "home",
+            shooter_team = "away",
+            origin = Vec2.new(260, 290),
+            direction = Vec2.new(-260, -20),
+            goal = home_goal,
+        }))
+    end)
+
+    t.it("rejects teammates, backwards shots, and projections outside the mouth", function()
+        t.is_true(not keeper.shot_targets_goal({
+            defending_team = "away",
+            shooter_team = "away",
+            origin = Vec2.new(700, 270),
+            direction = Vec2.new(260, 0),
+            goal = away_goal,
+        }))
+        t.is_true(not keeper.shot_targets_goal({
+            defending_team = "away",
+            shooter_team = "home",
+            origin = Vec2.new(700, 270),
+            direction = Vec2.new(-260, 0),
+            goal = away_goal,
+        }))
+        t.is_true(not keeper.shot_targets_goal({
+            defending_team = "away",
+            shooter_team = "home",
+            origin = Vec2.new(700, 270),
+            direction = Vec2.new(260, 80),
+            goal = away_goal,
+        }))
+    end)
+
+    t.it("bounds set timing by the captured wind-up without making zero reactive early", function()
+        local context = {
+            defending_team = "away",
+            shooter_team = "home",
+            origin = Vec2.new(700, 270),
+            direction = Vec2.new(260, 0),
+            goal = away_goal,
+            anticipation = 0,
+            windup_duration = 0.15,
+            windup_remaining = 0.000001,
+        }
+        t.is_true(not keeper.should_set(context))
+
+        context.anticipation = 0.5
+        context.windup_remaining = 0.075001
+        t.is_true(not keeper.should_set(context))
+        context.windup_remaining = 0.075
+        t.is_true(keeper.should_set(context))
+
+        context.anticipation = 1
+        context.windup_remaining = 0.15
+        t.is_true(keeper.should_set(context))
+        context.windup_remaining = 0
+        t.is_true(not keeper.should_set(context))
+    end)
+end)

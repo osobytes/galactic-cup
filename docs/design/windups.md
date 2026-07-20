@@ -33,6 +33,16 @@ that telegraphs them.
   paths).
 - AI shots (space-charged, square-ball fallthrough) go through the same
   wind-up. Keeper punt too. Keeper THROWS stay instant (hands).
+- An opponent keeper may expose a presentation-only set/lean during an
+  outfielder's captured wind-up when the captured direction projects into its
+  goal mouth. `keeper.commit_lead(keeper_anticipation, SHOT_WINDUP)` selects
+  the entry time: anticipation 0 never sets before release, while anticipation
+  1 can set on the commit frame.
+- The sim carries elapsed `MatchPlayer.keeper_set` presentation time through
+  release until the existing `SAVE_ZONE` evaluation. Cancellation, possession
+  loss, body/aerial redirection, collection, goal/restart, and full time clear
+  it. It never launches a dive or changes reach, handling, RNG, save verdict,
+  or ball-contact timing.
 - Renderer: `pitch.lua` passes `windup = clamp(p.windup_timer / 0.15)` into
   `player_renderer.draw` opts; `player_renderer.lua` adds a minimal back-swing
   (lean the torso/leg trapezoid opposite `facing` by a few px × windup). Keep

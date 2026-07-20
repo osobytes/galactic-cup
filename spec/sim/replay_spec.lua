@@ -148,7 +148,7 @@ t.describe("input tape replay", function()
         t.is_true(malformed.message:match("unsupported input tape version") ~= nil)
 
         local snapshot_tape, snapshot_identity = short_match_tape.make()
-        snapshot_tape.initial.version = 1
+        snapshot_tape.initial.version = 2
         local snapshot_result, snapshot_failure = replay.run(snapshot_tape, snapshot_identity)
         t.eq(snapshot_result, nil)
         local prior_schema = assert(snapshot_failure)
