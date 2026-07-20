@@ -321,6 +321,9 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field aerial_outcome AerialOutcome?
 ---@field aerial_jump number  -- 0..1 required lift for rendering
 ---@field aerial_recovery number  -- movement/action recovery after an aerial attempt
+---@field charge number  -- this player's shot/punt charge, 0..1
+---@field pass_charge number  -- this player's pass-range charge, 0..1
+---@field pass_target integer?  -- player this owner would pass to if released now
 ---@field windup_timer number  -- seconds until a pending shot/punt releases (0 = none)
 ---@field windup_shot { dir: Vec2, speed: number, vz: number, spin: number }?  -- payload captured at commit
 ---@field jockey_timer number  -- seconds of active jockey stance remaining (grants bonus poke reach)
@@ -376,9 +379,6 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field press { home: integer, away: integer }  -- chasers per team (tactic-driven)
 ---@field marking { home: MarkingConfig, away: MarkingConfig }  -- off-ball scheme per team
 ---@field marks { home: table<integer, integer>, away: table<integer, integer> }  -- prev marking assignment (hysteresis)
----@field charge number  -- controlled carrier's shot charge, 0..1
----@field pass_charge number  -- controlled carrier's pass-range charge, 0..1
----@field pass_target integer?  -- index of the player who would receive if pass released now (nil when idle)
 ---@field ball_spin number  -- lateral curve applied to the loose ball
 ---@field rng integer  -- seeded PRNG state (core.rng): same seed = same match
 ---@field block_grace number  -- body-blocking re-enabled when this hits 0 (set on release)
@@ -550,6 +550,9 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             aerial_outcome = nil,
             aerial_jump = 0,
             aerial_recovery = 0,
+            charge = 0,
+            pass_charge = 0,
+            pass_target = nil,
             windup_timer = 0,
             windup_shot = nil,
             jockey_timer = 0,
@@ -632,6 +635,9 @@ local function place_kickoff(s, kicking)
         p.aerial_outcome = nil
         p.aerial_jump = 0
         p.aerial_recovery = 0
+        p.charge = 0
+        p.pass_charge = 0
+        p.pass_target = nil
         p.windup_timer = 0
         p.windup_shot = nil
         p.jockey_timer = 0
@@ -639,8 +645,10 @@ local function place_kickoff(s, kicking)
     -- Give the kicking team the ball at the centre spot.
     local kicker
     if kicking == "home" then
-        s.controlled = most_advanced_home(s.players)
-        kicker = s.controlled
+        kicker = most_advanced_home(s.players)
+        if not s.slot_mode then
+            s.controlled = kicker
+        end
     else
         -- The most advanced away outfielder (away attacks -x) takes the kickoff;
         -- the human gets their most advanced player to defend with.
@@ -653,7 +661,9 @@ local function place_kickoff(s, kicking)
                 end
             end
         end
-        s.controlled = most_advanced_home(s.players)
+        if not s.slot_mode then
+            s.controlled = most_advanced_home(s.players)
+        end
     end
     local c = s.players[kicker]
     c.facing = Vec2.new(kicking == "home" and 1 or -1, 0)
@@ -664,11 +674,8 @@ local function place_kickoff(s, kicking)
     s.ball_vz = 0
     s.owner = kicker
     s.pickup_cd = 0
-    s.charge = 0
-    s.pass_charge = 0
     s.block_grace = 0
     s.aerial_lock = 0
-    s.pass_target = nil
     s.ball_spin = 0
     s.kickoff_hold = KICKOFF_HOLD
     -- Centre-circle rule: the non-kicking team keeps its distance from the
@@ -790,12 +797,9 @@ function match.new(opts)
         press = { home = home_tactic.press, away = away_tactic.press },
         marking = { home = marking_of(home_tactic), away = marking_of(away_tactic) },
         marks = { home = {}, away = {} },
-        charge = 0,
-        pass_charge = 0,
         block_grace = 0,
         aerial_lock = 0,
         kickoff_hold = 0,
-        pass_target = nil,
         ball_spin = 0,
         rng = rstate,
         events = {},
@@ -1222,8 +1226,8 @@ local function try_pass(s, owner_idx, lofted, aim)
     aim = aim or owner.facing
     -- Hold-to-charge picks the RANGE: a tap prefers someone close, a charged
     -- release picks out the long option along the aim.
-    local range = (s.pass_charge > 0.12)
-            and (PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN))
+    local range = (owner.pass_charge > 0.12)
+            and (PASS_RANGE_MIN + owner.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN))
         or nil
     local target_idx = select_pass_target(s, owner_idx, lofted, aim, range)
     if not target_idx then
@@ -2523,14 +2527,15 @@ local function human_keeper_actions(s, dt, input, owner)
     -- the current charge.
     local fire_shot, fire_pass = input.shoot, input.pass
     if input.shoot_held then
-        s.charge = math.min(1, s.charge + TUNE.CHARGE_RATE * dt)
-        fire_shot = fire_shot or s.charge >= 1
+        owner.charge = math.min(1, owner.charge + TUNE.CHARGE_RATE * dt)
+        owner.pass_target = nil
+        fire_shot = fire_shot or owner.charge >= 1
     elseif input.pass_held then
-        s.pass_charge = math.min(1, s.pass_charge + TUNE.PASS_CHARGE_RATE * dt)
-        fire_pass = fire_pass or s.pass_charge >= 1
+        owner.pass_charge = math.min(1, owner.pass_charge + TUNE.PASS_CHARGE_RATE * dt)
+        fire_pass = fire_pass or owner.pass_charge >= 1
     end
     if fire_shot and owner.windup_timer == 0 then
-        local dist = PUNT_MIN + s.charge * (TUNE.PUNT_MAX - PUNT_MIN)
+        local dist = PUNT_MIN + owner.charge * (TUNE.PUNT_MAX - PUNT_MIN)
         local dir = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
         if dir.x == 0 and dir.y == 0 then
@@ -2543,7 +2548,8 @@ local function human_keeper_actions(s, dt, input, owner)
         )
         -- Parameters captured at commit; ball releases after the wind-up.
         local vel, vz = lob_launch(owner.pos, tgt, 0.5, PUNT_CLEAR_H)
-        s.charge = 0
+        owner.charge = 0
+        owner.pass_target = nil
         owner.windup_timer = TUNE.SHOT_WINDUP
         owner.windup_shot = { dir = vel:normalized(), speed = vel:length(), vz = vz, spin = 0 }
     elseif fire_pass then
@@ -2552,10 +2558,12 @@ local function human_keeper_actions(s, dt, input, owner)
         if owner.feet_ball then
             try_pass(s, s.owner, input.lob, aim)
         else
-            local range = PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
+            local range = PASS_RANGE_MIN
+                + owner.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
             keeper_throw(s, s.owner, range, aim)
         end
-        s.pass_charge = 0
+        owner.pass_charge = 0
+        owner.pass_target = nil
     end
     if s.owner and not owner.feet_ball and owner.hold_timer <= 0 and owner.windup_timer == 0 then
         keeper_distribute(s, s.owner)
@@ -2776,23 +2784,27 @@ end
 -- Recompute pass_target for a human outfield carrier holding the pass button.
 -- Pure: no RNG draws. Safe to call every frame while pass_held is true.
 ---@param s MatchState
+---@param owner_idx integer
 ---@param input MatchInput
-local function update_pass_target_outfield(s, input)
-    local range = (s.pass_charge > 0.12)
-            and (PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN))
+local function update_pass_target_outfield(s, owner_idx, input)
+    local owner = s.players[owner_idx]
+    local range = (owner.pass_charge > 0.12)
+            and (PASS_RANGE_MIN + owner.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN))
         or nil
     local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
-    s.pass_target = select_pass_target(s, s.owner, input.lob, aim, range)
+    owner.pass_target = select_pass_target(s, owner_idx, input.lob, aim, range)
 end
 
 -- Recompute pass_target for a human keeper holding the pass button.
 -- Pure: no RNG draws. Safe to call every frame while pass_held is true.
 ---@param s MatchState
+---@param keeper_idx integer
 ---@param input MatchInput
-local function update_pass_target_keeper(s, input)
-    local range = PASS_RANGE_MIN + s.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
+local function update_pass_target_keeper(s, keeper_idx, input)
+    local keeper = s.players[keeper_idx]
+    local range = PASS_RANGE_MIN + keeper.pass_charge * (TUNE.PASS_RANGE_MAX - PASS_RANGE_MIN)
     local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
-    s.pass_target = select_throw_target(s, s.owner, range, aim)
+    keeper.pass_target = select_throw_target(s, keeper_idx, range, aim)
 end
 
 -- Human outfield controlled shot commit: build charge and, on fire, store a
@@ -2805,23 +2817,23 @@ end
 local function human_outfield_actions(s, dt, input, owner)
     local fire_shot, fire_pass = input.shoot, input.pass
     if input.shoot_held then
-        s.charge = math.min(1, s.charge + TUNE.CHARGE_RATE * dt)
-        fire_shot = fire_shot or s.charge >= 1
-        s.pass_target = nil
+        owner.charge = math.min(1, owner.charge + TUNE.CHARGE_RATE * dt)
+        fire_shot = fire_shot or owner.charge >= 1
+        owner.pass_target = nil
     elseif input.pass_held then
-        s.pass_charge = math.min(1, s.pass_charge + TUNE.PASS_CHARGE_RATE * dt)
-        fire_pass = fire_pass or s.pass_charge >= 1
+        owner.pass_charge = math.min(1, owner.pass_charge + TUNE.PASS_CHARGE_RATE * dt)
+        fire_pass = fire_pass or owner.pass_charge >= 1
         -- Preview: recompute intended receiver every frame (pure, no RNG).
-        update_pass_target_outfield(s, input)
+        update_pass_target_outfield(s, s.owner, input)
     else
-        s.pass_target = nil
+        owner.pass_target = nil
     end
     if fire_shot then
         -- Aim at the goal; vertical of `facing` picks the corner. Charge
         -- (held shoot) scales power; lateral input bends the shot.
         -- Parameters are CAPTURED NOW and released after the wind-up.
         local vbias = math.max(-1, math.min(1, owner.facing.y * 1.4))
-        local speed = owner.shot_speed * (1 + s.charge * CHARGE_POWER)
+        local speed = owner.shot_speed * (1 + owner.charge * CHARGE_POWER)
         local target = shot_target(s, owner, vbias)
         local vz = 0
         if input.lob then
@@ -2831,18 +2843,18 @@ local function human_outfield_actions(s, dt, input, owner)
             vz = (CHIP_LINE_Z + 0.5 * GRAVITY * tline * tline) / tline
         end
         local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
-        local spin = (vz == 0) and side * s.charge * CURVE_MAX or 0
-        s.charge = 0
-        s.pass_target = nil
+        local spin = (vz == 0) and side * owner.charge * CURVE_MAX or 0
+        owner.charge = 0
+        owner.pass_target = nil
         owner.windup_timer = TUNE.SHOT_WINDUP
         owner.windup_shot = { dir = target:sub(owner.pos), speed = speed, vz = vz, spin = spin }
     elseif fire_pass then
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
         try_pass(s, s.owner, input.lob, aim)
-        s.pass_charge = 0
-        s.pass_target = nil
+        owner.pass_charge = 0
+        owner.pass_target = nil
     elseif not (input.shoot_held or input.pass_held) then
-        s.charge = 0
+        owner.charge = 0
     end
 end
 
@@ -2922,11 +2934,19 @@ end
 ---@param dt number
 ---@param inputs table<integer, MatchInput>
 local function update_ball(s, dt, inputs)
-    -- Only the controlled carrier accumulates charge; drop it otherwise.
-    if not (s.owner and is_human_player(s, s.owner)) then
-        s.charge = 0
-        s.pass_charge = 0
-        s.pass_target = nil
+    -- Controller transients belong to the input owner. Losing possession
+    -- cancels that player's charge, preview, and any committed wind-up; a
+    -- later possession can never inherit stale state from another slot.
+    for index, player in ipairs(s.players) do
+        if index ~= s.owner or not is_human_player(s, index) then
+            player.charge = 0
+            player.pass_charge = 0
+            player.pass_target = nil
+        end
+        if s.slot_mode and index ~= s.owner and player.windup_shot then
+            player.windup_timer = 0
+            player.windup_shot = nil
+        end
     end
 
     -- Wind-up resolution: a player whose timer just hit 0 and still owns the ball
@@ -3016,6 +3036,18 @@ local function update_ball(s, dt, inputs)
             s.ball = s.ball:add(s.ball_vel:scale(dt))
             local control = TUNE.DRIBBLE_CONTROL + DRIBBLE_CONTROL_SKILL * skill
             if owner.pos:dist(s.ball) > control then
+                -- Clear at the ownership-loss transition so this tick is
+                -- self-contained: reacquisition cannot revive stale input state.
+                owner.charge = 0
+                owner.pass_charge = 0
+                owner.pass_target = nil
+                -- The fixed-slot contract requires same-tick wind-up
+                -- cancellation. Legacy match AI keeps its tripwire-pinned
+                -- heavy-touch behavior at the explicit offline boundary.
+                if s.slot_mode then
+                    owner.windup_timer = 0
+                    owner.windup_shot = nil
+                end
                 s.owner = nil -- the touch got away from the feet: it's loose now
                 return -- no owner actions this frame; the ball plays loose next
             end
@@ -3027,16 +3059,16 @@ local function update_ball(s, dt, inputs)
                 -- Ball at the feet passes like an outfielder; in the hands it throws.
                 if input.pass_held then
                     if owner.feet_ball then
-                        update_pass_target_outfield(s, input)
+                        update_pass_target_outfield(s, s.owner, input)
                     else
-                        update_pass_target_keeper(s, input)
+                        update_pass_target_keeper(s, s.owner, input)
                     end
                 else
-                    s.pass_target = nil
+                    owner.pass_target = nil
                 end
                 human_keeper_actions(s, dt, input, owner)
             else
-                s.pass_target = nil
+                owner.pass_target = nil
                 if owner.hold_timer <= 0 then
                     -- AI keeper: survey, then distribute to a safe outlet (build
                     -- from the back) instead of hoofing it upfield every frame.

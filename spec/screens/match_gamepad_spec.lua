@@ -29,7 +29,7 @@ t.describe("match screen gamepad input", function()
             local player = match.state.players[match.state.controlled]
             match:update(1 / 60)
             t.is_true(player.run_vel.x > 0, "left stick drives the controlled player")
-            t.is_true(match.state.charge > 0, "A holds the contextual shot charge")
+            t.is_true(player.charge > 0, "A holds the contextual shot charge")
         end)
         love.keyboard = saved_keyboard
         love.joystick = saved_joystick
