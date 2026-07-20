@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "status": "pass",
+  "recorded_at": "2026-07-20T07:55:37.512604+00:00",
+  "source_commit": "16fad22dfd7c8792374052d121f60086a8ab7f95",
+  "artifact": {
+    "game_package_sha256": "2ec87dfa91770ea6b6772444c490808bf4ef7eaf2eca9693a3e7fbca27187f4f",
+    "manifest_sha256": "691cb2a56a0f3692850c0dbcd139d858b77efad3083e62fd5c4fe7921a514122",
+    "source_dirty": false
+  },
+  "runtime": {
+    "love": "11.5.0",
+    "repository": "https://github.com/2dengine/love.js",
+    "commit": "495c5eb7eb55b54aaadfc21405c58f50a6d819c4",
+    "archive_sha256": "89b56e7953935d6cb06c454d0ee0c0d8903e433b9a94d1d6d501fb8b516f5ff6"
+  },
+  "determinism": {
+    "fixture": "omp1-nebula-orion-eight-streams-v1",
+    "ticks": 7201,
+    "boundaries": 7202,
+    "final_hash": "b379a3a3ab5d7682",
+    "sequence_digest": "0ff53075e3e626e0",
+    "score": "0-1",
+    "outcome": "away",
+    "snapshot_bytes": 16859,
+    "coverage": [
+      "goal_kickoff",
+      "tackle",
+      "aerial",
+      "keeper",
+      "full_time"
+    ]
+  },
+  "executions": [
+    {
+      "browser": "chrome",
+      "version": "151.0.7922.34",
+      "run": 1,
+      "duration_seconds": 207.956,
+      "webdriver": "ChromeDriver 151.0.7922.34",
+      "teardown": {
+        "fallback": false,
+        "service_exit_code": 0,
+        "signals": []
+      },
+      "webdriver_log_sha256": "e578a734570ca0718e1d7d31aab6ebf786a5b1d3f01eff7d73027ec2028565ce"
+    },
+    {
+      "browser": "chrome",
+      "version": "151.0.7922.34",
+      "run": 2,
+      "duration_seconds": 196.828,
+      "webdriver": "ChromeDriver 151.0.7922.34",
+      "teardown": {
+        "fallback": false,
+        "service_exit_code": 0,
+        "signals": []
+      },
+      "webdriver_log_sha256": "cfd600e19eedb935f57d79392f5db38c07150fd0020fecba6ffdecfd609d2c4b"
+    },
+    {
+      "browser": "firefox",
+      "version": "152.0.6",
+      "run": 1,
+      "duration_seconds": 217.953,
+      "webdriver": "geckodriver 0.37.0",
+      "teardown": {
+        "fallback": true,
+        "service_exit_code": 0,
+        "signals": [
+          "TERM"
+        ]
+      },
+      "webdriver_log_sha256": "1b06fc32fdd9573709a5986bd2c8b908ab85db4b49a323a340d9fb43d7946594"
+    },
+    {
+      "browser": "firefox",
+      "version": "152.0.6",
+      "run": 2,
+      "duration_seconds": 214.245,
+      "webdriver": "geckodriver 0.37.0",
+      "teardown": {
+        "fallback": true,
+        "service_exit_code": 0,
+        "signals": [
+          "TERM"
+        ]
+      },
+      "webdriver_log_sha256": "f084c841311b2274a5da940e2ad2675c35f60953270cba65555b4e62b4f8b10d"
+    }
+  ],
+  "raw_result_sha256": "e208c9de15b80f03d0c4760f963aecbb904dd075cbc8755b302b76fc598732fb",
+  "orphan_processes_after_run": 0
+}

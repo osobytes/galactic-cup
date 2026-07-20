@@ -119,12 +119,15 @@ snapshot_measure restore_ms_total=87.221 restore_us_each=87.221
 
 This is a reference report shape and local baseline for #39, not a threshold.
 
-## Known determinism risk
+## OMP-1 evidence
 
-Most match ranking sorts explicitly break equal scores by player index.
-`nearest_n` in `sim/match.lua` currently sorts only by distance, so exact
-equal-distance candidates do not have an explicit total-order tie break.
-Input replay will make any observed consequence diagnosable, but it does not
-prove that unspecified tie ordering is identical across every Lua runtime.
-Issue #39 should retain this risk until the comparator is made total or
-cross-runtime evidence demonstrates the required behavior.
+Issue #39 made the `nearest_n` ranking total: equal distances now break in
+descending match-player index order, preserving the existing native result.
+It also canonicalized negative zero at the
+input quantization boundary so every valid effective frame has a decodable
+canonical wire.
+
+The complete-match repeated-run, per-tick hash, restore-window, supported
+runtime, performance, and offline compatibility evidence is recorded in
+[`omp1_determinism.md`](omp1_determinism.md). This snapshot/tape layer remains
+diagnostic only; rollback and network behavior are still deferred to OMP-2.
