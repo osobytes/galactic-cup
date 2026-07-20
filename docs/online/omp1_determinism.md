@@ -54,7 +54,7 @@ The authoritative values are:
 ```text
 boundaries=7202
 final_hash=bd570642f2d94a76
-sequence_digest=1de4d0b510150ef8
+sequence_digest=2f53cb0492611a59
 score=0-1
 outcome=away
 final_snapshot_bytes=17759
@@ -78,6 +78,13 @@ love . --determinism-refresh
 Refreshing the recording is a snapshot/input contract change. Review the
 identity, every changed wire/hash, event counts, score, and restore windows
 before committing it.
+
+When the checked-in snapshot version differs from the current schema, refresh
+validates a migration identity that changes only `snapshot_version`, decodes
+the frozen frame wires, and consumes every one in order to regenerate snapshot
+hashes. It never rematerializes bot inputs for a schema-only migration. Bot
+materialization remains available only for an intentional same-schema
+re-recording.
 
 The snapshot-v3 migration retained all 7,201 input wires byte-for-byte
 (`SHA-256 a717c094e69229e7149e6d184a8a3dcc7a12476a0c07109eff1552de01bf2292`).
@@ -160,7 +167,7 @@ evidence file, supplies the v3 browser integration proof.
 
 Those four historical browser executions produced final hash
 `b379a3a3ab5d7682` and sequence digest `0ff53075e3e626e0`. They are not presented
-as proof for the migrated v2 hashes.
+as proof for the migrated v3 hashes.
 
 The clean browser artifact was built from source commit `16fad22`, with package
 SHA-256 `2ec87dfa91770ea6b6772444c490808bf4ef7eaf2eca9693a3e7fbca27187f4f`.

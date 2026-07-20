@@ -1,5 +1,6 @@
 local Vec2 = require("core.vec2")
 local fixed_clock = require("sim.fixed_clock")
+local input_frame = require("sim.input_frame")
 local match = require("sim.match")
 local match_snapshot = require("sim.match_snapshot")
 local teams = require("data.teams")
@@ -307,6 +308,87 @@ t.describe("keeper anticipation commit timing", function()
             t.eq(bounced_keeper.dive_delay, 0)
         end
     )
+
+    t.it("does not reinterpret a goal-directed tackle pop as the cancelled shot", function()
+        local state, keep, shooter = new_human_commit(1)
+        match.step(state, TICK, SHOT_INPUT)
+        t.is_true(keep.keeper_set > 0)
+
+        local tackler = state.players[7]
+        tackler.pos = shooter.pos:add(Vec2.new(20, 0))
+        tackler.anchor = tackler.pos
+        tackler.vel = Vec2.new(0, 0)
+        tackler.run_vel = Vec2.new(0, 0)
+        tackler.dash_cd = 0
+        match.step(state, TICK, NO_INPUT)
+
+        t.is_true(event_of(state, "tackle") ~= nil, "the real tackle transition fires")
+        t.eq(state.owner, nil)
+        t.is_true(state.ball_vel.x > 0, "the tackle pop still travels toward the away goal")
+        t.eq(keep.keeper_set, 0)
+        for _ = 1, 90 do
+            match.step(state, TICK, NO_INPUT)
+            t.eq(keep.keeper_set, 0)
+            t.eq(keep.dive_timer, 0)
+            t.eq(keep.dive_delay, 0)
+            t.eq(keep.save_pending, nil)
+        end
+    end)
+
+    t.it("does not reinterpret a goal-directed heavy touch as the cancelled shot", function()
+        local ownership = match.ownership_for_teams(teams.nebula, teams.orion)
+        local state = match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            duration = 10,
+            seed = 73,
+            input_ownership = ownership,
+        })
+        local shooter_index = assert(state.slot_players[1])
+        local shooter = state.players[shooter_index]
+        local keep = team_keeper(state, "away")
+        park_bystanders(state, keep, shooter)
+        shooter.pos = Vec2.new(650, 270)
+        shooter.anchor = shooter.pos
+        shooter.facing = Vec2.new(1, 0)
+        shooter.vel = Vec2.new(0, 0)
+        shooter.run_vel = Vec2.new(0, 0)
+        shooter.windup_timer = 0.15
+        shooter.windup_shot = {
+            dir = Vec2.new(310, 0),
+            speed = 400,
+            vz = 0,
+            spin = 0,
+        }
+        keep.pos = Vec2.new(938, 270)
+        keep.anchor = keep.pos
+        keep.keeper_anticipation = 1
+        state.owner = shooter_index
+        state.ball = shooter.pos:add(Vec2.new(18, 0))
+        state.ball_vel = Vec2.new(0, 0)
+        state.pickup_cd = 1
+
+        match.step(state, TICK, assert(input_frame.neutral(state.input_tick)))
+        t.is_true(keep.keeper_set > 0)
+
+        state.ball = shooter.pos:add(Vec2.new(50, 0))
+        state.ball_vel = Vec2.new(150, 0)
+        match.step(state, TICK, assert(input_frame.neutral(state.input_tick)))
+
+        t.eq(state.owner, nil)
+        t.eq(shooter.windup_timer, 0)
+        t.eq(shooter.windup_shot, nil)
+        t.is_true(state.ball_vel.x > 0, "the heavy touch stays directed toward the away goal")
+        t.eq(keep.keeper_set, 0)
+        for _ = 1, 90 do
+            match.step(state, TICK, assert(input_frame.neutral(state.input_tick)))
+            t.eq(keep.keeper_set, 0)
+            t.eq(keep.dive_timer, 0)
+            t.eq(keep.dive_delay, 0)
+            t.eq(keep.save_pending, nil)
+        end
+    end)
 
     t.it("clears a same-direction aerial redirection without changing legacy dive state", function()
         local state, keep, striker = new_human_commit(1)

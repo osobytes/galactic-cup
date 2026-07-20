@@ -39,7 +39,7 @@ REQUIRED_FIELDS = {
     "boundaries": "7202",
     "hash": "fnv1a64-canonical-snapshot-v3",
     "final_hash": "bd570642f2d94a76",
-    "sequence_digest": "1de4d0b510150ef8",
+    "sequence_digest": "2f53cb0492611a59",
     "score": "0-1",
     "outcome": "away",
     "snapshot_bytes": "17759",

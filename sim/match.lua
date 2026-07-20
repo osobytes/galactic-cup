@@ -1576,6 +1576,9 @@ local function attempt_steals(s)
                 -- Cancel any pending wind-up on the carrier: the tackle beats the shot.
                 owner.windup_timer = 0
                 owner.windup_shot = nil
+                for _, player in ipairs(s.players) do
+                    player.keeper_set = 0
+                end
                 s.owner = nil
                 s.ball_vel = dir:normalized():scale(TACKLE_POP_SPEED)
                 s.pickup_cd = 0.12
@@ -3116,6 +3119,9 @@ local function update_ball(s, dt, inputs)
                 if s.slot_mode then
                     owner.windup_timer = 0
                     owner.windup_shot = nil
+                end
+                for _, player in ipairs(s.players) do
+                    player.keeper_set = 0
                 end
                 s.owner = nil -- the touch got away from the feet: it's loose now
                 return -- no owner actions this frame; the ball plays loose next
