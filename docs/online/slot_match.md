@@ -22,10 +22,12 @@ consumed independently in canonical player order, so one slot's simultaneous
 hold or release cannot overwrite another slot's movement, tackle, dodge, or
 aerial intent.
 
-The legacy `controlled` index remains offline presentation/input metadata. Slot
-mode ignores its switch edge and never changes it for a pass, turnover, aerial
-assist, keeper possession, or kickoff. The immutable `slot_players` and
-`slot_for_player` tables are the only slot-routing authority.
+The legacy `controlled` index remains offline presentation/input and legacy
+metrics metadata. Slot mode ignores its switch edge and never changes it for a
+pass, turnover, aerial assist, keeper possession, or kickoff. The immutable
+`slot_players` and `slot_for_player` tables are the only slot-routing authority.
+Slot-mode aggregate metrics retain the existing single-proxy `controlled`
+label; they are not per-slot ownership metrics.
 
 ## Explicit empty-slot policy
 
@@ -70,6 +72,11 @@ loft modifier. The simulation consumes that recorded tick value directly.
 Offline switching, pass-follow control, cross/aerial assistance, and temporary
 human keeper distribution remain enabled only outside slot mode; those rules
 select which player's own action state the single legacy input drives.
+Slot-mode heavy-touch losses also cancel the former carrier's pending wind-up
+at that tick boundary. The offline compatibility path intentionally does not
+add this new cancellation to legacy match AI, whose historical heavy-touch
+outcomes remain pinned by the gameplay tripwire; existing tackle and smother
+wind-up cancellations are unchanged in both modes.
 
 ## Headless recordings
 

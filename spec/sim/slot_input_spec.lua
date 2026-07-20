@@ -37,6 +37,16 @@ local function new_match()
     })
 end
 
+---@return MatchState
+local function new_legacy_match()
+    return match.new({
+        home = teams.nebula,
+        away = teams.orion,
+        field = { w = 960, h = 540 },
+        seed = 73,
+    })
+end
+
 ---@param s MatchState
 ---@return table<integer, integer>
 local function copy_slots(s)
@@ -133,23 +143,96 @@ t.describe("fixed match input slots", function()
         t.is_true(s.owner ~= local_player, "the pass was released from the fixed local player")
     end)
 
-    t.it("does not reselect a slot owner for turnovers or aerial assistance", function()
-        local s = new_match()
-        local selected = s.slot_players[1]
-        s.controlled = selected
-        s.owner = s.slot_players[5]
-        match.step(s, fixed_clock.TICK_SECONDS, frame(0))
-        t.eq(s.controlled, selected, "an opposing turnover cannot reselect an online player")
+    t.it("suppresses the real legacy turnover and aerial reselection branches", function()
+        ---@param s MatchState
+        local function setup_smother(s)
+            s.controlled = 2
+            s.owner = 5
+            s.players[5].pos.x, s.players[5].pos.y = 850, 270
+            s.players[5].facing.x, s.players[5].facing.y = 1, 0
+            s.players[6].pos.x, s.players[6].pos.y = 868, 270
+            s.ball.x, s.ball.y = 868, 270
+            s.ball_vel.x, s.ball_vel.y = 0, 0
+        end
 
-        local aerial_player = s.slot_players[4]
-        s.players[aerial_player].pos.x, s.players[aerial_player].pos.y = 720, 270
-        s.owner = nil
-        s.pickup_cd = 1
-        s.ball.x, s.ball.y = 720, 270
-        s.ball_z, s.ball_vz = 50, -20
+        local slot_turnover = new_match()
+        local legacy_turnover = new_legacy_match()
+        setup_smother(slot_turnover)
+        setup_smother(legacy_turnover)
+        match.step(slot_turnover, fixed_clock.TICK_SECONDS, frame(0))
+        match.step(legacy_turnover, fixed_clock.TICK_SECONDS, slot_input.neutral_match_input())
+
+        t.eq(slot_turnover.owner, 6, "away keeper really takes the home carrier's ball")
+        t.eq(legacy_turnover.owner, 6, "the comparison reaches the same turnover")
+        t.eq(slot_turnover.controlled, 2, "slot mode suppresses turnover reselection")
+        t.is_true(
+            legacy_turnover.controlled ~= 2,
+            "the same transition exercises legacy turnover reselection"
+        )
+
+        ---@param s MatchState
+        local function setup_aerial(s)
+            s.controlled = 2
+            s.owner = nil
+            s.pickup_cd = 1
+            s.players[5].pos.x, s.players[5].pos.y = 700, 270
+            s.ball.x, s.ball.y = 700, 270
+            s.ball_z, s.ball_vz = 50, 100
+            s.ball_vel.x, s.ball_vel.y = 0, 0
+        end
+
+        local slot_aerial = new_match()
+        local legacy_aerial = new_legacy_match()
+        setup_aerial(slot_aerial)
+        setup_aerial(legacy_aerial)
+        match.step(slot_aerial, fixed_clock.TICK_SECONDS, frame(0))
+        match.step(legacy_aerial, fixed_clock.TICK_SECONDS, slot_input.neutral_match_input())
+
+        t.is_true(slot_aerial.owner == nil and slot_aerial.ball_z > 30)
+        t.is_true(legacy_aerial.owner == nil and legacy_aerial.ball_z > 30)
+        t.eq(slot_aerial.controlled, 2, "slot mode suppresses aerial assistance")
+        t.eq(legacy_aerial.controlled, 5, "the same rising cross triggers legacy assistance")
+    end)
+
+    t.it("clears a heavy-touch carrier before the loss tick ends", function()
+        local s = new_match()
+        local carrier_idx = assert(s.owner)
+        local carrier = s.players[carrier_idx]
+        carrier.pos.x, carrier.pos.y = 300, 270
+        carrier.facing.x, carrier.facing.y = 1, 0
+        carrier.vel.x, carrier.vel.y = 0, 0
+        carrier.run_vel.x, carrier.run_vel.y = 0, 0
+        carrier.dribble = 0
+        carrier.charge = 0.7
+        carrier.pass_charge = 0.8
+        carrier.pass_target = s.slot_players[1]
+        carrier.windup_timer = fixed_clock.TICK_SECONDS * 2
+        carrier.windup_shot = {
+            dir = carrier.facing,
+            speed = 500,
+            vz = 0,
+            spin = 0,
+        }
+        s.ball.x, s.ball.y = 325, 270
+        s.ball_vel.x, s.ball_vel.y = 1000, 0
+
+        match.step(s, fixed_clock.TICK_SECONDS, frame(0))
+
+        t.eq(s.owner, nil, "the fast touch runs outside the carrier's control radius")
+        t.eq(carrier.charge, 0)
+        t.eq(carrier.pass_charge, 0)
+        t.eq(carrier.pass_target, nil)
+        t.eq(carrier.windup_timer, 0)
+        t.eq(carrier.windup_shot, nil, "the loss tick clears the pending release")
+
+        s.owner = carrier_idx
+        s.ball = carrier.pos:add(carrier.facing:scale(18))
         s.ball_vel.x, s.ball_vel.y = 0, 0
         match.step(s, fixed_clock.TICK_SECONDS, frame(1))
-        t.eq(s.controlled, selected, "aerial assistance cannot reselect an online player")
+        t.eq(s.owner, carrier_idx, "reacquisition cannot release the cancelled wind-up")
+        for _, event in ipairs(s.events) do
+            t.is_true(event.kind ~= "shot", "no stale shot event can fire after reacquisition")
+        end
     end)
 
     t.it("keeps concurrent holds and wind-up cancellation on their owning players", function()
@@ -229,36 +312,77 @@ t.describe("fixed match input slots", function()
         end
     )
 
-    t.it(
-        "keeps slot selection fixed through ignored switching, keeper possession, and kickoff",
-        function()
-            local s = new_match()
-            local selected = s.slot_players[1]
-            s.controlled = selected
-            s.owner = 1
-            s.players[1].hold_timer = 1
-            s.ball = s.players[1].pos
-            local switch = assert(input_frame.new_sample({ edges = input_frame.EDGE_BITS.switch }))
-            match.step(s, fixed_clock.TICK_SECONDS, frame(0, { [1] = switch }))
+    t.it("resolves a direct same-tick tackle before the carrier's pass release", function()
+        local s = new_match()
+        local passer = assert(s.owner)
+        local passer_slot = assert(s.slot_for_player[passer])
+        local defender_slot = 5
+        local defender = s.players[s.slot_players[defender_slot]]
+        defender.pos = s.ball
 
-            t.eq(s.controlled, selected, "slot mode ignores legacy switch edges")
-            t.eq(s.slot_for_player[1], nil, "keeper possession never creates a keeper slot")
+        local pass_release = assert(input_frame.new_sample({ edges = input_frame.EDGE_BITS.pass }))
+        local tackle_release =
+            assert(input_frame.new_sample({ edges = input_frame.EDGE_BITS.dash }))
+        match.step(
+            s,
+            fixed_clock.TICK_SECONDS,
+            frame(0, {
+                [passer_slot] = pass_release,
+                [defender_slot] = tackle_release,
+            })
+        )
 
-            for _, player in ipairs(s.players) do
-                player.pos.y = 50
-            end
-            s.owner = nil
-            s.pickup_cd = 1
-            s.ball.x, s.ball.y = s.field.w - 7, s.field.h / 2
-            s.ball_vel.x, s.ball_vel.y = 1000, 0
-            s.ball_z, s.ball_vz = 0, 0
-            match.step(s, fixed_clock.TICK_SECONDS, frame(1))
-
-            t.eq(s.score.home, 1, "the forced goal reaches the kickoff path")
-            t.eq(s.controlled, selected, "kickoff does not rewrite slot-mode selection metadata")
-            t.eq(s.slot_for_player[1], nil, "the restarted fixture still leaves the keeper AI-only")
+        local saw_tackle, saw_pass = false, false
+        for _, event in ipairs(s.events) do
+            saw_tackle = saw_tackle or event.kind == "tackle"
+            saw_pass = saw_pass or event.kind == "pass"
         end
-    )
+        t.is_true(saw_tackle, "the in-range release wins the ball")
+        t.is_true(not saw_pass, "canonical movement/tackle priority cancels the later pass")
+        t.eq(s.players[passer].pass_charge, 0, "the dispossessed carrier ends the tick clean")
+    end)
+
+    t.it("keeps slot selection fixed through switching, keeper capture, and kickoff", function()
+        local slot_capture = new_match()
+        local legacy_capture = new_legacy_match()
+
+        ---@param s MatchState
+        local function setup_capture(s)
+            s.controlled = 2
+            s.owner = nil
+            s.players[1].pos.x, s.players[1].pos.y = 60, 270
+            s.ball.x, s.ball.y = 65, 270
+            s.ball_vel.x, s.ball_vel.y = 0, 0
+            s.pickup_cd = 0
+        end
+
+        setup_capture(slot_capture)
+        setup_capture(legacy_capture)
+        local switch = assert(input_frame.new_sample({ edges = input_frame.EDGE_BITS.switch }))
+        match.step(slot_capture, fixed_clock.TICK_SECONDS, frame(0, { [1] = switch }))
+        match.step(legacy_capture, fixed_clock.TICK_SECONDS, slot_input.neutral_match_input())
+
+        t.eq(slot_capture.owner, 1, "the loose ball is actually captured by the home keeper")
+        t.eq(legacy_capture.owner, 1, "the legacy comparison reaches the same keeper capture")
+        t.eq(slot_capture.controlled, 2, "switch and keeper capture cannot reselect in slot mode")
+        t.eq(legacy_capture.controlled, 1, "legacy mode still hands a new capture to the keeper")
+        t.eq(slot_capture.slot_for_player[1], nil, "keeper capture never creates a keeper slot")
+
+        for _, player in ipairs(slot_capture.players) do
+            player.pos.y = 50
+        end
+        slot_capture.owner = nil
+        slot_capture.pickup_cd = 1
+        slot_capture.ball.x, slot_capture.ball.y =
+            slot_capture.field.w - 7, slot_capture.field.h / 2
+        slot_capture.ball_vel.x, slot_capture.ball_vel.y = 1000, 0
+        slot_capture.ball_z, slot_capture.ball_vz = 0, 0
+        match.step(slot_capture, fixed_clock.TICK_SECONDS, frame(1))
+
+        t.eq(slot_capture.score.home, 1, "the forced goal reaches the kickoff path")
+        t.eq(slot_capture.controlled, 2, "kickoff does not rewrite slot-mode selection metadata")
+        t.eq(slot_capture.slot_for_player[1], nil, "the restarted keeper remains AI-only")
+    end)
 
     t.it("keeps online input off the keeper while deterministic keeper AI distributes", function()
         local s = new_match()

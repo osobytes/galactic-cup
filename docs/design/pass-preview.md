@@ -24,26 +24,27 @@ receive while the pass button is held.
   (`select_throw_target(s, keeper_idx, range, aim) -> player_index?`).
   `try_pass` / `keeper_throw` call them; behavior must be bit-identical
   (existing specs are the proof).
-- New `MatchState` field `pass_target integer?` (annotate). In `update_ball`,
-  while `s.owner == s.controlled`:
+- New `MatchPlayer` field `pass_target integer?` (annotate), beside that
+  player's `pass_charge`. In `update_ball`, while an input-owned player carries:
   - carrying outfielder with `input.pass_held` → recompute via
-    `select_pass_target` with the live aim (`input.move` or facing), current
-    `s.pass_charge` range, and `input.lob`;
+    `select_pass_target` with the live aim (`input.move` or facing), the
+    carrier's current `pass_charge` range, and `input.lob`;
   - human keeper with `input.pass_held` → via `select_throw_target`;
-  - otherwise `s.pass_target = nil`. Also nil it on release/loss.
-- Renderer (`game/render/pitch.lua`): after entities, if `s.pass_target`, draw
-  a small pulsing double-ring at that player's feet (use `love.timer` if
-  available, else static — the smoke test stubs graphics, so guard any
-  `love.timer` access).
+  - otherwise `player.pass_target = nil`. Also nil it on release/loss.
+- Renderer (`game/render/pitch.lua`): after entities, if the selected player's
+  `pass_target` is set, draw a small pulsing double-ring at that preview target
+  (use `love.timer` if available, else static — the smoke test stubs graphics,
+  so guard any `love.timer` access).
 
 ## Watch out for
 
 - Determinism: the preview must be a pure recompute (no RNG draws — do NOT
   touch `s.rng`).
 - The preview must equal the actual receiver: add a spec that charges for N
-  frames, records `s.pass_target`, releases, and asserts the recorded index
-  gets `receive_timer > 0`.
-- Update `draw_smoke_spec` to exercise the marker path (`s.pass_target = 2`).
+  frames, records the carrier's `pass_target`, releases, and asserts the
+  recorded index gets `receive_timer > 0`.
+- Update `draw_smoke_spec` to exercise the marker path
+  (`s.players[s.controlled].pass_target = 2`).
 
 ## Acceptance
 

@@ -3036,6 +3036,18 @@ local function update_ball(s, dt, inputs)
             s.ball = s.ball:add(s.ball_vel:scale(dt))
             local control = TUNE.DRIBBLE_CONTROL + DRIBBLE_CONTROL_SKILL * skill
             if owner.pos:dist(s.ball) > control then
+                -- Clear at the ownership-loss transition so this tick is
+                -- self-contained: reacquisition cannot revive stale input state.
+                owner.charge = 0
+                owner.pass_charge = 0
+                owner.pass_target = nil
+                -- The fixed-slot contract requires same-tick wind-up
+                -- cancellation. Legacy match AI keeps its tripwire-pinned
+                -- heavy-touch behavior at the explicit offline boundary.
+                if s.slot_mode then
+                    owner.windup_timer = 0
+                    owner.windup_shot = nil
+                end
                 s.owner = nil -- the touch got away from the feet: it's loose now
                 return -- no owner actions this frame; the ball plays loose next
             end
