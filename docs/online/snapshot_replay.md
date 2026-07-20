@@ -107,14 +107,14 @@ The numbers are machine/runtime observations for OMP-1 issue #39. They are not
 native/browser equality evidence or a performance guarantee. Native and
 love.js must be measured separately before making a cross-runtime cost claim.
 
-One native LÖVE 11.5 run of the historical version 1 schema on the project
-development machine produced:
+One native LÖVE 11.5 run of the version 2 schema on the project development
+machine produced:
 
 ```text
-snapshot_measure version=1 tick=120 bytes=15411 iterations=1000 hash=752916a99d0b62e8
-snapshot_measure encode_ms_total=187.869 encode_us_each=187.869
-snapshot_measure hash_with_encode_ms_total=1459.477 hash_with_encode_us_each=1459.477
-snapshot_measure restore_ms_total=87.221 restore_us_each=87.221
+snapshot_measure version=2 tick=120 bytes=15821 iterations=1000 hash=05897347969cf789
+snapshot_measure encode_ms_total=201.839 encode_us_each=201.839
+snapshot_measure hash_with_encode_ms_total=1455.804 hash_with_encode_us_each=1455.804
+snapshot_measure restore_ms_total=94.606 restore_us_each=94.606
 ```
 
 This is a reference report shape and local baseline for #39, not a threshold.

@@ -1,8 +1,15 @@
 local determinism_evidence = require("sim.determinism_evidence")
+local fixture = require("data.omp1_determinism")
+local match_snapshot = require("sim.match_snapshot")
 local placement = require("sim.placement")
 local t = require("spec.support.runner")
 
 t.describe("OMP-1 determinism evidence", function()
+    t.it("pins the authoritative fixture to the current snapshot schema", function()
+        t.eq(fixture.identity.snapshot_version, match_snapshot.VERSION)
+        t.eq(match_snapshot.VERSION, 2)
+    end)
+
     t.it("uses a total order for equal-distance match candidates", function()
         local before = placement.distance_candidate_before
         t.is_true(before({ idx = 9, d = 10 }, { idx = 2, d = 10 }))
