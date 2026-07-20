@@ -209,6 +209,65 @@ t.describe("keeper near-miss tip events", function()
 end)
 
 t.describe("keeper save-style lifecycle", function()
+    t.it("clears stale presentation state after a same-direction aerial strike", function()
+        local state, keeper = new_save_state()
+        local striker = state.players[state.controlled]
+        striker.pos = Vec2.new(500, 220)
+        striker.run_vel = Vec2.new(0, 0)
+        striker.vel = Vec2.new(0, 0)
+        striker.facing = Vec2.new(1, 0)
+        striker.header_cd = 0
+        striker.aerial_recovery = 0
+        state.ball = striker.pos:add(Vec2.new(6, 0))
+        state.ball_vel = Vec2.new(120, 0)
+        state.ball_z = 56
+        state.ball_vz = -50
+        state.pickup_cd = 0
+        state.aerial_lock = 0
+        keeper.save_pending = "parry"
+        keeper.save_timer = 2
+        keeper.save_vx = state.ball_vel.x
+        keeper.dive_delay = 0.5
+        keeper.save_style = "stretch"
+        keeper.save_tip_emitted = true
+        local strike_input = {
+            move = Vec2.new(0, 0),
+            shoot = false,
+            shoot_held = false,
+            pass = false,
+            pass_held = false,
+            switch = false,
+            dash = false,
+            dodge = false,
+            lob = false,
+            sprint = false,
+            jockey = false,
+            aerial_strike = true,
+        }
+
+        match.step(state, 1 / 60, strike_input)
+
+        local strike = event_of(state, "header") or event_of(state, "volley")
+        t.is_true(strike ~= nil and strike.outcome ~= "miss", "the aerial strike redirects play")
+        t.is_true(state.ball_vel.x > 0, "the redirected ball keeps the original x direction")
+        t.eq(keeper.save_pending, "parry", "the existing save verdict remains outcome-invariant")
+        t.is_true(keeper.dive_delay > 0, "the existing dive timing remains outcome-invariant")
+        t.eq(keeper.save_style, nil)
+        t.is_true(not keeper.save_tip_emitted)
+
+        local resolved
+        for _ = 1, 150 do
+            match.step(state, 1 / 60, NO_INPUT)
+            resolved = save_event(state)
+            if resolved then
+                break
+            end
+        end
+        local parry = assert(resolved)
+        t.eq(parry.kind, "parry")
+        t.eq(parry.save_style, nil, "the stale incoming style never reaches the redirected event")
+    end)
+
     t.it("clears style when a pending shot reverses or dies before contact", function()
         local reversed, reversed_keeper = new_save_state()
         reversed.ball = Vec2.new(800, 220)

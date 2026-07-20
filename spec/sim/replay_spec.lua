@@ -148,10 +148,12 @@ t.describe("input tape replay", function()
         t.is_true(malformed.message:match("unsupported input tape version") ~= nil)
 
         local snapshot_tape, snapshot_identity = short_match_tape.make()
-        snapshot_tape.initial.version = 999
+        snapshot_tape.initial.version = 1
         local snapshot_result, snapshot_failure = replay.run(snapshot_tape, snapshot_identity)
         t.eq(snapshot_result, nil)
-        t.eq(assert(snapshot_failure).code, "malformed")
+        local prior_schema = assert(snapshot_failure)
+        t.eq(prior_schema.code, "malformed")
+        t.is_true(prior_schema.message:match("unsupported match snapshot version") ~= nil)
     end)
 
     t.it("rejects ownership detached from the initial snapshot and post-match frames", function()

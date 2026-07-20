@@ -725,6 +725,7 @@ end
 ---@param s MatchState
 ---@param inputs table<integer, MatchInput>
 ---@param config AerialMatchConfig
+---@return boolean trajectory_changed
 function aerial.resolve_play(s, inputs, config)
     if
         s.ball_z <= config.ground_grab_height
@@ -732,11 +733,11 @@ function aerial.resolve_play(s, inputs, config)
         or s.pickup_cd > 0
         or s.aerial_lock > 0
     then
-        return
+        return false
     end
     local candidate = choose_candidate(s, inputs)
     if not candidate then
-        return
+        return false
     end
     local resolution = aerial.resolve(candidate.context, candidate.contact, s.rng)
     s.rng = resolution.rng
@@ -752,6 +753,7 @@ function aerial.resolve_play(s, inputs, config)
     else
         apply_strike(s, candidate, inputs, resolution, config)
     end
+    return resolution.outcome ~= "miss"
 end
 
 return aerial

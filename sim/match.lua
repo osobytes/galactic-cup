@@ -3293,7 +3293,7 @@ local function update_ball(s, dt, inputs)
 
     -- Descending high-ball reception and first-time strikes. Geometry,
     -- difficulty, and seeded quality live in sim.aerial.
-    aerial.resolve_play(s, inputs, {
+    local aerial_redirected = aerial.resolve_play(s, inputs, {
         ground_grab_height = GROUND_GRAB_HEIGHT,
         stick_ahead = STICK_AHEAD,
         gravity = GRAVITY,
@@ -3301,6 +3301,16 @@ local function update_ball(s, dt, inputs)
         clear_header_speed = CLEAR_HEADER_SPEED,
         volley_speed = VOLLEY_SPEED,
     })
+    if aerial_redirected then
+        -- A successful first touch or strike owns a new presentation trajectory.
+        -- Clear style and the one-shot guard even when x direction is unchanged,
+        -- but preserve the pre-existing verdict/dive timing: #44 must not change
+        -- whether the keeper catches, parries, or is beaten.
+        for _, player in ipairs(s.players) do
+            player.save_style = nil
+            player.save_tip_emitted = false
+        end
+    end
 
     -- Collection. A keeper has PRIORITY in its own box: it claims any loose ball it
     -- can reach there (with its hands), beating outfielders even if they are a touch

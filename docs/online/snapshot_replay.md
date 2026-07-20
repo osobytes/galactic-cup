@@ -21,8 +21,9 @@ deep-copy all tables, and restore reconstructs every `Vec2` metatable.
 
 Version 2 adds the keeper's transient `save_style` and one-shot tip-event guard
 to `MatchPlayer`, plus optional `save_style` data on catch/parry events.
-Version 1 snapshots and tapes are intentionally rejected rather than silently
-restored without this save-resolution state.
+Snapshots and tapes carrying snapshot version 1 are intentionally rejected
+rather than silently restored without this save-resolution state. The input-tape
+envelope remains version 1.
 
 The allowlists reject unknown fields, and a spec compares them with the
 LuaCATS declarations in `sim/match.lua`. Adding a state field must therefore
