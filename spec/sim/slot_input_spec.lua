@@ -25,9 +25,8 @@ local function frame(tick, samples)
     return assert(input_frame.new(tick, slots))
 end
 
----@param sources MatchSlotSource[]?
 ---@return MatchState
-local function new_match(sources)
+local function new_match()
     local ownership = match.ownership_for_teams(teams.nebula, teams.orion)
     return match.new({
         home = teams.nebula,
@@ -35,7 +34,6 @@ local function new_match(sources)
         field = { w = 960, h = 540 },
         seed = 73,
         input_ownership = ownership,
-        slot_sources = sources or frame_sources(),
     })
 end
 
@@ -124,28 +122,146 @@ t.describe("fixed match input slots", function()
         end
     )
 
+    t.it("does not hand slot-mode legacy selection to a pass receiver", function()
+        local s = new_match()
+        local local_player = s.slot_players[4]
+        s.controlled = local_player
+        local pass = assert(input_frame.new_sample({ edges = input_frame.EDGE_BITS.pass }))
+        match.step(s, fixed_clock.TICK_SECONDS, frame(0, { [4] = pass }))
+
+        t.eq(s.controlled, local_player, "a pass cannot move slot-mode legacy metadata")
+        t.is_true(s.owner ~= local_player, "the pass was released from the fixed local player")
+    end)
+
     t.it(
-        "fills only explicitly bot-configured slots from their independent seeded streams",
+        "materializes only explicitly bot-configured slots from independent seeded streams",
         function()
             local sources = frame_sources()
             sources[1] = { kind = "bot", seed = 901 }
             sources[5] = { kind = "bot", seed = 902 }
-            local left = new_match(sources)
-            local right = new_match(sources)
+            local left = new_match()
+            local right = new_match()
+            local left_producer = slot_input.new_producer(sources)
+            local right_producer = slot_input.new_producer(sources)
             for tick = 0, 30 do
-                local input = frame(tick)
-                match.step(left, fixed_clock.TICK_SECONDS, input)
-                match.step(right, fixed_clock.TICK_SECONDS, input)
+                local base = frame(tick)
+                local left_frame = slot_input.materialize(left_producer, left, base)
+                local right_frame = slot_input.materialize(right_producer, right, base)
+                match.step(left, fixed_clock.TICK_SECONDS, left_frame)
+                match.step(right, fixed_clock.TICK_SECONDS, right_frame)
             end
             for index = 1, #left.players do
                 t.near(left.players[index].pos.x, right.players[index].pos.x, 1e-9)
                 t.near(left.players[index].pos.y, right.players[index].pos.y, 1e-9)
             end
-            t.eq(left.slot_input_state.sources[1].seed, 901)
-            t.eq(left.slot_input_state.sources[5].seed, 902)
-            t.eq(left.slot_input_state.sources[2].kind, "frame")
+            t.eq(left_producer.sources[1].seed, 901)
+            t.eq(left_producer.sources[5].seed, 902)
+            t.eq(left_producer.sources[2].kind, "frame")
         end
     )
+
+    t.it("rejects non-finite bot seeds", function()
+        local sources = frame_sources()
+        ---@type any
+        local positive_infinity = math.huge
+        sources[1] = { kind = "bot", seed = positive_infinity }
+        t.is_true(
+            not pcall(slot_input.new_producer, sources),
+            "positive infinity cannot seed a bot"
+        )
+
+        ---@type any
+        local negative_infinity = -math.huge
+        sources[1] = { kind = "bot", seed = negative_infinity }
+        t.is_true(
+            not pcall(slot_input.new_producer, sources),
+            "negative infinity cannot seed a bot"
+        )
+
+        ---@type any
+        local nan = 0 / 0
+        sources[1] = { kind = "bot", seed = nan }
+        t.is_true(not pcall(slot_input.new_producer, sources), "NaN cannot seed a bot")
+    end)
+
+    t.it("rejects seeds on non-bot slot sources", function()
+        local sources = frame_sources()
+        sources[1] = { kind = "frame", seed = 73 }
+        t.is_true(
+            not pcall(slot_input.new_producer, sources),
+            "frame rows cannot carry bot seed identity"
+        )
+
+        sources[1] = { kind = "neutral", seed = 73 }
+        t.is_true(
+            not pcall(slot_input.new_producer, sources),
+            "neutral rows cannot carry bot seed identity"
+        )
+    end)
+
+    t.it("canonicalizes stored bot seeds before materializing", function()
+        local sources = frame_sources()
+        sources[1] = { kind = "bot", seed = -901 }
+        local producer = slot_input.new_producer(sources)
+        t.eq(producer.sources[1].seed, 901)
+    end)
+
+    t.it("materializes frame, neutral, and quantized bot rows before sim.match", function()
+        local s = new_match()
+        local sources = frame_sources()
+        sources[2] = { kind = "neutral" }
+        sources[3] = { kind = "bot", seed = 901 }
+        local producer = slot_input.new_producer(sources)
+        local source_sample = assert(input_frame.new_sample({ move_x = 42, edges = 1 }))
+        local effective = slot_input.materialize(producer, s, frame(0, { [1] = source_sample }))
+
+        t.eq(effective.slots[1].move_x, 42, "frame rows are copied")
+        t.eq(effective.slots[2].move_x, 0, "neutral rows are rewritten")
+        t.is_true(effective.slots[3].move_x >= -127 and effective.slots[3].move_x <= 127)
+        t.is_true(effective.slots[3].held >= 0 and effective.slots[3].edges >= 0)
+        t.is_true(producer.bots[3] ~= nil, "only the producer owns bot RNG state")
+    end)
+
+    t.it("replays effective bot-filled frames with an all-frame producer", function()
+        local sources = {}
+        for index = 1, input_frame.SLOT_COUNT do
+            sources[index] = { kind = "bot", seed = 400 + index }
+        end
+        local live = new_match()
+        local producer = slot_input.new_producer(sources)
+        local recording = {}
+        for tick = 0, 120 do
+            local effective = slot_input.materialize(producer, live, frame(tick))
+            recording[tick + 1] = effective
+            match.step(live, fixed_clock.TICK_SECONDS, effective)
+        end
+
+        local replay = new_match()
+        local all_frame = slot_input.new_producer(frame_sources())
+        t.is_true(next(all_frame.bots) == nil, "the replay producer has no bot state")
+        for _, recorded in ipairs(recording) do
+            local effective = slot_input.materialize(all_frame, replay, recorded)
+            match.step(replay, fixed_clock.TICK_SECONDS, effective)
+        end
+
+        t.eq(replay.score.home, live.score.home)
+        t.eq(replay.score.away, live.score.away)
+        t.eq(replay.owner, live.owner)
+        t.eq(replay.rng, live.rng)
+        t.eq(replay.input_tick, live.input_tick)
+        t.near(replay.ball.x, live.ball.x, 1e-12)
+        t.near(replay.ball.y, live.ball.y, 1e-12)
+        for index = 1, #live.players do
+            t.near(replay.players[index].pos.x, live.players[index].pos.x, 1e-12)
+            t.near(replay.players[index].pos.y, live.players[index].pos.y, 1e-12)
+        end
+    end)
+
+    t.it("requires the exact fixed tick interval in slot mode", function()
+        local s = new_match()
+        local ok = pcall(match.step, s, fixed_clock.TICK_SECONDS * 2, frame(0))
+        t.is_true(not ok)
+    end)
 
     t.it("rejects a legacy MatchInput in slot mode", function()
         local s = new_match()

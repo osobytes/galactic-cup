@@ -77,11 +77,17 @@ representation.
 
 ## Holds and edges
 
-`held` and `edges` are independent bitmasks. A held bit describes the state
-for this tick; it remains set on every tick while the source is down. An edge
-bit is supplied by the input producer and is true only for the tick containing
-that transition. Edges are **not** derived by replaying consecutive frames, so
-a tape remains valid if a history starts at any tick.
+`held` and `edges` are independent bitmasks. A held bit describes the
+producer's effective intent for this tick; it normally remains set while the
+source is down. An edge bit is supplied by the input producer and is true only
+for the tick containing that transition. Edges are **not** derived by replaying
+consecutive frames, so a tape remains valid if a history starts at any tick.
+
+The legacy render-side latch may retain the `lob` held bit through the tick that
+contains a paired shoot/pass release edge. That makes a modifier lifted a
+render frame earlier still part of the same committed action; if converted to a
+frame, this explicit adapter decision is recorded there rather than inferred
+from simulation-side history.
 
 | Mask | Held action | Meaning |
 | --- | --- | --- |
@@ -89,7 +95,7 @@ a tape remains valid if a history starts at any tick.
 | 2 | `pass` | Pass/charge button currently down. |
 | 4 | `sprint` | Sprint currently down. |
 | 8 | `jockey` | Jockey currently down. |
-| 16 | `lob` | Loft modifier currently down. |
+| 16 | `lob` | Effective loft modifier intent for this tick. |
 | 32 | `aerial_strike` | First-time aerial intent currently down. |
 | 64 | `aerial_acrobatic` | Acrobatic aerial modifier currently down. |
 

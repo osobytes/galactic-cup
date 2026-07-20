@@ -1,9 +1,10 @@
--- Headless match batches: play unattended seeded matches with either the
--- human-proxy bot on the controlled slot or the match AI on both teams, then
--- fold each into fun-proxy metrics (sim/metrics.lua). Pure — no love, no I/O;
+-- Headless match batches preserve the legacy MatchInput fixture by default.
+-- Supplying frames or slot_sources opts into fixed-slot input production. Both
+-- paths fold into fun-proxy metrics (sim/metrics.lua). Pure — no love, no I/O;
 -- `report` returns a string and the caller decides where it goes. Entry point:
 -- `love . --sim [n]` in main.lua.
 
+local Vec2 = require("core.vec2")
 local match = require("sim.match")
 local bot = require("sim.bot")
 local fixed_clock = require("sim.fixed_clock")
@@ -20,6 +21,21 @@ local DT = fixed_clock.TICK_SECONDS
 local DEFAULT_DURATION = 120
 local DEFAULT_MAX_GOALS = 3
 local MAX_STEPS_SLACK = 600 -- overtime guard: a stuck sim must not hang the batch
+
+---@type MatchInput
+local NO_INPUT = {
+    move = Vec2.new(0, 0),
+    shoot = false,
+    shoot_held = false,
+    pass = false,
+    pass_held = false,
+    switch = false,
+    dash = false,
+    dodge = false,
+    lob = false,
+    sprint = false,
+    jockey = false,
+}
 
 ---@alias HeadlessBot "home"|"none"
 
@@ -40,7 +56,7 @@ local MAX_STEPS_SLACK = 600 -- overtime guard: a stuck sim must not hang the bat
 ---@field field { w: number, h: number }?
 ---@field bot HeadlessBot?  -- defaults to "home"; "none" is match AI vs match AI
 ---@field frames InputFrame[]? -- Complete canonical recorded rows, indexed by tick + 1.
----@field slot_sources MatchSlotSource[]? -- Explicit frame/bot/neutral policy for the fixture.
+---@field slot_sources MatchSlotSource[]? -- Upstream frame/bot/neutral producer policy.
 
 ---@class MatchResult
 ---@field seed number
@@ -85,18 +101,8 @@ function headless.run_match(opts)
     local duration = opts.duration or DEFAULT_DURATION
     local home = opts.home or teams.nebula
     local away = with_formation(opts.away or teams.orion, opts.away_formation)
-    local ownership = match.ownership_for_teams(home, away, opts.players_by_id)
-    local sources = opts.slot_sources
-    if not sources then
-        sources = {}
-        for index = 1, input_frame.SLOT_COUNT do
-            sources[index] = { kind = "bot", seed = math.floor(opts.seed * 97 + index) }
-        end
-        if bot_mode == "home" then
-            sources[4] = { kind = "frame" }
-        end
-    end
-    local s = match.new({
+    local slot_mode = opts.frames ~= nil or opts.slot_sources ~= nil
+    local match_opts = {
         home = home,
         away = away,
         field = { w = field.w, h = field.h },
@@ -109,12 +115,28 @@ function headless.run_match(opts)
         duration = duration,
         max_goals = opts.max_goals or DEFAULT_MAX_GOALS,
         seed = opts.seed,
-        input_ownership = ownership,
-        slot_sources = sources,
-    })
+    }
+    if slot_mode then
+        match_opts.input_ownership = match.ownership_for_teams(home, away, opts.players_by_id)
+    end
+    local s = match.new(match_opts)
+    ---@type SlotInputProducerState?
+    local producer = nil
+    if slot_mode then
+        local sources = opts.slot_sources
+        if not sources then
+            sources = {}
+            for index = 1, input_frame.SLOT_COUNT do
+                -- A recording is complete by definition: without an explicit
+                -- override, every canonical row comes from its tape.
+                sources[index] = { kind = "frame" }
+            end
+        end
+        producer = slot_input.new_producer(sources)
+    end
     ---@type BotState?
     local b = nil
-    if bot_mode == "home" then
+    if not slot_mode and bot_mode == "home" then
         b = bot.new({ seed = opts.seed, reaction = opts.reaction })
     end
     -- Metrics only fold MatchState/events; they never read bot or controlled-side
@@ -128,13 +150,17 @@ function headless.run_match(opts)
             break
         end
         local input
-        if opts.frames then
-            input = assert(opts.frames[clock.tick + 1], "recorded frame missing for headless tick")
-        else
-            input = assert(input_frame.neutral(clock.tick))
-            if b then
-                input.slots[4] = slot_input.to_sample(bot.input(b, s, DT))
+        if producer then
+            local base_frame
+            if opts.frames then
+                base_frame =
+                    assert(opts.frames[clock.tick + 1], "recorded frame missing for headless tick")
+            else
+                base_frame = assert(input_frame.neutral(clock.tick))
             end
+            input = slot_input.materialize(producer, s, base_frame)
+        else
+            input = b and bot.input(b, s, DT) or NO_INPUT
         end
         local _, continue = fixed_clock.step(clock, input, function(_, tick_input)
             match.step(s, DT, tick_input)

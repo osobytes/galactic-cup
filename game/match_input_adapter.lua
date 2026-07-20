@@ -3,8 +3,6 @@
 -- zero-tick render update and are emitted once on the next simulated tick.
 
 local Vec2 = require("core.vec2")
-local input_frame = require("sim.input_frame")
-local slot_input = require("sim.slot_input")
 
 ---@class MatchInputEdges
 ---@field shoot boolean
@@ -118,26 +116,6 @@ function match_input_adapter.next_tick(state)
         aerial_strike = held.aerial_strike,
         aerial_acrobatic = held.aerial_acrobatic,
     }
-end
-
--- The showcase's one keyboard/gamepad stream owns one fixed outfield slot.
--- The remaining rows stay present and neutral here; sim.match applies its
--- explicit configured bot/neutral source policy to those rows. This keeps
--- legacy MatchInput entirely on the render adapter side of InputFrame.
----@param state MatchInputAdapterState
----@param tick integer
----@param slot_index integer
----@return MatchInputAdapterState state
----@return InputFrame frame
-function match_input_adapter.next_frame(state, tick, slot_index)
-    assert(slot_index >= 1 and slot_index <= input_frame.SLOT_COUNT, "offline slot index invalid")
-    local next, input = match_input_adapter.next_tick(state)
-    local slots = {}
-    for index = 1, input_frame.SLOT_COUNT do
-        slots[index] = input_frame.neutral_sample()
-    end
-    slots[slot_index] = slot_input.to_sample(input)
-    return next, assert(input_frame.new(tick, slots))
 end
 
 return match_input_adapter

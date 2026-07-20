@@ -1,6 +1,6 @@
--- Fixed-slot input adaptation for the pure match simulation. InputFrame is the
--- canonical boundary; this module only converts its samples into the legacy
--- verb shape used inside sim.match and supplies explicitly configured bots.
+-- Fixed-slot input production. Producers materialize complete effective
+-- InputFrames before sim.match consumes them; the simulation never knows
+-- whether a row began as a recording, a neutral fill, or a deterministic bot.
 
 local Vec2 = require("core.vec2")
 local input_frame = require("sim.input_frame")
@@ -10,12 +10,12 @@ local rng = require("core.rng")
 
 ---@class MatchSlotSource
 ---@field kind MatchSlotSourceKind
----@field seed integer? -- Required for a deterministic bot source.
+---@field seed integer? -- Canonical Park-Miller seed; required only for `bot`.
 
 ---@class SlotBotState
 ---@field rng integer
 
----@class MatchSlotInputState
+---@class SlotInputProducerState
 ---@field sources MatchSlotSource[] -- Canonical InputFrame slot order.
 ---@field bots table<integer, SlotBotState>
 
@@ -113,33 +113,39 @@ local function copy_source(source, index)
     )
     if source.kind == "bot" then
         assert(
-            type(source.seed) == "number" and source.seed == math.floor(source.seed),
+            type(source.seed) == "number"
+                and source.seed == source.seed
+                and source.seed ~= math.huge
+                and source.seed ~= -math.huge
+                and source.seed == math.floor(source.seed),
             "bot slot source " .. index .. " needs an integer seed"
         )
+    else
+        assert(source.seed == nil, "only bot slot sources may have a seed")
     end
-    return { kind = source.kind, seed = source.seed }
+    if source.kind == "bot" then
+        return { kind = "bot", seed = rng.seed(assert(source.seed)) }
+    end
+    return { kind = source.kind }
 end
 
----@param sources MatchSlotSource[]?
----@return MatchSlotInputState
-function slot_input.new(sources)
-    if sources then
-        assert(#sources == input_frame.SLOT_COUNT, "slot sources must have eight entries")
-        for index in pairs(sources) do
-            assert(
-                type(index) == "number"
-                    and index == math.floor(index)
-                    and index >= 1
-                    and index <= input_frame.SLOT_COUNT,
-                "slot sources must use canonical numeric indexes"
-            )
-        end
+---@param sources MatchSlotSource[]
+---@return SlotInputProducerState
+function slot_input.new_producer(sources)
+    assert(#sources == input_frame.SLOT_COUNT, "slot sources must have eight entries")
+    for index in pairs(sources) do
+        assert(
+            type(index) == "number"
+                and index == math.floor(index)
+                and index >= 1
+                and index <= input_frame.SLOT_COUNT,
+            "slot sources must use canonical numeric indexes"
+        )
     end
     local copied = {}
     local bots = {}
     for index = 1, input_frame.SLOT_COUNT do
-        local source = sources and assert(sources[index], "slot source " .. index .. " is required")
-            or { kind = "frame" }
+        local source = assert(sources[index], "slot source " .. index .. " is required")
         copied[index] = copy_source(source, index)
         if copied[index].kind == "bot" then
             bots[index] = { rng = rng.seed(assert(copied[index].seed)) }
@@ -197,30 +203,31 @@ local function bot_input(state, player_idx, bot_state)
     }
 end
 
--- Resolve a complete canonical frame into one MatchInput per permanently
--- assigned outfielder. Bot sources intentionally ignore the supplied row;
--- this makes their presence an explicit fixture configuration, never an
--- inferred missing packet.
----@param input_state MatchSlotInputState
+-- Produce the complete effective frame consumed by sim.match. Bot decisions
+-- are quantized through to_sample, so the result can be saved and replayed
+-- later without this producer or its RNG state.
+---@param producer SlotInputProducerState
 ---@param state MatchState
 ---@param frame InputFrame
----@return table<integer, MatchInput> inputs
-function slot_input.resolve(input_state, state, frame)
-    assert(input_frame.validate(frame), "match requires a valid InputFrame")
+---@return InputFrame frame
+function slot_input.materialize(producer, state, frame)
+    assert(state.slot_mode, "slot producer requires a slot-mode match")
+    assert(input_frame.validate(frame), "slot producer requires a valid InputFrame")
     assert(frame.tick == state.input_tick, "input frame tick does not match match state")
-    local inputs = {}
+    local slots = {}
     for index = 1, input_frame.SLOT_COUNT do
         local player_idx = assert(state.slot_players[index], "slot mapping is incomplete")
-        local source = input_state.sources[index]
+        local source = producer.sources[index]
         if source.kind == "frame" then
-            inputs[player_idx] = slot_input.to_match_input(frame.slots[index])
+            slots[index] = frame.slots[index]
         elseif source.kind == "bot" then
-            inputs[player_idx] = bot_input(state, player_idx, assert(input_state.bots[index]))
+            slots[index] =
+                slot_input.to_sample(bot_input(state, player_idx, assert(producer.bots[index])))
         else
-            inputs[player_idx] = slot_input.neutral_match_input()
+            slots[index] = input_frame.neutral_sample()
         end
     end
-    return inputs
+    return assert(input_frame.new(frame.tick, slots))
 end
 
 return slot_input

@@ -3,6 +3,7 @@ local headless = require("sim.headless")
 local match = require("sim.match")
 local bot = require("sim.bot")
 local input_frame = require("sim.input_frame")
+local slot_input = require("sim.slot_input")
 local tuning = require("sim.tuning")
 local players = require("data.players")
 local teams = require("data.teams")
@@ -33,6 +34,23 @@ local function assert_same_metrics(a, b)
     for k, v in pairs(b) do
         t.near(v, a[k], 1e-12, "metric " .. k .. " must reproduce")
     end
+end
+
+---@param opts HeadlessOpts
+---@return boolean ok
+---@return any result
+---@return SlotInputProducerState? producer
+local function run_capturing_producer(opts)
+    local original_new = slot_input.new_producer
+    ---@type SlotInputProducerState?
+    local captured = nil
+    slot_input.new_producer = function(sources)
+        captured = original_new(sources)
+        return captured
+    end
+    local ok, result = pcall(headless.run_match, opts)
+    slot_input.new_producer = original_new
+    return ok, result, captured
 end
 
 ---@return table<string, PlayerData>
@@ -89,7 +107,7 @@ t.describe("headless.run_match", function()
         t.eq(tuning.values.AI_SHOOT_RANGE, before, "knobs restored after the batch")
     end)
 
-    t.it("preserves the historical fixture and home bot on the default path", function()
+    t.it("keeps default fixture options on the home-proxy mode", function()
         local implicit = headless.run_match({ seed = 17, duration = 20 })
         local explicit = headless.run_match({
             seed = 17,
@@ -104,6 +122,30 @@ t.describe("headless.run_match", function()
             bot = "home",
         })
         assert_same_metrics(implicit.metrics, explicit.metrics)
+    end)
+
+    t.it("keeps no-frame runs on the legacy MatchInput path", function()
+        local original_new = match.new
+        local original_bot_new = bot.new
+        ---@type MatchState?
+        local captured = nil
+        local bot_calls = 0
+        match.new = function(opts)
+            captured = original_new(opts)
+            return captured
+        end
+        bot.new = function(opts)
+            bot_calls = bot_calls + 1
+            return original_bot_new(opts)
+        end
+        local ok, result = pcall(headless.run_match, { seed = 19, duration = 3 })
+        match.new = original_new
+        bot.new = original_bot_new
+
+        t.is_true(ok, tostring(result))
+        local state = assert(captured)
+        t.is_true(not state.slot_mode)
+        t.eq(bot_calls, 1, "legacy home-proxy bot is constructed once")
     end)
 
     t.it(
@@ -181,26 +223,60 @@ t.describe("headless.run_match", function()
 
     t.it("replays a complete eight-stream recorded fixture deterministically", function()
         local frames = recorded_frames(200)
-        local sources = {}
-        for index = 1, input_frame.SLOT_COUNT do
-            sources[index] = { kind = "frame" }
-        end
         local a = headless.run_match({
             seed = 67,
             duration = 3,
             frames = frames,
-            slot_sources = sources,
         })
         local b = headless.run_match({
             seed = 67,
             duration = 3,
             frames = frames,
-            slot_sources = sources,
         })
         t.is_true(a.metrics.duration >= 2.9)
         t.eq(a.score.home, b.score.home)
         t.eq(a.score.away, b.score.away)
         assert_same_metrics(a.metrics, b.metrics)
+    end)
+
+    t.it("defaults a complete recording to all frame sources", function()
+        local ok, result, producer = run_capturing_producer({
+            seed = 69,
+            duration = 3,
+            frames = recorded_frames(200),
+        })
+
+        t.is_true(ok, tostring(result))
+        local state = assert(producer)
+        for index = 1, input_frame.SLOT_COUNT do
+            t.eq(state.sources[index].kind, "frame")
+        end
+    end)
+
+    t.it("does not inject a legacy proxy when explicit sources omit frames", function()
+        local sources = {}
+        for index = 1, input_frame.SLOT_COUNT do
+            sources[index] = { kind = "neutral" }
+        end
+        local original_new = bot.new
+        local calls = 0
+        bot.new = function(opts)
+            calls = calls + 1
+            return original_new(opts)
+        end
+        local ok, result, producer = run_capturing_producer({
+            seed = 70,
+            duration = 3,
+            slot_sources = sources,
+        })
+        bot.new = original_new
+
+        t.is_true(ok, tostring(result))
+        t.eq(calls, 0, "only explicitly configured slot bots may be created")
+        local state = assert(producer)
+        for index = 1, input_frame.SLOT_COUNT do
+            t.eq(state.sources[index].kind, "neutral")
+        end
     end)
 
     t.it("supports a deterministic mixture of recorded and explicitly bot-filled slots", function()

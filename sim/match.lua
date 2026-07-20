@@ -15,6 +15,7 @@ local species = require("sim.species")
 local placement = require("sim.placement")
 local ai = require("sim.ai")
 local passing = require("sim.passing")
+local fixed_clock = require("sim.fixed_clock")
 local input_frame = require("sim.input_frame")
 local slot_input = require("sim.slot_input")
 local formations = require("data.formations")
@@ -388,7 +389,6 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field input_ownership InputOwnership? -- Stable fixture slot-to-player identity.
 ---@field slot_players table<integer, integer> -- Canonical slot index -> MatchState player index.
 ---@field slot_for_player table<integer, integer> -- Outfielder player index -> canonical slot index.
----@field slot_input_state MatchSlotInputState? -- Explicit frame/bot/neutral source policy.
 ---@field input_tick integer -- InputFrame tick expected by the next slot-mode step.
 
 local match = {}
@@ -700,7 +700,7 @@ local function marking_of(tactic)
     return tactic.marking or DEFAULT_MARKING
 end
 
----@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, human_controlled: boolean?, input_ownership: InputOwnership?, slot_sources: MatchSlotSource[]? }
+---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, human_controlled: boolean?, input_ownership: InputOwnership? }
 ---@return MatchState
 function match.new(opts)
     local field = opts.field
@@ -805,7 +805,6 @@ function match.new(opts)
         ) or nil,
         slot_players = slot_players,
         slot_for_player = slot_for_player,
-        slot_input_state = opts.input_ownership and slot_input.new(opts.slot_sources) or nil,
         input_tick = 0,
     }
     place_kickoff(s)
@@ -978,7 +977,12 @@ local function release_pass(s, owner_idx, target_idx, blocker_f, clear_h, land_p
     -- cross, time the first touch — while it is still in flight. A back-pass
     -- is the exception: the keeper AI steps out to meet it, and control hands
     -- over in step() the moment the keeper traps it (see "Keeper control").
-    if is_human_player(s, owner_idx) and target.team == "home" and not target.is_keeper then
+    if
+        not s.slot_mode
+        and is_human_player(s, owner_idx)
+        and target.team == "home"
+        and not target.is_keeper
+    then
         s.controlled = target_idx
     end
     -- A defender right on the release point eats a driven ball — and even a lob
@@ -3321,12 +3325,18 @@ function match.step(s, dt, input)
 
     local inputs ---@type table<integer, MatchInput>
     if s.slot_mode then
-        assert(s.slot_input_state, "slot-mode match input state is required")
         -- Slot mode has no legacy-input fallback. A complete, tick-numbered
-        -- InputFrame is the simulation boundary; adapters must construct it.
+        -- effective InputFrame is the simulation boundary; producers must
+        -- materialize bots or neutral rows before calling the simulation.
         assert(input_frame.validate(input), "slot-mode match requires an InputFrame")
         ---@cast input InputFrame
-        inputs = slot_input.resolve(s.slot_input_state, s, input)
+        assert(input.tick == s.input_tick, "input frame tick does not match match state")
+        assert(dt == fixed_clock.TICK_SECONDS, "slot-mode matches require the canonical fixed tick")
+        inputs = {}
+        for index = 1, input_frame.SLOT_COUNT do
+            local player_idx = assert(s.slot_players[index], "slot mapping is incomplete")
+            inputs[player_idx] = slot_input.to_match_input(input.slots[index])
+        end
         s.input_tick = s.input_tick + 1
     else
         ---@cast input MatchInput
