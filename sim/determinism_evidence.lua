@@ -64,9 +64,15 @@ local REQUIRED_EVENT_KINDS = {
     aerial = "header",
 }
 
+---@param allow_prior_snapshot boolean?
 ---@return MatchState
-local function new_state()
-    local identity = input_tape.copy_identity(fixture.identity)
+local function new_state(allow_prior_snapshot)
+    -- The explicit refresh command is also the schema-migration path: it must
+    -- be able to replay the previous fixture's ownership while producing the
+    -- current snapshot version. Ordinary verification still validates the
+    -- complete identity through input_tape.copy_identity below.
+    local identity = allow_prior_snapshot and fixture.identity
+        or input_tape.copy_identity(fixture.identity)
     return match.new({
         home = teams.nebula,
         away = teams.orion,
@@ -349,7 +355,7 @@ end
 
 ---@return Omp1Recording
 function determinism_evidence.record()
-    local state = new_state()
+    local state = new_state(true)
     local sources = {}
     for index, seed in ipairs(fixture.source_seeds) do
         sources[index] = { kind = "bot", seed = seed }

@@ -21,7 +21,7 @@ local input_frame = require("sim.input_frame")
 ---@class MatchSnapshotModule
 local match_snapshot = {}
 
-match_snapshot.VERSION = 2
+match_snapshot.VERSION = 3
 
 match_snapshot.MATCH_FIELDS = {
     "field",
@@ -83,6 +83,8 @@ match_snapshot.PLAYER_FIELDS = {
     "dodge_dir",
     "reach",
     "handling",
+    "keeper_anticipation",
+    "keeper_set",
     "dive_timer",
     "dive_dir",
     "dive_delay",

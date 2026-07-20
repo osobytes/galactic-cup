@@ -13,7 +13,7 @@ mode, `MatchState.input_tick` is the next causal `InputFrame.tick` to consume.
 The hash at boundary `N` therefore describes state after input `N - 1` and
 before input `N`.
 
-Snapshot version 2 explicitly lists every `MatchState` and `MatchPlayer` field
+Snapshot version 3 explicitly lists every `MatchState` and `MatchPlayer` field
 in canonical order. It includes match RNG, ball/player action state, fixed
 tick metadata, input ownership, both slot mappings, marking hysteresis,
 optional wind-up/dive payloads, and the current event list. Capture and restore
@@ -21,9 +21,10 @@ deep-copy all tables, and restore reconstructs every `Vec2` metatable.
 
 Version 2 adds the keeper's transient `save_style` and one-shot tip-event guard
 to `MatchPlayer`, plus optional `save_style` data on catch/parry events.
-Snapshots and tapes carrying snapshot version 1 are intentionally rejected
-rather than silently restored without this save-resolution state. The input-tape
-envelope remains version 1.
+Version 3 adds the keeper's derived `keeper_anticipation` and transient
+`keeper_set` duration. Snapshots and tapes carrying snapshot version 2 or
+earlier are intentionally rejected rather than silently restored without this
+presentation-timing state. The input-tape envelope remains version 1.
 
 The allowlists reject unknown fields, and a spec compares them with the
 LuaCATS declarations in `sim/match.lua`. Adding a state field must therefore
@@ -36,7 +37,7 @@ different match.
 
 ## Canonical bytes and hash
 
-The byte stream starts with `GCMS;` and snapshot version 2. Record names and
+The byte stream starts with `GCMS;` and snapshot version 3. Record names and
 strings are length-prefixed; nil, booleans, strings, and numbers have distinct
 tags. Arrays and sparse index maps are emitted in their declared numeric
 ranges. Records use the checked-in field arrays, never `pairs` iteration.
@@ -107,14 +108,14 @@ The numbers are machine/runtime observations for OMP-1 issue #39. They are not
 native/browser equality evidence or a performance guarantee. Native and
 love.js must be measured separately before making a cross-runtime cost claim.
 
-One native LÖVE 11.5 run of the version 2 schema on the project development
+One native LÖVE 11.5 run of the version 3 schema on the project development
 machine produced:
 
 ```text
-snapshot_measure version=2 tick=120 bytes=15821 iterations=1000 hash=05897347969cf789
-snapshot_measure encode_ms_total=201.839 encode_us_each=201.839
-snapshot_measure hash_with_encode_ms_total=1455.804 hash_with_encode_us_each=1455.804
-snapshot_measure restore_ms_total=94.606 restore_us_each=94.606
+snapshot_measure version=3 tick=120 bytes=16311 iterations=1000 hash=c26961d5806dc8ee
+snapshot_measure encode_ms_total=187.375 encode_us_each=187.375
+snapshot_measure hash_with_encode_ms_total=1392.625 hash_with_encode_us_each=1392.625
+snapshot_measure restore_ms_total=86.862 restore_us_each=86.862
 ```
 
 This is a reference report shape and local baseline for #39, not a threshold.

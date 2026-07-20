@@ -37,12 +37,12 @@ REQUIRED_FIELDS = {
     "tick_rate": "60",
     "ticks": "7201",
     "boundaries": "7202",
-    "hash": "fnv1a64-canonical-snapshot-v2",
-    "final_hash": "79c494c29b3a5993",
-    "sequence_digest": "33be51fd81b0f02f",
+    "hash": "fnv1a64-canonical-snapshot-v3",
+    "final_hash": "bd570642f2d94a76",
+    "sequence_digest": "1de4d0b510150ef8",
     "score": "0-1",
     "outcome": "away",
-    "snapshot_bytes": "17269",
+    "snapshot_bytes": "17759",
     "coverage": "goal_kickoff,tackle,aerial,keeper,full_time",
     "events": (
         "block:3,catch:6,claim:2,header:13,parry:1,pass:8,shot:5,"

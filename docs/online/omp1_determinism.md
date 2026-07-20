@@ -1,7 +1,7 @@
 # OMP-1 determinism evidence
 
-Status: **native pass on the authoritative snapshot-v2 fixture; current
-Chrome/Firefox v2 verification is enforced by CI**. The accepted snapshot-v1
+Status: **native pass on the authoritative snapshot-v3 fixture; current
+Chrome/Firefox v3 verification is enforced by CI**. The accepted snapshot-v1
 browser evidence remains preserved as a historical artifact below.
 
 This report closes the OMP-1 evidence line. It proves that one complete,
@@ -22,7 +22,7 @@ the explicit refresh command is invoked.
 | Identity field | Frozen value |
 | --- | --- |
 | Fixture | `omp1-nebula-orion-eight-streams-v1` |
-| Tape / input / snapshot versions | `1 / 1 / 2` |
+| Tape / input / snapshot versions | `1 / 1 / 3` |
 | Build | `omp1-determinism-v1` |
 | Source | `issue-39-canonical-recording-v1` |
 | Content | `nebula-orion-showcase-content-v1` |
@@ -40,7 +40,7 @@ with an integer tick budget and version the fixture.
 
 ## Hash and repeated-run result
 
-Every boundary is encoded with canonical snapshot version 2 and hashed with
+Every boundary is encoded with canonical snapshot version 3 and hashed with
 the browser-safe FNV-1a-64 implementation. Verification performs these three
 checks:
 
@@ -53,11 +53,11 @@ The authoritative values are:
 
 ```text
 boundaries=7202
-final_hash=79c494c29b3a5993
-sequence_digest=33be51fd81b0f02f
+final_hash=bd570642f2d94a76
+sequence_digest=1de4d0b510150ef8
 score=0-1
 outcome=away
-final_snapshot_bytes=17269
+final_snapshot_bytes=17759
 ```
 
 The complete match produced:
@@ -78,6 +78,12 @@ love . --determinism-refresh
 Refreshing the recording is a snapshot/input contract change. Review the
 identity, every changed wire/hash, event counts, score, and restore windows
 before committing it.
+
+The snapshot-v3 migration retained all 7,201 input wires byte-for-byte
+(`SHA-256 a717c094e69229e7149e6d184a8a3dcc7a12476a0c07109eff1552de01bf2292`).
+The score, event counts, and restore windows also stayed fixed; boundary hashes,
+the sequence digest, and snapshot sizes changed because v3 canonically includes
+the keeper's anticipation and set/lean state.
 
 ## Restore/replay windows
 
@@ -112,10 +118,10 @@ On the development machine (Zorin OS 18.1, Linux x86_64, native LÖVE 11.5),
 1,000 operations at boundary tick 120 measured:
 
 ```text
-snapshot_measure version=2 tick=120 bytes=15821 iterations=1000 hash=05897347969cf789
-snapshot_measure encode_us_each=201.839
-snapshot_measure hash_with_encode_us_each=1455.804
-snapshot_measure restore_us_each=94.606
+snapshot_measure version=3 tick=120 bytes=16311 iterations=1000 hash=c26961d5806dc8ee
+snapshot_measure encode_us_each=187.375
+snapshot_measure hash_with_encode_us_each=1392.625
+snapshot_measure restore_us_each=86.862
 ```
 
 These are observations, not thresholds. The complete two-state native
@@ -140,10 +146,10 @@ than skips, if Chrome or Firefox is missing.
 
 ## Runtime verification
 
-The authoritative snapshot-v2 fixture passes the two-fresh-process native
+The authoritative snapshot-v3 fixture passes the two-fresh-process native
 command above. CI builds a clean love.js artifact and runs the same current
 fixture in real Chrome and Firefox; that workflow, rather than a hand-edited
-evidence file, supplies the v2 browser integration proof.
+evidence file, supplies the v3 browser integration proof.
 
 ### Historical snapshot-v1 browser evidence
 
@@ -191,7 +197,7 @@ browser artifact packaging path is replaced by this evidence work.
 ## Remaining OMP-2 risks
 
 - The checked-in browser artifact is historical snapshot-v1 evidence. Current
-  snapshot-v2 Chrome/Firefox proof runs in CI and is not a substitute for
+  snapshot-v3 Chrome/Firefox proof runs in CI and is not a substitute for
   Windows, macOS, or cross-architecture floating-point evidence.
 - The full-time boundary currently depends on floating countdown semantics
   and consumes 7,201 inputs for a nominal 7,200-tick duration.

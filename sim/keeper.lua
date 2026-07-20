@@ -10,6 +10,18 @@ local Vec2 = require("core.vec2")
 ---@field aggression number
 ---@field in_1v1 boolean
 
+---@class KeeperShotContext
+---@field defending_team "home"|"away"
+---@field shooter_team "home"|"away"
+---@field origin Vec2
+---@field direction Vec2
+---@field goal Rect
+
+---@class KeeperSetContext: KeeperShotContext
+---@field anticipation number
+---@field windup_duration number
+---@field windup_remaining number
+
 local CLAIM_DEPTH = 160
 -- The issue's fixed context deliberately omits field dimensions. Galactic Cup's canonical
 -- 960px pitch therefore supplies the 480px goal-line-to-midfield half-depth.
@@ -93,6 +105,34 @@ end
 ---@return number seconds
 function keeper.commit_lead(anticipation, windup_duration)
     return clamp(anticipation, 0, 1) * math.max(windup_duration, 0)
+end
+
+---@param context KeeperShotContext
+---@return boolean
+function keeper.shot_targets_goal(context)
+    if context.shooter_team == context.defending_team or context.direction.x == 0 then
+        return false
+    end
+
+    local goal_line_x = context.defending_team == "home" and (context.goal.x + context.goal.w)
+        or context.goal.x
+    local flight = (goal_line_x - context.origin.x) / context.direction.x
+    if flight < 0 then
+        return false
+    end
+
+    local goal_y = context.origin.y + context.direction.y * flight
+    return goal_y >= context.goal.y and goal_y <= context.goal.y + context.goal.h
+end
+
+---@param context KeeperSetContext
+---@return boolean
+function keeper.should_set(context)
+    local lead = keeper.commit_lead(context.anticipation, context.windup_duration)
+    return lead > 0
+        and context.windup_remaining > 0
+        and context.windup_remaining <= lead
+        and keeper.shot_targets_goal(context)
 end
 
 return keeper
