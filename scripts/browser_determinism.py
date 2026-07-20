@@ -109,6 +109,30 @@ def driver_version(path: Path) -> str:
     return (result.stdout or result.stderr).strip()
 
 
+def chrome_arguments(ci: bool) -> tuple[str, ...]:
+    arguments = [
+        "--headless=new",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+        "--no-default-browser-check",
+        "--no-first-run",
+    ]
+    if ci:
+        arguments.append("--no-sandbox")
+    return tuple(arguments)
+
+
+def bounded_log_tail(path: Path, max_lines: int = 40, max_characters: int = 6000) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as error:
+        return f"<webdriver log unavailable: {error}>"
+    tail = "\n".join(lines[-max_lines:])
+    if len(tail) > max_characters:
+        tail = "<truncated>\n" + tail[-max_characters:]
+    return tail or "<webdriver log empty>"
+
+
 def launch(browser_name: str, binary: Path, driver: Path, log: Path) -> Any:
     if browser_name == "chrome":
         from selenium import webdriver
@@ -117,13 +141,7 @@ def launch(browser_name: str, binary: Path, driver: Path, log: Path) -> Any:
 
         options = Options()
         options.binary_location = str(binary)
-        for argument in (
-            "--headless=new",
-            "--disable-dev-shm-usage",
-            "--disable-extensions",
-            "--no-default-browser-check",
-            "--no-first-run",
-        ):
+        for argument in chrome_arguments(os.environ.get("CI") == "true"):
             options.add_argument(argument)
         return webdriver.Chrome(
             service=Service(
@@ -260,7 +278,13 @@ def run_once(
 ) -> dict[str, Any]:
     started = time.monotonic()
     log = output / f"{browser_name}-{run_number}-webdriver.log"
-    driver = launch(browser_name, binary, driver_path, log)
+    try:
+        driver = launch(browser_name, binary, driver_path, log)
+    except Exception as error:
+        raise RuntimeError(
+            f"{browser_name} run {run_number} launch failed: {error}\n"
+            f"bounded webdriver log tail:\n{bounded_log_tail(log)}"
+        ) from error
     record: dict[str, Any] | None = None
     try:
         driver.set_page_load_timeout(90)
@@ -315,6 +339,11 @@ def run_once(
 
 
 def self_test() -> None:
+    if "--no-sandbox" not in chrome_arguments(True):
+        raise RuntimeError("CI Chrome arguments omit --no-sandbox")
+    if "--no-sandbox" in chrome_arguments(False):
+        raise RuntimeError("local Chrome arguments unexpectedly disable the sandbox")
+
     class FakeProcess:
         def __init__(self) -> None:
             self.pid = 123
