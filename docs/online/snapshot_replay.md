@@ -117,16 +117,16 @@ The latest version 5 measurement was recorded by the final native determinism
 gate on the project development machine:
 
 ```text
-snapshot_measure version=5 tick=120 bytes=18197 iterations=100 hash=d1f7e58ef54570ea
-snapshot_measure encode_ms_total=27.001 encode_us_each=270.010
-snapshot_measure hash_with_encode_ms_total=154.650 hash_with_encode_us_each=1546.500
-snapshot_measure restore_ms_total=12.518 restore_us_each=125.180
+snapshot_measure version=5 tick=120 bytes=18292 iterations=100 hash=5e32bb31e3cdb281
+snapshot_measure encode_ms_total=24.281 encode_us_each=242.810
+snapshot_measure hash_with_encode_ms_total=150.624 hash_with_encode_us_each=1506.240
+snapshot_measure restore_ms_total=9.665 restore_us_each=96.650
 ```
 
 This is a reference report shape and local baseline for #39, not a threshold.
 The version 5 schema is not comparable byte-for-byte with version 4 because it
 replaces the locked keeper target with explicit behavior/release state. Its
-authoritative complete-match final snapshot is 19,413 bytes.
+authoritative complete-match final snapshot is 19,437 bytes.
 
 ## OMP-1 evidence
 
@@ -143,7 +143,7 @@ diagnostic only; rollback and network behavior are still deferred to OMP-2.
 
 Snapshot-v5 also has a bounded synthetic replay regression for the goal window
 missing from the frozen 0-0 match. It constructs a real `InputTape` at the
-pre-goal boundary with all keeper behavior/release fields populated, replays
-three neutral frames through the goal, kickoff reset, and a post-kickoff
+pre-goal boundary with all keeper behavior/release fields populated,
+replays three neutral frames through the goal, kickoff reset, and a post-kickoff
 boundary, checks every canonical hash, and compares an independently restored
 tape through `sim.replay`.

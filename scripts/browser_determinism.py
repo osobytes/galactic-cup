@@ -38,13 +38,13 @@ REQUIRED_FIELDS = {
     "ticks": "7201",
     "boundaries": "7202",
     "hash": "fnv1a64-canonical-snapshot-v5",
-    "final_hash": "984bc6f2f2d59e1e",
-    "sequence_digest": "60aea810b4ccb46c",
+    "final_hash": "9a71cd09b246d6f6",
+    "sequence_digest": "623e771bb00362e1",
     "score": "0-0",
     "outcome": "draw",
-    "snapshot_bytes": "19413",
+    "snapshot_bytes": "19437",
     "coverage": "tackle,aerial,keeper,full_time",
-    "events": "catch:1,claim:2,header:2,parry:1,pass:3,shot:1,tackle:151,touch:197",
+    "events": "catch:1,claim:4,header:2,pass:5,reception:1,shot:1,tackle:147,touch:173",
     "love": "11.5.0",
 }
 ERROR_MARKERS = (

@@ -347,36 +347,50 @@ until phase 4 automates it).
   0.420 → 0.418. The larger sample shows no new systemic collapse or keeper
   overcommitment.
 
-- **2026-07-22 — explicit keeper commitment and chip counterplay.** The default
-  base state retains the legacy twelve-pixel goal-line guard and lateral band;
-  the conservative centre-ray is now reserved for contextual contain/advance
-  commitments. Ground windups visibly set the keeper, lob/through-ball cues
-  retreat it, and release-time movement consumes reaction time without changing
-  physical reach or catch/parry RNG. Chip type and launch are now locked at
-  commit: AI declines infeasible chips, while a human-requested infeasible chip
-  remains a deterministic poor chip instead of turning into a ground-shot
-  decoy during the keeper's retreat.
+- **2026-07-22 — explicit keeper commitment, dynamic base depth, and chip
+  counterplay.** The accepted base state is no longer a fixed legacy point.
+  The keeper stays at the physical one-radius inset when play is far away, then
+  advances from 12 px to at most 18 px near the claim edge
+  (`12 + min(aggression * 0.15, 6) * approach`). The deliberately exaggerated
+  ±40 px near-post bias replaces the legacy ±28 px band: it keeps the keeper's
+  body inside the goal mouth while conceding the far corner to an attacker aiming
+  away from the keeper. Base locomotion eases inside its final 18 px rather than
+  oscillating across the cap. Contextual contain/advance uses the conservative
+  centre ray at greater depth. Ground windups visibly set the keeper; a lob cue
+  produces a real retreat to the goal line; a through-ball cue retreats an
+  already committed keeper without relabelling an already-deep base keeper.
+  Release-time movement consumes reaction time without changing physical reach
+  or catch/parry RNG.
 
-  The required final 100-match audit measured fun 0.360, goals 1.620,
-  shots/goal 25.679, save rate 0.872, pass completion 0.575, turnovers/min
-  3.487, and possession balance 0.430. Save rate is within -0.002 of the last
-  0.874 audit rather than reproducing the rejected keeper-wall experiments.
-  Keeper state occupancy was 214.807 s base, 0.090 s advance, 0.203 s contain,
-  7.306 s set, 4.927 s retreat, and 0.820 s recover per match; mean shot-release
-  depth was 16.950 px. Across the sample, 32 chips were selected, 28 were on
-  target, and 9 scored.
+  AI chip visibility begins at twenty pixels of committed depth, explicitly
+  beyond the neutral eighteen-pixel cap; trajectory feasibility still decides
+  whether the attacker actually selects the chip.
 
-  Outcome attribution is now honest about strikes without release metadata.
-  Mean saves per match were: base 0, advance 0.020, contain 0, set 5.600,
-  retreat 0.160, recover 0.040, unclassified 6.680. Mean goals were: base 0,
-  advance 0, contain 0, set 1.050, retreat 0.090, recover 0.030, unclassified
-  0.230. The unclassified bucket contains aerial/context-free outcomes that
-  were formerly misreported as base.
+  This hybrid is evidence-led rather than legacy preservation. A pure shallow
+  centre-ray base made the keeper too central for the existing reach model:
+  30-match candidates produced save rates from 0.914 to 0.926. Retaining the
+  near-post concession while varying physical depth reduced the final 100-match
+  save rate to 0.860, versus 0.872 for the rejected fixed-base candidate and
+  0.874 before the milestone. The final audit measured fun 0.400, goals 1.750,
+  shots/goal 26.484, pass completion 0.564, turnovers/min 3.330, and possession
+  balance 0.416.
 
-  After this audit, `love . --tripwire write` deliberately migrated the
-  checked-in 30-seed guardrail. Key old → new values: fun 0.343941 → 0.365731,
-  goals 1.633333 → 1.766667, shots/goal 27.644231 → 25.993210, save rate
-  0.876442 → 0.860101, pass completion 0.578242 → 0.579522, turnovers/min
-  3.331794 → 3.724430, possession balance 0.427225 → 0.429692, drought
-  11.958889 → 11.355556, and decided-late 0.586640 → 0.651684. This is an
-  audited mechanics migration, not a balance tweak made to manufacture green.
+  Combined keeper-state occupancy was 215.637 s base, 0.074 s advance, 0.163 s
+  contain, 7.593 s set, 1.640 s retreat, and 0.791 s recover per match; mean
+  shot-release depth was 21.627 px. Across the sample, 39 chips were selected,
+  32 were on target, and 12 scored. Mean saves were: base 0.010, advance 0,
+  contain 0.020, set 5.680, retreat 0.180, recover 0.010, unclassified 6.610.
+  Mean goals were: base 0, advance 0.010, contain 0, set 1.160, retreat 0.120,
+  recover 0.020, unclassified 0.280. The unclassified bucket contains
+  aerial/context-free outcomes rather than misreporting them as base.
+
+  Chip type and launch remain locked at commit: AI declines infeasible chips,
+  while a human-requested infeasible chip remains a deterministic poor chip
+  instead of becoming a ground-shot decoy during retreat. After the 100-match
+  audit, `love . --tripwire write` generated the new 30-seed guardrail. Key
+  fixed-base → dynamic-base values were: fun 0.365731 → 0.431011, goals
+  1.766667 → 1.800000, shots/goal 25.993210 → 24.882716, save rate 0.860101 →
+  0.832823, pass completion 0.579522 → 0.566531, turnovers/min 3.724430 →
+  3.493987, possession balance 0.429692 → 0.427794, drought 11.355556 →
+  10.936111, and decided-late 0.651684 → 0.605511. The noisier 30-seed sample is
+  retained exactly; the 100-match audit above is the calibration decision.

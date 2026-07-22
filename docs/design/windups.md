@@ -40,9 +40,14 @@ that telegraphs them.
   anticipation reads a ground wind-up, while every released ground shot creates
   the same set cue at release.
 - Advance eligibility uses attacker control/loose-touch plus visible support and
-  defender context. Base retains the legacy twelve-pixel line guard; contextual
-  contain/advance commitments use the bounded centre ray. Losing the duel enters
-  a timed recover before retreat, so a beaten advance never snaps home.
+  defender context. Base stays at the physical one-radius inset when play is far
+  away, then advances dynamically from 12 px to at most 18 px as the attack
+  approaches while using a deliberate ±40 px near-post bias that concedes the
+  far corner. Base locomotion eases through its final 18 px so it settles instead
+  of oscillating across the neutral cap.
+  Contextual contain/advance commitments use the bounded centre ray. Losing the
+  duel enters a timed recover before retreat, so a beaten advance never snaps
+  home.
 - Release captures keeper state, depth, and normalized motion. Motion consumes a
   deterministic part of the fixed dive time budget; a set keeper at the same
   position is never worse. Equivalent set contact retains the existing physical

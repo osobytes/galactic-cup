@@ -81,15 +81,17 @@ local CLAIM_DEPTH = 160
 -- The issue's fixed context deliberately omits field dimensions. Galactic Cup's canonical
 -- 960px pitch therefore supplies the 480px goal-line-to-midfield half-depth.
 local MIDFIELD_DEPTH = 480
-local KEEPER_GUARD = 28
-local BASE_DEPTH = 12
+local CONTEXT_LATERAL_GUARD = 28
+local BASE_LATERAL_GUARD = 40
+local BASE_MIN_DEPTH = 12
+local BASE_ARC_EXTRA_FRACTION = 0.15
+local BASE_ARC_MAX_EXTRA = 6
 local CONTAIN_DISTANCE = 4
 local RECOVER_DURATION = 0.18
 local ADVANCE_THREAT_DISTANCE = 200
 local DEFENDER_HANDOFF_DISTANCE = 120
 local CONTAIN_DEPTH_FRACTION = 0.8
-local CHIP_VISIBLE_MIN_DEPTH = 24
-local CHIP_VISIBLE_DEPTH_FRACTION = 0.5
+local CHIP_VISIBLE_MIN_DEPTH = 20
 local CHIP_CLEARANCE_PAD = 2
 local CROSSBAR_PAD = 2
 local CHIP_FALLBACK_HEIGHT_FRACTION = 0.5
@@ -142,20 +144,36 @@ function keeper.depth_target(context, depth)
     local target = goal_center:add(ray:normalized():scale(depth))
     return Vec2.new(
         target.x,
-        clamp(target.y, goal_center.y - KEEPER_GUARD, goal_center.y + KEEPER_GUARD)
+        clamp(
+            target.y,
+            goal_center.y - CONTEXT_LATERAL_GUARD,
+            goal_center.y + CONTEXT_LATERAL_GUARD
+        )
     )
 end
 
----Reproduce the original goal-line guard exactly: twelve pixels infield while
----tracking the ball laterally inside the fixed centre band.
+---Choose a shallow neutral arc from the physical one-radius goal-line inset.
+---Depth and the deliberately exaggerated lateral corner concession grow as an
+---attack approaches, without becoming a continuously optimized save surface.
 ---@param context KeeperPositionContext
 ---@return Vec2
 function keeper.base_target(context)
     local goal_line_x, infield_direction = goal_axis(context.team, context.goal)
+    local ball_depth = (context.ball_pos.x - goal_line_x) * infield_direction
     local goal_center_y = context.goal.y + context.goal.h / 2
+    if ball_depth >= MIDFIELD_DEPTH then
+        return Vec2.new(goal_line_x + infield_direction * BASE_MIN_DEPTH, goal_center_y)
+    end
+
+    local approach = clamp((MIDFIELD_DEPTH - ball_depth) / (MIDFIELD_DEPTH - CLAIM_DEPTH), 0, 1)
+    local extra_cap =
+        math.min(math.max(context.aggression, 0) * BASE_ARC_EXTRA_FRACTION, BASE_ARC_MAX_EXTRA)
+    local target_depth = BASE_MIN_DEPTH + extra_cap * approach
+    local lateral =
+        clamp(context.ball_pos.y - goal_center_y, -BASE_LATERAL_GUARD, BASE_LATERAL_GUARD)
     return Vec2.new(
-        goal_line_x + infield_direction * BASE_DEPTH,
-        clamp(context.ball_pos.y, goal_center_y - KEEPER_GUARD, goal_center_y + KEEPER_GUARD)
+        goal_line_x + infield_direction * target_depth,
+        goal_center_y + lateral * approach
     )
 end
 
@@ -214,6 +232,7 @@ function keeper.behavior(context)
     }
     local base_target = keeper.base_target(position_context)
     local retreat_target = base_target
+    local deep_target = keeper.depth_target(position_context, 0)
     local advance_target = keeper.depth_target(position_context, math.max(context.aggression, 0))
     local contain_target = keeper.depth_target(
         position_context,
@@ -224,7 +243,12 @@ function keeper.behavior(context)
     local target = base_target
     local movement_scale = 1
 
-    if context.lob_cue or context.through_ball_cue then
+    if context.lob_cue then
+        state = "retreat"
+        state_timer = 0
+        target = deep_target
+        movement_scale = 0.85
+    elseif context.through_ball_cue and state ~= "base" then
         state = "retreat"
         state_timer = 0
         target = retreat_target
@@ -280,12 +304,11 @@ end
 ---@param keeper_pos Vec2
 ---@param team "home"|"away"
 ---@param goal Rect
----@param aggression number
 ---@return boolean
-function keeper.chip_is_visible(keeper_pos, team, goal, aggression)
+function keeper.chip_is_visible(keeper_pos, team, goal)
     local goal_line_x, infield_direction = goal_axis(team, goal)
     local depth = (keeper_pos.x - goal_line_x) * infield_direction
-    return depth >= math.max(CHIP_VISIBLE_MIN_DEPTH, aggression * CHIP_VISIBLE_DEPTH_FRACTION)
+    return depth >= CHIP_VISIBLE_MIN_DEPTH
 end
 
 ---@param distance number
