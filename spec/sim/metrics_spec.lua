@@ -14,6 +14,7 @@ local function fake_state()
                 move_speed = 180,
                 sprinting = false,
                 dodge_timer = 0,
+                keeper_state = "base",
             },
             {
                 id = "h1",
@@ -23,6 +24,7 @@ local function fake_state()
                 move_speed = 180,
                 sprinting = false,
                 dodge_timer = 0,
+                keeper_state = "base",
             },
             {
                 id = "h2",
@@ -131,6 +133,59 @@ t.describe("metrics.observe", function()
         t.eq(m.goals_home, 1)
         t.near(c.goals[1].t, 31, 1e-9)
         t.near(m.longest_drought_s, 50, 1e-9, "the post-goal tail is a drought")
+    end)
+
+    t.it("observes keeper state, release depth, and chip outcomes without changing play", function()
+        local s = fake_state()
+        local c = metrics.new(s)
+        s.players[1].keeper_state = "advance"
+        s.players[4].keeper_state = "set"
+        frame(c, s, {
+            dt = 0.5,
+            events = {
+                {
+                    kind = "shot",
+                    player = "h1",
+                    shot_type = "chip",
+                    keeper_state = "advance",
+                    keeper_depth = 42,
+                    on_target = true,
+                },
+            },
+        })
+        s.score.home = 1
+        frame(c, s, { dt = 0.5 })
+        frame(c, s, {
+            events = {
+                { kind = "parry", player = "a_keeper", keeper_state = "set" },
+            },
+        })
+
+        local result = metrics.finish(c, s)
+        t.near(result.keeper_advance_s, 2)
+        t.near(result.keeper_set_s, 2)
+        t.eq(result.keeper_shot_depth_mean, 42)
+        t.eq(result.chip_shots, 1)
+        t.eq(result.chip_on_target, 1)
+        t.eq(result.chip_goals, 1)
+        t.eq(result.chip_conversion, 1)
+        t.eq(result.keeper_goals_advance, 1)
+        t.eq(result.keeper_saves_set, 1)
+    end)
+
+    t.it("keeps aerial goals and context-free saves explicitly unclassified", function()
+        local s = fake_state()
+        local c = metrics.new(s)
+        frame(c, s, { events = { { kind = "header", player = "a1" } } })
+        s.score.away = 1
+        frame(c, s, {})
+        frame(c, s, { events = { { kind = "catch", player = "h_keeper" } } })
+
+        local result = metrics.finish(c, s)
+        t.eq(result.keeper_goals_unclassified, 1)
+        t.eq(result.keeper_saves_unclassified, 1)
+        t.eq(result.keeper_goals_base, 0)
+        t.eq(result.keeper_saves_base, 0)
     end)
 
     t.it("separates controlled and team-AI dribble usage", function()

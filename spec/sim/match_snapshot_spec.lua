@@ -54,12 +54,18 @@ t.describe("canonical match snapshots", function()
     t.it("captures and restores every nested payload as independent state", function()
         local state = new_state()
         state.players[2].dive_target = Vec2.new(10, 20)
-        state.players[1].keeper_1v1_target = Vec2.new(40, 285)
+        state.players[1].keeper_state = "retreat"
+        state.players[1].keeper_state_timer = 0.15
+        state.players[1].keeper_release_state = "advance"
+        state.players[1].keeper_release_motion = 0.75
+        state.players[1].keeper_release_kind = "chip"
+        state.players[1].keeper_release_depth = 40
         state.players[2].windup_shot = {
             dir = Vec2.new(0.25, -0.75),
             speed = 456,
             vz = 123,
             spin = -8,
+            shot_type = "chip",
         }
         state.players[2].save_style = "stretch"
         state.players[2].save_tip_emitted = true
@@ -81,17 +87,24 @@ t.describe("canonical match snapshots", function()
             y = 77,
             player = state.players[1].id,
             save_style = "spread",
+            keeper_state = "set",
+            keeper_depth = 12,
         }
         local snapshot = match_snapshot.capture(state)
         local restored = match_snapshot.restore(snapshot)
 
         state.players[2].pos.x = -100
-        state.players[1].keeper_1v1_target.x = -101
+        state.players[1].keeper_state = "base"
+        state.players[1].keeper_release_depth = -101
         state.players[2].windup_shot.dir.y = 99
         state.events[1].x = 999
         state.events[2].save_style = "central"
         t.is_true(snapshot.state.players[2].pos.x ~= -100)
-        t.eq(snapshot.state.players[1].keeper_1v1_target.x, 40)
+        t.eq(snapshot.state.players[1].keeper_state, "retreat")
+        t.eq(snapshot.state.players[1].keeper_release_state, "advance")
+        t.eq(snapshot.state.players[1].keeper_release_motion, 0.75)
+        t.eq(snapshot.state.players[1].keeper_release_kind, "chip")
+        t.eq(snapshot.state.players[1].keeper_release_depth, 40)
         t.eq(snapshot.state.players[2].windup_shot.dir.y, -0.75)
         t.eq(snapshot.state.players[2].save_style, "stretch")
         t.is_true(snapshot.state.players[2].save_tip_emitted)
@@ -101,17 +114,64 @@ t.describe("canonical match snapshots", function()
         t.eq(snapshot.state.events[2].save_style, "spread")
 
         snapshot.state.players[2].pos.y = -200
-        snapshot.state.players[1].keeper_1v1_target.y = -201
+        snapshot.state.players[1].keeper_state = "recover"
         snapshot.state.players[2].windup_shot.speed = 1
         t.is_true(restored.players[2].pos.y ~= -200)
-        t.eq(restored.players[1].keeper_1v1_target.y, 285)
+        t.eq(restored.players[1].keeper_state, "retreat")
+        t.eq(restored.players[1].keeper_state_timer, 0.15)
+        t.eq(restored.players[1].keeper_release_state, "advance")
+        t.eq(restored.players[1].keeper_release_motion, 0.75)
+        t.eq(restored.players[1].keeper_release_kind, "chip")
+        t.eq(restored.players[1].keeper_release_depth, 40)
         t.near(restored.players[1].keeper_aggression, state.players[1].keeper_aggression)
         t.near(restored.players[1].keeper_anticipation, state.players[1].keeper_anticipation)
         t.eq(restored.players[2].windup_shot.speed, 456)
+        t.eq(restored.players[2].windup_shot.shot_type, "chip")
         t.near(restored.players[2].windup_shot.dir:length(), math.sqrt(0.625))
         t.eq(restored.players[2].keeper_anticipation, 0.75)
         t.eq(restored.players[2].keeper_set, 0.125)
         t.eq(restored.events[2].save_style, "spread")
+        t.eq(restored.events[2].keeper_state, "set")
+        t.eq(restored.events[2].keeper_depth, 12)
+    end)
+
+    t.it("canonically restores a v5 keeper state through goal and kickoff", function()
+        local live = new_state()
+        local away_keeper = live.players[6]
+        away_keeper.keeper_state = "retreat"
+        away_keeper.keeper_state_timer = 0.1
+        away_keeper.keeper_release_state = "advance"
+        away_keeper.keeper_release_motion = 0.5
+        away_keeper.keeper_release_kind = "chip"
+        away_keeper.keeper_release_depth = 42
+        away_keeper.receive_timer = 1
+        live.owner = nil
+        live.ball = Vec2.new(965, 270)
+        live.ball_vel = Vec2.new(600, 0)
+        live.ball_z = 0
+        live.ball_vz = 0
+        live.pickup_cd = 1
+        live.block_grace = 1
+
+        local boundary = match_snapshot.capture(live)
+        local restored = match_snapshot.restore(boundary)
+        t.eq(restored.players[6].keeper_state, "retreat")
+        t.eq(restored.players[6].keeper_release_kind, "chip")
+        t.eq(match_snapshot.hash(match_snapshot.capture(restored)), match_snapshot.hash(boundary))
+
+        local frame = assert(input_frame.neutral(live.input_tick))
+        match.step(live, fixed_clock.TICK_SECONDS, frame)
+        match.step(restored, fixed_clock.TICK_SECONDS, frame)
+
+        t.eq(live.score.home, 1)
+        t.is_true(live.kickoff_hold > 0)
+        t.is_true(live.owner ~= nil and live.players[live.owner].team == "away")
+        t.eq(live.players[6].keeper_state, "base")
+        t.eq(live.players[6].keeper_release_kind, nil)
+        t.eq(
+            match_snapshot.hash(match_snapshot.capture(restored)),
+            match_snapshot.hash(match_snapshot.capture(live))
+        )
     end)
 
     t.it("converges snapshot advance restore and replay at every boundary", function()

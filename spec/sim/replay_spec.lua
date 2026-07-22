@@ -1,9 +1,13 @@
 local t = require("spec.support.runner")
 local short_match_tape = require("spec.fixtures.short_match_tape")
+local Vec2 = require("core.vec2")
+local fixed_clock = require("sim.fixed_clock")
 local input_frame = require("sim.input_frame")
 local input_tape = require("sim.input_tape")
+local match = require("sim.match")
 local match_snapshot = require("sim.match_snapshot")
 local replay = require("sim.replay")
+local teams = require("data.teams")
 local tuning = require("sim.tuning")
 
 ---@param tape InputTape
@@ -17,6 +21,86 @@ local function copy_frames(tape)
 end
 
 t.describe("input tape replay", function()
+    t.it("converges through a v5 goal, kickoff reset, and post-kickoff boundary", function()
+        local ownership = match.ownership_for_teams(teams.nebula, teams.orion)
+        local state = match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            duration = 2,
+            max_goals = 3,
+            seed = 83,
+            input_ownership = ownership,
+        })
+        local away_keeper = state.players[6]
+        away_keeper.keeper_state = "retreat"
+        away_keeper.keeper_state_timer = 0.1
+        away_keeper.keeper_release_state = "advance"
+        away_keeper.keeper_release_motion = 0.5
+        away_keeper.keeper_release_kind = "chip"
+        away_keeper.keeper_release_depth = 42
+        away_keeper.receive_timer = 1
+        state.owner = nil
+        state.ball = Vec2.new(965, 270)
+        state.ball_vel = Vec2.new(600, 0)
+        state.ball_z = 0
+        state.ball_vz = 0
+        state.pickup_cd = 1
+        state.block_grace = 1
+
+        local initial = match_snapshot.capture(state)
+        local frames = {
+            assert(input_frame.neutral(0)),
+            assert(input_frame.neutral(1)),
+            assert(input_frame.neutral(2)),
+        }
+        local identity = {
+            tape_version = input_tape.VERSION,
+            input_version = input_frame.VERSION,
+            snapshot_version = match_snapshot.VERSION,
+            build = "goal-kickoff-v5-spec",
+            source = "synthetic-goal-kickoff-v1",
+            content = "nebula-orion-showcase-content-v1",
+            tuning = tuning.serialize(),
+            config = "field=960x540;duration=2;max_goals=3;tick_rate=60",
+            fixture = "goal-kickoff-v5-spec",
+            seed = 83,
+            tick_rate = fixed_clock.TICK_RATE,
+            ownership = ownership,
+        }
+        local tape = input_tape.new(identity, initial, frames)
+        local result, failure = replay.run(tape, identity)
+        local replayed = assert(result, failure and failure.message)
+
+        t.eq(#replayed.boundaries, 4)
+        for index, boundary in ipairs(replayed.boundaries) do
+            t.eq(
+                boundary.hash,
+                tape.boundary_hashes[index],
+                "goal/kickoff boundary " .. (index - 1)
+            )
+        end
+        t.eq(replayed.state.score.home, 1)
+        t.is_true(replayed.state.kickoff_hold > 0)
+        t.is_true(
+            replayed.state.owner ~= nil
+                and replayed.state.players[replayed.state.owner].team == "away"
+        )
+        t.eq(replayed.state.players[6].keeper_state, "base")
+        t.eq(replayed.state.players[6].keeper_release_state, nil)
+        t.eq(replayed.state.players[6].keeper_release_kind, nil)
+        t.is_true(replayed.divergence == nil)
+
+        local mirror = input_tape.new(
+            identity,
+            match_snapshot.capture(match_snapshot.restore(initial)),
+            frames
+        )
+        local compared = assert(replay.compare(tape, mirror, identity))
+        t.is_true(compared.equal)
+        t.is_true(compared.divergence == nil)
+    end)
+
     t.it("replays a short complete match with every boundary hash", function()
         local tape, identity = short_match_tape.make()
         local result, failure = replay.run(tape, identity)
@@ -128,16 +212,16 @@ t.describe("input tape replay", function()
         t.eq(divergence.actual_state, 1)
     end)
 
-    t.it("diagnoses a changed locked keeper target before any causal input", function()
+    t.it("diagnoses a changed keeper behavior state before any causal input", function()
         local reference, identity = short_match_tape.make()
         local changed = match_snapshot.capture(match_snapshot.restore(reference.initial))
-        changed.state.players[1].keeper_1v1_target = { x = 40, y = 285 }
+        changed.state.players[1].keeper_state = "advance"
         local candidate = input_tape.new(identity, changed, copy_frames(reference))
         local comparison = assert(replay.compare(reference, candidate, identity))
         local divergence = assert(comparison.divergence)
         t.eq(divergence.causal_input_tick, nil)
         t.eq(divergence.boundary_tick, 0)
-        t.eq(divergence.state_path, "state.players.1.keeper_1v1_target")
+        t.eq(divergence.state_path, "state.players.1.keeper_state")
     end)
 
     t.it("detects tampering against a tape's frozen boundary hashes", function()

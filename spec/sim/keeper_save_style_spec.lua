@@ -135,6 +135,68 @@ t.describe("keeper save-style integration", function()
         end
     end)
 
+    t.it("keeps ground save RNG invariant for equivalent set contact", function()
+        local legacy, legacy_keeper = setup_attempt(100, 35, 420)
+        local explicit, explicit_keeper = setup_attempt(100, 35, 420)
+        explicit_keeper.keeper_release_state = "set"
+        explicit_keeper.keeper_release_kind = "ground"
+        explicit_keeper.keeper_release_depth = 42
+        explicit_keeper.keeper_release_motion = 0
+
+        match.step(legacy, 0, NO_INPUT)
+        match.step(explicit, 0, NO_INPUT)
+
+        t.eq(explicit.rng, legacy.rng)
+        t.eq(explicit_keeper.save_pending, legacy_keeper.save_pending)
+        t.eq(explicit_keeper.dive_delay, legacy_keeper.dive_delay)
+        t.eq(explicit_keeper.save_style, legacy_keeper.save_style)
+    end)
+
+    t.it("makes release-time movement no better than set at the same position", function()
+        local set, set_keeper = setup_attempt(120, 70, 250)
+        local moving, moving_keeper = setup_attempt(120, 70, 250)
+        set_keeper.reach = 100
+        moving_keeper.reach = 100
+        set_keeper.handling = 1
+        moving_keeper.handling = 1
+        moving_keeper.keeper_release_motion = 1
+        local moving_rng = moving.rng
+
+        match.step(set, 0, NO_INPUT)
+        match.step(moving, 0, NO_INPUT)
+
+        t.is_true(set_keeper.save_pending ~= nil, "the set keeper reaches the ground shot")
+        t.eq(moving_keeper.save_pending, nil, "planting consumes the moving keeper's dive budget")
+        t.eq(moving.rng, moving_rng, "an unreachable shot never consumes catch/parry RNG")
+    end)
+
+    t.it("makes a bounded advance improve ground-angle coverage", function()
+        ---@param keeper_x number
+        ---@return MatchState
+        ---@return MatchPlayer
+        local function ground_attempt(keeper_x)
+            local state, keeper = new_save_state()
+            keeper.pos = Vec2.new(keeper_x, 270)
+            keeper.reach = 45
+            keeper.handling = 1
+            local point_x = keeper_x - 120
+            state.ball = Vec2.new(point_x, 270 + 55 * (point_x - 700) / 260)
+            state.ball_vel = Vec2.new(260, 55):normalized():scale(250)
+            return state, keeper
+        end
+
+        local deep, deep_keeper = ground_attempt(948)
+        local advanced, advanced_keeper = ground_attempt(880)
+        match.step(deep, 0, NO_INPUT)
+        match.step(advanced, 0, NO_INPUT)
+
+        t.eq(deep_keeper.save_pending, nil, "the deep keeper cannot reach the same corner ray")
+        t.is_true(
+            advanced_keeper.save_pending ~= nil,
+            "the advanced plane narrows that ground angle"
+        )
+    end)
+
     t.it("pins save timing for the cross-runtime travel ratio", function()
         local ratio = 0.618234602637309
         local speed = 200
@@ -218,6 +280,20 @@ t.describe("keeper near-miss tip events", function()
         t.eq(event_of(state, "tip"), nil)
         t.is_true(not keeper.save_tip_emitted)
         t.eq(keeper.save_style, nil)
+    end)
+
+    t.it("does not turn movement debt inside physical reach into a tip", function()
+        local state, keeper = setup_attempt(120, 65, 250)
+        keeper.reach = 100
+        keeper.keeper_release_motion = 1
+        local rng_state = state.rng
+
+        match.step(state, 0, NO_INPUT)
+
+        t.eq(keeper.save_pending, nil, "the moving keeper cannot finish the plant in time")
+        t.eq(event_of(state, "tip"), nil, "a late plant is a whiff, not physical glove contact")
+        t.is_true(not keeper.save_tip_emitted)
+        t.eq(state.rng, rng_state)
     end)
 end)
 

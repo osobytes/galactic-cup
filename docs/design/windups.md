@@ -20,7 +20,8 @@ that telegraphs them.
 ## Mechanics
 
 - `MatchPlayer` gains `windup_timer number` and a pending-action payload, e.g.
-  `windup_shot { dir = Vec2, speed = number, vz = number, spin = number }`
+  `windup_shot { dir = Vec2, speed = number, vz = number, spin = number,
+  shot_type = "ground"|"chip" }`
   (annotate; init in `build_team`; reset in `place_kickoff`; decrement with the
   other timers in `step`).
 - In `update_ball`: where a shot/punt currently calls `release_shot`/the punt
@@ -33,16 +34,28 @@ that telegraphs them.
   paths).
 - AI shots (space-charged, square-ball fallthrough) go through the same
   wind-up. Keeper punt too. Keeper THROWS stay instant (hands).
-- An opponent keeper may expose a presentation-only set/lean during an
-  outfielder's captured wind-up when the captured direction projects into its
-  goal mouth. `keeper.commit_lead(keeper_anticipation, SHOT_WINDUP)` selects
-  the entry time: anticipation 0 never sets before release, while anticipation
-  1 can set on the commit frame.
-- The sim carries elapsed `MatchPlayer.keeper_set` presentation time through
-  release until the existing `SAVE_ZONE` evaluation. Cancellation, possession
-  loss, body/aerial redirection, collection, goal/restart, and full time clear
-  it. It never launches a dive or changes reach, handling, RNG, save verdict,
-  or ball-contact timing.
+- Keepers expose explicit `base → advance → contain → set/retreat → recover`
+  behavior. A readable ground wind-up plants into `set`; a chip/lob or prepared
+  through ball selects `retreat`. `keeper.commit_lead` still controls how early
+  anticipation reads a ground wind-up, while every released ground shot creates
+  the same set cue at release.
+- Advance eligibility uses attacker control/loose-touch plus visible support and
+  defender context. Base retains the legacy twelve-pixel line guard; contextual
+  contain/advance commitments use the bounded centre ray. Losing the duel enters
+  a timed recover before retreat, so a beaten advance never snaps home.
+- Release captures keeper state, depth, and normalized motion. Motion consumes a
+  deterministic part of the fixed dive time budget; a set keeper at the same
+  position is never worse. Equivalent set contact retains the existing physical
+  reach, catch/parry probability, RNG draw position, rebound, style, and tip
+  semantics.
+- Human and ordinary team-AI chips share one friction-true feasibility solver
+  at commit. A feasible launch clears the keeper's actual committed plane and
+  crosses the goal line under the bar. AI declines an infeasible chip. Human
+  chip input always locks the chip verb and launch speed: an empty interval uses
+  an under-bar poor arc that fails to clear the keeper, or a deterministic low
+  lob that lands short when friction makes the goal unreachable. Keeper retreat
+  during the wind-up cannot recompute the payload or turn it into a ground-shot
+  decoy; no path uses a hidden accuracy draw.
 - Renderer: `pitch.lua` passes `windup = clamp(p.windup_timer / 0.15)` into
   `player_renderer.draw` opts; `player_renderer.lua` adds a minimal back-swing
   (lean the torso/leg trapezoid opposite `facing` by a few px × windup). Keep

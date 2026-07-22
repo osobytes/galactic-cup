@@ -126,6 +126,21 @@ t.describe("keeper.arc_target", function()
     end)
 end)
 
+t.describe("keeper.base_target", function()
+    t.it("reproduces the legacy twelve-pixel line guard exactly in both directions", function()
+        local home_low = keeper.base_target(home_context(Vec2.new(160, 540), 120, true))
+        local home_center = keeper.base_target(home_context(Vec2.new(160, 270), 0, false))
+        local away_high = keeper.base_target(away_context(Vec2.new(800, 0), 120, true))
+
+        t.near(home_low.x, 12)
+        t.near(home_low.y, 298)
+        t.near(home_center.x, 12)
+        t.near(home_center.y, 270)
+        t.near(away_high.x, 948)
+        t.near(away_high.y, 242)
+    end)
+end)
+
 t.describe("keeper.save_style", function()
     t.it("leaves the 26-pixel smother boundary to the claim branch", function()
         local ok = pcall(keeper.save_style, 26, 0, 100)
@@ -232,5 +247,238 @@ t.describe("keeper early-set eligibility", function()
         t.is_true(keeper.should_set(context))
         context.windup_remaining = 0
         t.is_true(not keeper.should_set(context))
+    end)
+end)
+
+t.describe("keeper advance eligibility", function()
+    local eligible = {
+        in_claim_zone = true,
+        attacker_controlled = true,
+        loose_touch = false,
+        support_near = false,
+        defender_engaged = false,
+        threat_distance = 150,
+    }
+
+    t.it("uses control and visible support context instead of ball depth alone", function()
+        t.is_true(keeper.should_advance(eligible))
+
+        local supported = {}
+        for key, value in pairs(eligible) do
+            supported[key] = value
+        end
+        supported.support_near = true
+        t.is_true(not keeper.should_advance(supported))
+        t.is_true(keeper.should_contain(supported))
+
+        local uncontrolled = {}
+        for key, value in pairs(eligible) do
+            uncontrolled[key] = value
+        end
+        uncontrolled.attacker_controlled = false
+        t.is_true(not keeper.should_advance(uncontrolled))
+    end)
+
+    t.it("lets a loose touch create a smother chance despite an engaged defender", function()
+        local context = {}
+        for key, value in pairs(eligible) do
+            context[key] = value
+        end
+        context.attacker_controlled = false
+        context.loose_touch = true
+        context.defender_engaged = true
+        t.is_true(keeper.should_advance(context))
+
+        context.loose_touch = false
+        context.attacker_controlled = true
+        t.is_true(not keeper.should_advance(context))
+    end)
+end)
+
+t.describe("keeper behavior states", function()
+    ---@param state KeeperBehaviorState
+    ---@param overrides table?
+    ---@return KeeperBehaviorContext
+    local function context(state, overrides)
+        local value = {
+            current_state = state,
+            state_timer = 0,
+            keeper_pos = Vec2.new(12, 270),
+            ball_pos = Vec2.new(150, 220),
+            goal = HOME_GOAL,
+            team = "home",
+            aggression = 42,
+            advance_eligible = false,
+            contain_eligible = false,
+            ground_cue = false,
+            lob_cue = false,
+            through_ball_cue = false,
+            dt = 1 / 60,
+        }
+        for key, item in pairs(overrides or {}) do
+            value[key] = item
+        end
+        ---@cast value KeeperBehaviorContext
+        return value
+    end
+
+    t.it("advances and contains on a bounded centre-ray target", function()
+        local advancing = keeper.behavior(context("base", { advance_eligible = true }))
+        t.eq(advancing.state, "advance")
+        t.is_true(advancing.target:dist(Vec2.new(0, 270)) <= 42)
+
+        local containing = keeper.behavior(context("advance", {
+            keeper_pos = advancing.target,
+            advance_eligible = true,
+        }))
+        t.eq(containing.state, "contain")
+        t.eq(containing.movement_scale, 0.45)
+    end)
+
+    t.it("sets for a ground cue and retreats for lob or through-ball preparation", function()
+        local set_context = context("advance", { ground_cue = true })
+        local set = keeper.behavior(set_context)
+        t.eq(set.state, "set")
+        t.eq(set.movement_scale, 0)
+        t.eq(set.target, set_context.keeper_pos)
+
+        t.eq(keeper.behavior(context("advance", { lob_cue = true })).state, "retreat")
+        t.eq(keeper.behavior(context("contain", { through_ball_cue = true })).state, "retreat")
+    end)
+
+    t.it("holds recover before retreating instead of snapping to base", function()
+        local recover = keeper.behavior(context("advance"))
+        t.eq(recover.state, "recover")
+        t.eq(recover.movement_scale, 0)
+
+        local holding = keeper.behavior(context("recover", {
+            state_timer = recover.state_timer,
+        }))
+        t.eq(holding.state, "recover")
+        t.eq(holding.movement_scale, 0)
+
+        local retreat = keeper.behavior(context("recover", {
+            state_timer = 0,
+            keeper_pos = Vec2.new(40, 270),
+        }))
+        t.eq(retreat.state, "retreat")
+        t.is_true(retreat.movement_scale > 0)
+    end)
+end)
+
+t.describe("keeper chip counterplay", function()
+    ---@param keeper_x number
+    ---@return KeeperChipContext
+    local function chip_context(keeper_x)
+        return {
+            origin = Vec2.new(700, 270),
+            target = Vec2.new(960, 270),
+            keeper_pos = Vec2.new(keeper_x, 270),
+            defending_team = "away",
+            goal = AWAY_GOAL,
+            horizontal_speed = 500,
+            friction = 0.3,
+            gravity = 900,
+            keeper_clearance = 60,
+            crossbar = 70,
+            desired_goal_height = 65,
+        }
+    end
+
+    t.it("solves against the actual keeper plane and under the crossbar", function()
+        local context = chip_context(900)
+        local vz = assert(keeper.chip_launch(context))
+        local direction = context.target:sub(context.origin):normalized()
+        local height = assert(keeper.goal_line_height({
+            origin = context.origin,
+            direction = direction,
+            horizontal_speed = context.horizontal_speed,
+            vertical_speed = vz,
+            defending_team = context.defending_team,
+            goal = context.goal,
+            friction = context.friction,
+            gravity = context.gravity,
+        }))
+        t.is_true(height >= 0 and height < context.crossbar)
+
+        local keeper_distance = (context.keeper_pos.x - context.origin.x) / direction.x
+        local keeper_time =
+            assert(keeper.travel_time(keeper_distance, context.horizontal_speed, context.friction))
+        local keeper_height = vz * keeper_time - 0.5 * context.gravity * keeper_time * keeper_time
+        t.is_true(keeper_height > context.keeper_clearance)
+    end)
+
+    t.it("makes a committed advance no harder to chip and rejects an empty path", function()
+        local deep = assert(keeper.chip_launch(chip_context(948)))
+        local advanced = assert(keeper.chip_launch(chip_context(880)))
+        t.is_true(advanced <= deep)
+
+        local impossible = chip_context(900)
+        impossible.crossbar = 50
+        t.eq(keeper.chip_launch(impossible), nil)
+    end)
+
+    t.it("keeps an infeasible human chip as an under-bar poor chip", function()
+        local context = chip_context(900)
+        context.keeper_clearance = 100
+        t.eq(keeper.chip_launch(context), nil)
+
+        local vz = keeper.committed_chip_launch(context)
+        local direction = context.target:sub(context.origin):normalized()
+        local keeper_time = assert(keeper.travel_time(200, 500, 0.3))
+        local keeper_height = vz * keeper_time - 450 * keeper_time * keeper_time
+        local goal_height = assert(keeper.goal_line_height({
+            origin = context.origin,
+            direction = direction,
+            horizontal_speed = context.horizontal_speed,
+            vertical_speed = vz,
+            defending_team = context.defending_team,
+            goal = context.goal,
+            friction = context.friction,
+            gravity = context.gravity,
+        }))
+
+        t.is_true(vz > 0)
+        t.is_true(keeper_height < context.keeper_clearance)
+        t.near(goal_height, context.desired_goal_height)
+        t.is_true(goal_height < context.crossbar)
+    end)
+
+    t.it("uses a deterministic low lob when friction makes the goal unreachable", function()
+        local context = chip_context(900)
+        context.horizontal_speed = 50
+        t.eq(keeper.chip_launch(context), nil)
+        t.eq(keeper.travel_time(260, context.horizontal_speed, context.friction), nil)
+
+        local first = keeper.committed_chip_launch(context)
+        local second = keeper.committed_chip_launch(context)
+        local apex = first * first / (2 * context.gravity)
+        t.eq(first, second)
+        t.is_true(first > 0)
+        t.is_true(apex <= context.keeper_clearance * 0.5)
+    end)
+
+    t.it("exposes a visible high line and lets a deep keeper meet a poor chip", function()
+        t.is_true(not keeper.chip_is_visible(Vec2.new(938, 270), "away", AWAY_GOAL, 42))
+        t.is_true(keeper.chip_is_visible(Vec2.new(880, 270), "away", AWAY_GOAL, 42))
+
+        local speed = 500
+        local vz = 350
+        local advanced_time = assert(keeper.travel_time(180, speed, 0.3))
+        local deep_time = assert(keeper.travel_time(248, speed, 0.3))
+        local goal_time = assert(keeper.travel_time(260, speed, 0.3))
+        local advanced_height = vz * advanced_time - 450 * advanced_time * advanced_time
+        local deep_height = vz * deep_time - 450 * deep_time * deep_time
+        local goal_height = vz * goal_time - 450 * goal_time * goal_time
+        t.is_true(advanced_height > 60, "the poor chip clears the committed keeper")
+        t.is_true(deep_height <= 60, "the same chip reaches a deep keeper's hands")
+        t.is_true(goal_height >= 0 and goal_height < 70, "the chip remains on target")
+    end)
+
+    t.it("never gives a moving keeper more reaction reach than a set keeper", function()
+        local set = keeper.reaction_reach(100, 0, 0.32)
+        local moving = keeper.reaction_reach(100, 1, 0.32)
+        t.eq(set, 100)
+        t.is_true(moving < set)
     end)
 end)

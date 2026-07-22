@@ -297,7 +297,12 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field handling number  -- keeper clean-catch factor 0..1 (0 for outfield)
 ---@field keeper_aggression number  -- positioning depth in px (0 for outfield)
 ---@field keeper_anticipation number  -- 0..1 shot-reading quality (0 for outfield)
----@field keeper_1v1_target Vec2?  -- locked hold-and-narrow target for a lone carrier
+---@field keeper_state KeeperBehaviorState  -- visible positioning/reaction state
+---@field keeper_state_timer number  -- seconds left in the current timed state
+---@field keeper_release_state KeeperBehaviorState?  -- state captured at the latest shot release
+---@field keeper_release_motion number  -- normalized locomotion captured at shot release
+---@field keeper_release_kind KeeperShotType?  -- latest inbound shot type
+---@field keeper_release_depth number  -- line depth captured at shot release
 ---@field keeper_set number  -- seconds the pre-release set/lean has been visible (0 = inactive)
 ---@field dive_timer number  -- seconds of keeper dive lunge remaining
 ---@field dive_dir Vec2  -- unit direction of the active dive
@@ -333,7 +338,7 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field pass_charge number  -- this player's pass-range charge, 0..1
 ---@field pass_target integer?  -- player this owner would pass to if released now
 ---@field windup_timer number  -- seconds until a pending shot/punt releases (0 = none)
----@field windup_shot { dir: Vec2, speed: number, vz: number, spin: number }?  -- payload captured at commit
+---@field windup_shot { dir: Vec2, speed: number, vz: number, spin: number, shot_type: KeeperShotType }?  -- payload captured at commit
 ---@field jockey_timer number  -- seconds of active jockey stance remaining (grants bonus poke reach)
 
 ---@alias Rect { x: number, y: number, w: number, h: number }
@@ -367,6 +372,10 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field outcome AerialOutcome?
 ---@field jumping boolean?
 ---@field difficulty number?
+---@field shot_type KeeperShotType?
+---@field keeper_state KeeperBehaviorState?
+---@field keeper_depth number?
+---@field on_target boolean?
 
 ---@class MatchState
 ---@field field { w: number, h: number }
@@ -537,7 +546,12 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
             keeper_anticipation = (pd.position == "keeper") and stats.keeper_anticipation(
                 effective_stats
             ) or 0,
-            keeper_1v1_target = nil,
+            keeper_state = "base",
+            keeper_state_timer = 0,
+            keeper_release_state = nil,
+            keeper_release_motion = 0,
+            keeper_release_kind = nil,
+            keeper_release_depth = 0,
             keeper_set = 0,
             dive_timer = 0,
             dive_dir = Vec2.new(0, 0),
@@ -631,7 +645,12 @@ local function place_kickoff(s, kicking)
         p.dive_dir = Vec2.new(0, 0)
         p.dive_delay = 0
         p.dive_target = nil
-        p.keeper_1v1_target = nil
+        p.keeper_state = "base"
+        p.keeper_state_timer = 0
+        p.keeper_release_state = nil
+        p.keeper_release_motion = 0
+        p.keeper_release_kind = nil
+        p.keeper_release_depth = 0
         p.hold_timer = 0
         p.feet_ball = false
         p.slide_timer = 0
@@ -938,19 +957,73 @@ end
 ---@param dir Vec2
 ---@param speed number?  -- defaults to the shooter's base shot speed
 ---@param vz number?  -- vertical launch (a chip); defaults to 0 (driven, on the ground)
-local function release_shot(s, owner, dir, speed, vz)
+---@param shot_type KeeperShotType?
+local function release_shot(s, owner, dir, speed, vz, shot_type)
+    local launch_speed = speed or owner.shot_speed
+    local launch_vz = vz or 0
+    local launch_dir = dir:normalized()
+    local released_type = shot_type or ((launch_vz > 0) and "chip" or "ground")
+    local threatened_keeper
     for _, player in ipairs(s.players) do
         if player.is_keeper then
             player.save_style = nil
             player.save_tip_emitted = false
+            if player.team ~= owner.team then
+                threatened_keeper = player
+            end
         end
     end
-    s.events[#s.events + 1] = { kind = "shot", x = s.ball.x, y = s.ball.y, player = owner.id }
+    local on_target = false
+    if threatened_keeper then
+        local goal = threatened_keeper.team == "home" and s.goal_home or s.goal_away
+        local goal_line_x = threatened_keeper.team == "home" and (goal.x + goal.w) or goal.x
+        local infield_direction = threatened_keeper.team == "home" and 1 or -1
+        threatened_keeper.keeper_release_state = threatened_keeper.keeper_state
+        if threatened_keeper.keeper_state ~= "set" then
+            threatened_keeper.keeper_release_motion = math.min(
+                1,
+                threatened_keeper.run_vel:length() / math.max(threatened_keeper.move_speed, 1)
+            )
+        end
+        threatened_keeper.keeper_release_kind = released_type
+        threatened_keeper.keeper_release_depth =
+            math.max(0, (threatened_keeper.pos.x - goal_line_x) * infield_direction)
+        local height = keeper.goal_line_height({
+            origin = s.ball,
+            direction = launch_dir,
+            horizontal_speed = launch_speed,
+            vertical_speed = launch_vz,
+            defending_team = threatened_keeper.team,
+            goal = goal,
+            friction = launch_vz > 0 and AIR_FRICTION or FRICTION,
+            gravity = GRAVITY,
+        })
+        on_target = height ~= nil
+            and height >= 0
+            and height < CROSSBAR
+            and keeper.shot_targets_goal({
+                defending_team = threatened_keeper.team,
+                shooter_team = owner.team,
+                origin = s.ball,
+                direction = launch_dir,
+                goal = goal,
+            })
+    end
+    s.events[#s.events + 1] = {
+        kind = "shot",
+        x = s.ball.x,
+        y = s.ball.y,
+        player = owner.id,
+        shot_type = released_type,
+        keeper_state = threatened_keeper and threatened_keeper.keeper_release_state or nil,
+        keeper_depth = threatened_keeper and threatened_keeper.keeper_release_depth or nil,
+        on_target = on_target,
+    }
     s.owner = nil
     s.kickoff_hold = 0
-    s.ball_vel = dir:normalized():scale(speed or owner.shot_speed)
+    s.ball_vel = launch_dir:scale(launch_speed)
     s.ball_z = 0
-    s.ball_vz = vz or 0
+    s.ball_vz = launch_vz
     s.pickup_cd = RELEASE_CD
     s.block_grace = BLOCK_GRACE
 end
@@ -2058,7 +2131,12 @@ local function move_players(s, dt, inputs)
 
     for i, p in ipairs(s.players) do
         if p.is_keeper and s.owner == i then
-            p.keeper_1v1_target = nil
+            p.keeper_state = "base"
+            p.keeper_state_timer = 0
+            p.keeper_release_state = nil
+            p.keeper_release_motion = 0
+            p.keeper_release_kind = nil
+            p.keeper_release_depth = 0
         end
         if is_human_player(s, i) then
             local input = inputs[i] or slot_input.neutral_match_input()
@@ -2344,8 +2422,141 @@ local function move_players(s, dt, inputs)
             end
         elseif p.is_keeper then
             update_sprint(p, false, dt)
+            local entry_motion = math.min(1, p.run_vel:length() / math.max(p.move_speed, 1))
+            local goal = (p.team == "home") and s.goal_home or s.goal_away
+            local goal_line_x = p.team == "home" and (goal.x + goal.w) or goal.x
+            local infield_direction = p.team == "home" and 1 or -1
+            local carrier_idx = s.owner
+            local carrier = carrier_idx and s.players[carrier_idx] or nil
+            if carrier and (carrier.is_keeper or carrier.team == p.team) then
+                carrier = nil
+            end
+
+            local support_near = false
+            local defender_engaged = false
+            local carrier_pos ---@type Vec2?
+            if carrier and carrier_idx then
+                carrier_pos = prev[carrier_idx]
+                for other_idx, other in ipairs(s.players) do
+                    if
+                        other_idx ~= carrier_idx
+                        and not other.is_keeper
+                        and other.team == carrier.team
+                        and prev[other_idx]:dist(carrier_pos) <= KEEPER_1V1_SUPPORT
+                    then
+                        support_near = true
+                    elseif
+                        other.team == p.team
+                        and not other.is_keeper
+                        and prev[other_idx]:dist(carrier_pos) <= KEEPER_1V1_SUPPORT * 0.6
+                    then
+                        defender_engaged = true
+                    end
+                end
+            end
+
+            local loose_touch = carrier_pos ~= nil
+                and carrier_pos:dist(s.ball) > DRIBBLE_TOUCH_REACH
+            local attacker_controlled = carrier ~= nil and not loose_touch
+            local attacker_in_front = (s.ball.x - p.pos.x) * infield_direction > 0
+            local position_context = {
+                in_claim_zone = in_claim_zone(s, p),
+                attacker_controlled = attacker_controlled,
+                loose_touch = loose_touch,
+                support_near = support_near,
+                defender_engaged = defender_engaged,
+                threat_distance = p.pos:dist(s.ball),
+            }
+            local contain_eligible = carrier ~= nil
+                and attacker_in_front
+                and keeper.should_contain(position_context)
+            local advance_eligible = contain_eligible and keeper.should_advance(position_context)
+
+            local toward_goal = (p.team == "home") and s.ball_vel.x < 0 or s.ball_vel.x > 0
+            if s.owner or not toward_goal then
+                p.keeper_release_state = nil
+                p.keeper_release_motion = 0
+                p.keeper_release_kind = nil
+                p.keeper_release_depth = 0
+            end
+
+            local ground_cue = p.keeper_release_kind == "ground" and toward_goal
+            local lob_cue = p.keeper_release_kind == "chip" and toward_goal
+            if carrier and carrier.windup_shot then
+                local pending = assert(carrier.windup_shot)
+                if pending.shot_type == "chip" then
+                    lob_cue = true
+                else
+                    local shot_context = {
+                        defending_team = p.team,
+                        shooter_team = carrier.team,
+                        origin = carrier.pos,
+                        direction = pending.dir,
+                        goal = goal,
+                    }
+                    if
+                        (carrier.windup_timer <= 0 and keeper.shot_targets_goal(shot_context))
+                        or keeper.should_set({
+                            defending_team = shot_context.defending_team,
+                            shooter_team = shot_context.shooter_team,
+                            origin = shot_context.origin,
+                            direction = shot_context.direction,
+                            goal = shot_context.goal,
+                            anticipation = p.keeper_anticipation,
+                            windup_duration = TUNE.SHOT_WINDUP,
+                            windup_remaining = carrier.windup_timer,
+                        })
+                    then
+                        ground_cue = true
+                        if carrier.windup_timer <= 0 then
+                            -- Planting on the release tick must not erase the
+                            -- velocity carried into it. The captured debt
+                            -- survives until the save attempt.
+                            p.keeper_release_motion = entry_motion
+                        end
+                    end
+                end
+            end
+
+            local through_ball_cue = false
+            if not s.owner and toward_goal and not p.keeper_release_kind then
+                for _, receiver in ipairs(s.players) do
+                    if receiver.team ~= p.team and receiver.receive_timer > 0 then
+                        local receiver_depth = (receiver.pos.x - goal_line_x) * infield_direction
+                        if receiver_depth <= KEEPER_BOX_DEPTH + KEEPER_1V1_SUPPORT * 0.5 then
+                            through_ball_cue = true
+                            break
+                        end
+                    end
+                end
+            end
+
+            local behavior = keeper.behavior({
+                current_state = p.keeper_state,
+                state_timer = p.keeper_state_timer,
+                keeper_pos = prev[i],
+                ball_pos = s.ball,
+                goal = goal,
+                team = p.team,
+                aggression = p.keeper_aggression,
+                advance_eligible = advance_eligible,
+                contain_eligible = contain_eligible,
+                ground_cue = ground_cue,
+                lob_cue = lob_cue,
+                through_ball_cue = through_ball_cue,
+                dt = dt,
+            })
+            p.keeper_state = behavior.state
+            p.keeper_state_timer = behavior.state_timer
+            if p.dive_timer > 0 or p.save_pending or p.dive_delay > 0 then
+                p.keeper_set = 0
+            elseif p.keeper_state == "set" then
+                p.keeper_set = p.keeper_set + dt
+            else
+                p.keeper_set = 0
+            end
+
             if p.dive_timer > 0 then
-                p.keeper_1v1_target = nil
                 -- Diving: lunge hard toward the intercept point — and STOP
                 -- there. Unclamped, a near-straight shot (a 2px correction)
                 -- became a full-speed lunge PAST the ball: gloves closing on
@@ -2368,10 +2579,8 @@ local function move_players(s, dt, inputs)
                 -- A committed reaction owns the keeper until it launches or
                 -- resolves. Decelerate through locomotion instead of layering
                 -- positioning movement under the queued save.
-                p.keeper_1v1_target = nil
                 apply_locomotion(s, p, Vec2.new(0, 0), dt)
             elseif s.owner == nil and p.receive_timer > 0 then
-                p.keeper_1v1_target = nil
                 -- Meet a teammate's back-pass at the ball. Generic predictive
                 -- pursuit is wrong here: its horizon grows with distance, so an
                 -- incoming pass projects behind the keeper and sends it backward
@@ -2380,8 +2589,12 @@ local function move_players(s, dt, inputs)
                 local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
                     or Vec2.new(0, 0)
                 apply_locomotion(s, p, desired, dt)
-            elseif s.owner == nil and in_claim_zone(s, p) then
-                p.keeper_1v1_target = nil
+            elseif
+                s.owner == nil
+                and in_claim_zone(s, p)
+                and not p.keeper_release_kind
+                and not through_ball_cue
+            then
                 -- Come off the line to claim a loose ball in the box.
                 -- Predictive pursuit remains useful for non-designated claims.
                 local aim = ai.pursue(p.pos, s.ball, s.ball_vel, KEEPER_LEAD)
@@ -2390,63 +2603,12 @@ local function move_players(s, dt, inputs)
                     or Vec2.new(0, 0)
                 apply_locomotion(s, p, desired, dt)
             else
-                -- Hold the angle-bisected arc. A composed keeper facing a lone
-                -- carrier locks the lateral component on entry so it cannot
-                -- chase feints, while depth keeps narrowing with the play.
-                local goal = (p.team == "home") and s.goal_home or s.goal_away
-                -- The support scan is scoped to this keeper branch: no
-                -- per-player global O(players^2) pass.
-                local carrier_idx = s.owner
-                local carrier = carrier_idx and s.players[carrier_idx] or nil
-                if
-                    carrier
-                    and (carrier.is_keeper or carrier.team == p.team or not in_claim_zone(s, p))
-                then
-                    carrier = nil
-                end
-                if carrier and carrier_idx then
-                    local carrier_pos = prev[carrier_idx]
-                    for support_idx, support in ipairs(s.players) do
-                        if
-                            support_idx ~= carrier_idx
-                            and support.team == carrier.team
-                            and not support.is_keeper
-                            and prev[support_idx]:dist(carrier_pos) <= KEEPER_1V1_SUPPORT
-                        then
-                            carrier = nil
-                            break
-                        end
-                    end
-                end
-                local in_1v1 = carrier ~= nil and p.keeper_anticipation >= 0.6
-                local target
-                if in_1v1 then
-                    local fresh_target = keeper.arc_target({
-                        keeper_pos = prev[i],
-                        ball_pos = s.ball,
-                        goal = goal,
-                        team = p.team,
-                        aggression = p.keeper_aggression,
-                        in_1v1 = true,
-                    })
-                    if p.keeper_1v1_target then
-                        fresh_target = Vec2.new(fresh_target.x, p.keeper_1v1_target.y)
-                    end
-                    p.keeper_1v1_target = fresh_target
-                    target = fresh_target
-                else
-                    p.keeper_1v1_target = nil
-                    target = keeper.arc_target({
-                        keeper_pos = prev[i],
-                        ball_pos = s.ball,
-                        goal = goal,
-                        team = p.team,
-                        aggression = p.keeper_aggression,
-                        in_1v1 = false,
-                    })
-                end
-                local _, dir = ai.steer(p.pos, target, p.move_speed * dt)
-                local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(p.move_speed)
+                -- Ordinary keeper movement is owned by the explicit behavior
+                -- state. Base reproduces the legacy line guard; only contextual
+                -- contain/advance commitments use the conservative centre ray.
+                local _, dir = ai.steer(p.pos, behavior.target, p.move_speed * dt)
+                local desired = (dir.x ~= 0 or dir.y ~= 0)
+                        and dir:scale(p.move_speed * behavior.movement_scale)
                     or Vec2.new(0, 0)
                 apply_locomotion(s, p, desired, dt)
             end
@@ -2637,7 +2799,13 @@ local function human_keeper_actions(s, dt, input, owner)
         owner.charge = 0
         owner.pass_target = nil
         owner.windup_timer = TUNE.SHOT_WINDUP
-        owner.windup_shot = { dir = vel:normalized(), speed = vel:length(), vz = vz, spin = 0 }
+        owner.windup_shot = {
+            dir = vel:normalized(),
+            speed = vel:length(),
+            vz = vz,
+            spin = 0,
+            shot_type = "ground",
+        }
     elseif fire_pass then
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized()
             or owner.facing
@@ -2654,26 +2822,6 @@ local function human_keeper_actions(s, dt, input, owner)
     if s.owner and not owner.feet_ball and owner.hold_timer <= 0 and owner.windup_timer == 0 then
         keeper_distribute(s, s.owner)
     end
-end
-
--- Seconds a ball decelerating under exponential friction `k` needs to travel
--- `dist` at current `speed`. The naive dist/speed is badly wrong here: ground
--- friction sheds most of a slow shot's pace mid-flight, and a ball can only
--- ever roll speed/k px in total. Returns nil when it dies (or crawls) short —
--- such a "shot" is a loose ball to claim, not one to dive at.
----@param dist number
----@param speed number
----@param k number  -- FRICTION (grounded) or AIR_FRICTION (airborne)
----@return number? seconds
-local function ball_travel_time(dist, speed, k)
-    if speed <= 0 then
-        return nil
-    end
-    local ratio = dist * k / speed
-    if ratio >= 0.95 then
-        return nil
-    end
-    return require("core.deterministic_math").negative_log_one_minus(ratio) / k
 end
 
 -- Fire the actual dive lunge: aim at the freshest prediction of where the
@@ -2736,13 +2884,16 @@ local function attempt_save(s)
                 -- grass by the normal keeper logic, never dived at.
                 local dxa = math.abs(keeper.pos.x - s.ball.x)
                 local x_frac = speed / math.abs(s.ball_vel.x) -- path px per x px
-                local k_fric = (s.ball_z > 0.5) and AIR_FRICTION or FRICTION
-                local eta = ball_travel_time(dxa * x_frac, speed, k_fric)
+                local k_fric = (s.ball_z > 0.5 or s.ball_vz > 0) and AIR_FRICTION or FRICTION
+                local eta = require("sim.keeper").travel_time(dxa * x_frac, speed, k_fric)
                 -- The dive is timed to GLOVE CONTACT (hands' radius short of
                 -- the line), not the line itself — so the lunge window covers
                 -- the moment the save actually resolves.
-                local eta_contact =
-                    ball_travel_time(math.max(0, dxa - KEEPER_HANDS) * x_frac, speed, k_fric)
+                local eta_contact = require("sim.keeper").travel_time(
+                    math.max(0, dxa - KEEPER_HANDS) * x_frac,
+                    speed,
+                    k_fric
+                )
                 -- Height when it reaches the keeper's line, at the real arrival
                 -- time (the geometric t is fine for y — friction shrinks both
                 -- velocity components equally, so the path stays straight —
@@ -2760,6 +2911,11 @@ local function attempt_save(s)
                 -- seam. Use that same effective reach for style and tip geometry;
                 -- catch/parry quality deliberately keeps its existing base-reach math.
                 local effective_reach = keeper.reach + block_reach
+                local reaction_reach = require("sim.keeper").reaction_reach(
+                    effective_reach,
+                    keeper.keeper_release_motion,
+                    KEEPER_DIVE_DURATION
+                )
                 if on_target and eta then
                     -- Any pre-release set has now reached the real save-processing
                     -- seam. The existing verdict and contact-timed dive own the
@@ -2775,14 +2931,20 @@ local function attempt_save(s)
                         )
                     end
 
-                    if dive_dist > effective_reach then
-                        if dive_dist <= effective_reach * 1.1 and not keeper.save_tip_emitted then
+                    if dive_dist > reaction_reach then
+                        if
+                            dive_dist > effective_reach
+                            and dive_dist <= effective_reach * 1.1
+                            and not keeper.save_tip_emitted
+                        then
                             keeper.save_tip_emitted = true
                             s.events[#s.events + 1] = {
                                 kind = "tip",
                                 x = keeper.pos.x,
                                 y = y_cross,
                                 player = keeper.id,
+                                keeper_state = keeper.keeper_release_state,
+                                keeper_depth = keeper.keeper_release_depth,
                             }
                         end
                         return
@@ -2868,6 +3030,8 @@ local function resolve_pending_save(s, dt)
                         y = s.ball.y,
                         player = keeper.id,
                         save_style = save_style,
+                        keeper_state = keeper.keeper_release_state,
+                        keeper_depth = keeper.keeper_release_depth,
                     }
                     s.ball = keeper_hold_pos(s, keeper)
                     s.owner = ki
@@ -2889,6 +3053,8 @@ local function resolve_pending_save(s, dt)
                     y = s.ball.y,
                     player = keeper.id,
                     save_style = save_style,
+                    keeper_state = keeper.keeper_release_state,
+                    keeper_depth = keeper.keeper_release_depth,
                 }
                 local goal = (keeper.team == "home") and s.goal_home or s.goal_away
                 local bx = s.ball.x
@@ -2971,18 +3137,41 @@ local function human_outfield_actions(s, dt, input, owner)
         local speed = owner.shot_speed * (1 + owner.charge * CHARGE_POWER)
         local target = shot_target(s, owner, vbias)
         local vz = 0
+        local shot_type = input.lob and "chip" or "ground"
         if input.lob then
-            -- Chip: same aim, but lofted so it crosses the line over the
-            -- keeper's reach yet under the bar. Pick vz from time-to-line.
-            local tline = math.max(0.05, owner.pos:dist(target) / speed)
-            vz = (CHIP_LINE_Z + 0.5 * GRAVITY * tline * tline) / tline
+            -- Human chip intent is locked now, like direction and power. A
+            -- feasible chip clears the keeper's current committed plane; an
+            -- infeasible request remains a deterministic poor chip rather
+            -- than silently becoming a ground-shot decoy during the wind-up.
+            local defending_team = owner.team == "home" and "away" or "home"
+            local defending_keeper = assert(team_keeper(s, defending_team))
+            local goal = defending_team == "home" and s.goal_home or s.goal_away
+            vz = keeper.committed_chip_launch({
+                origin = owner.pos,
+                target = target,
+                keeper_pos = defending_keeper.pos,
+                defending_team = defending_team,
+                goal = goal,
+                horizontal_speed = speed,
+                friction = AIR_FRICTION,
+                gravity = GRAVITY,
+                keeper_clearance = KEEPER_AIR_GRAB,
+                crossbar = CROSSBAR,
+                desired_goal_height = CHIP_LINE_Z,
+            })
         end
         local side = (input.move.x > 0 and 1) or (input.move.x < 0 and -1) or 0
-        local spin = (vz == 0) and side * owner.charge * CURVE_MAX or 0
+        local spin = shot_type == "ground" and side * owner.charge * CURVE_MAX or 0
         owner.charge = 0
         owner.pass_target = nil
         owner.windup_timer = TUNE.SHOT_WINDUP
-        owner.windup_shot = { dir = target:sub(owner.pos), speed = speed, vz = vz, spin = spin }
+        owner.windup_shot = {
+            dir = target:sub(owner.pos),
+            speed = speed,
+            vz = vz,
+            spin = spin,
+            shot_type = shot_type,
+        }
     elseif fire_pass then
         local aim = (input.move.x ~= 0 or input.move.y ~= 0) and input.move:normalized() or nil
         try_pass(s, s.owner, input.lob, aim)
@@ -3004,10 +3193,10 @@ local function ai_outfield_decision(s, owner_idx, owner)
     if owner.pos:dist(gc) < TUNE.AI_SHOOT_RANGE then
         -- Shoot to the corner away from the defending keeper, with power
         -- scaled by the space the striker has been given (see constants).
-        local keeper = team_keeper(s, owner.team == "home" and "away" or "home")
+        local keeper_player = team_keeper(s, owner.team == "home" and "away" or "home")
         local vbias = 0.85
-        if keeper then
-            vbias = (keeper.pos.y < gc.y) and 0.85 or -0.85
+        if keeper_player then
+            vbias = (keeper_player.pos.y < gc.y) and 0.85 or -0.85
         end
         local space = math.huge
         for _, q in ipairs(s.players) do
@@ -3025,9 +3214,42 @@ local function ai_outfield_decision(s, owner_idx, owner)
             local frac =
                 math.max(0, math.min(1, (space - AI_CHARGE_MIN_SPACE) / AI_CHARGE_SPACE_RANGE))
             local speed = owner.shot_speed * (1 + frac * CHARGE_POWER)
-            local sdir = shot_target(s, owner, vbias):sub(owner.pos)
+            local shot_end = shot_target(s, owner, vbias)
+            local sdir = shot_end:sub(owner.pos)
+            local vz = 0
+            if
+                keeper_player
+                and owner.settle_timer <= 0
+                and owner.pos:dist(s.ball) <= DRIBBLE_TOUCH_REACH
+                and keeper.chip_is_visible(
+                    keeper_player.pos,
+                    keeper_player.team,
+                    g,
+                    keeper_player.keeper_aggression
+                )
+            then
+                vz = keeper.chip_launch({
+                    origin = owner.pos,
+                    target = shot_end,
+                    keeper_pos = keeper_player.pos,
+                    defending_team = keeper_player.team,
+                    goal = g,
+                    horizontal_speed = speed,
+                    friction = AIR_FRICTION,
+                    gravity = GRAVITY,
+                    keeper_clearance = KEEPER_AIR_GRAB,
+                    crossbar = CROSSBAR,
+                    desired_goal_height = CHIP_LINE_Z,
+                }) or 0
+            end
             owner.windup_timer = TUNE.SHOT_WINDUP
-            owner.windup_shot = { dir = sdir, speed = speed, vz = 0, spin = 0 }
+            owner.windup_shot = {
+                dir = sdir,
+                speed = speed,
+                vz = vz,
+                spin = 0,
+                shot_type = vz > 0 and "chip" or "ground",
+            }
         end
     else
         -- From wide in the attacking third, swing a CROSS to a teammate
@@ -3092,7 +3314,7 @@ local function update_ball(s, dt, inputs)
         if wowner.windup_timer == 0 and wowner.windup_shot then
             local ws = assert(wowner.windup_shot)
             wowner.windup_shot = nil
-            release_shot(s, wowner, ws.dir, ws.speed, ws.vz)
+            release_shot(s, wowner, ws.dir, ws.speed, ws.vz, ws.shot_type)
             s.ball_spin = ws.spin
             -- Keeper punt gets a throw pose; outfield shot doesn't (handled below).
             if wowner.is_keeper then
@@ -3669,73 +3891,6 @@ function match.step(s, dt, input)
     move_players(s, dt, inputs)
     attempt_steals(s)
     update_ball(s, dt, inputs)
-
-    -- A possession transition ends every locked confrontation in the same
-    -- tick. This covers shots/passes (owner -> loose), claims/smothers, and
-    -- turnovers without adding transition hooks throughout the ball resolver.
-    if s.owner ~= prev_owner then
-        for _, p in ipairs(s.players) do
-            if p.is_keeper then
-                p.keeper_1v1_target = nil
-            end
-        end
-    end
-
-    -- Anticipation is presentation-only. A keeper may enter a set/lean during
-    -- an opponent outfielder's captured, on-target wind-up, then carries that
-    -- signal through release until the real SAVE_ZONE evaluation. Released
-    -- geometry can only preserve an already-active signal; it can never create
-    -- one after the fact (anticipation 0 therefore keeps the reactive path).
-    do
-        local shot_owner = s.owner and s.players[s.owner] or nil
-        for _, candidate in ipairs(s.players) do
-            if candidate.is_keeper then
-                if
-                    shot_owner
-                    and not shot_owner.is_keeper
-                    and shot_owner.windup_shot
-                    and shot_owner.windup_timer > 0
-                then
-                    local pending = assert(shot_owner.windup_shot)
-                    local goal = candidate.team == "home" and s.goal_home or s.goal_away
-                    if
-                        require("sim.keeper").should_set({
-                            defending_team = candidate.team,
-                            shooter_team = shot_owner.team,
-                            origin = shot_owner.pos,
-                            direction = pending.dir,
-                            goal = goal,
-                            anticipation = candidate.keeper_anticipation,
-                            windup_duration = TUNE.SHOT_WINDUP,
-                            windup_remaining = shot_owner.windup_timer,
-                        })
-                    then
-                        candidate.keeper_set = candidate.keeper_set + dt
-                    else
-                        candidate.keeper_set = 0
-                    end
-                elseif not s.owner and candidate.keeper_set > 0 then
-                    local goal = candidate.team == "home" and s.goal_home or s.goal_away
-                    local shooter_team = candidate.team == "home" and "away" or "home"
-                    if
-                        require("sim.keeper").shot_targets_goal({
-                            defending_team = candidate.team,
-                            shooter_team = shooter_team,
-                            origin = s.ball,
-                            direction = s.ball_vel,
-                            goal = goal,
-                        })
-                    then
-                        candidate.keeper_set = candidate.keeper_set + dt
-                    else
-                        candidate.keeper_set = 0
-                    end
-                else
-                    candidate.keeper_set = 0
-                end
-            end
-        end
-    end
 
     -- A gained ball resolves any in-flight pass: nobody is "running onto" it
     -- any more. In particular an INTERCEPTED back-pass ends the keeper's

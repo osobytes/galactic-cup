@@ -135,6 +135,7 @@ local function new_mirrored_pending(defending_team)
         speed = 400,
         vz = 0,
         spin = 0,
+        shot_type = "ground",
     }
     keep.pos = Vec2.new(defending_team == "home" and 22 or 938, 270)
     keep.anchor = keep.pos
@@ -204,7 +205,7 @@ local function same_save_state(first, first_keeper, second, second_keeper)
 end
 
 t.describe("keeper anticipation commit timing", function()
-    t.it("sets full anticipation on the commit frame and half anticipation later", function()
+    t.it("sets full anticipation on the first readable windup tick and half later", function()
         local zero, zero_keeper = new_human_commit(0)
         local half, half_keeper = new_human_commit(0.5)
         local full, full_keeper = new_human_commit(1)
@@ -215,7 +216,7 @@ t.describe("keeper anticipation commit timing", function()
 
         t.eq(zero_keeper.keeper_set, 0)
         t.eq(half_keeper.keeper_set, 0)
-        t.is_true(full_keeper.keeper_set > 0, "full anticipation sets on the commit frame")
+        t.eq(full_keeper.keeper_set, 0, "movement runs before the new windup is captured")
 
         local half_tick
         for tick = 1, 12 do
@@ -225,10 +226,14 @@ t.describe("keeper anticipation commit timing", function()
             if not half_tick and half_keeper.keeper_set > 0 then
                 half_tick = tick
             end
-            t.eq(zero_keeper.keeper_set, 0, "zero anticipation never sets before release")
+            if tick == 1 then
+                t.is_true(full_keeper.keeper_set > 0, "full anticipation reads the windup")
+            end
+            if zero.owner then
+                t.eq(zero_keeper.keeper_set, 0, "zero anticipation never sets before release")
+            end
         end
         t.eq(half_tick, 5)
-        t.is_true(full_keeper.keeper_set > half_keeper.keeper_set)
     end)
 
     t.it("applies the same fixed-tick projection rule at both goals", function()
@@ -312,6 +317,7 @@ t.describe("keeper anticipation commit timing", function()
     t.it("does not reinterpret a goal-directed tackle pop as the cancelled shot", function()
         local state, keep, shooter = new_human_commit(1)
         match.step(state, TICK, SHOT_INPUT)
+        match.step(state, TICK, NO_INPUT)
         t.is_true(keep.keeper_set > 0)
 
         local tackler = state.players[7]
@@ -360,6 +366,7 @@ t.describe("keeper anticipation commit timing", function()
             speed = 400,
             vz = 0,
             spin = 0,
+            shot_type = "ground",
         }
         keep.pos = Vec2.new(938, 270)
         keep.anchor = keep.pos
@@ -434,6 +441,7 @@ t.describe("keeper anticipation commit timing", function()
     t.it("round-trips an active set through snapshot restore and replayed ticks", function()
         local state, keep = new_human_commit(1)
         match.step(state, TICK, SHOT_INPUT)
+        match.step(state, TICK, NO_INPUT)
         t.is_true(keep.keeper_set > 0)
         local snapshot = match_snapshot.capture(state)
         local restored = match_snapshot.restore(snapshot)
