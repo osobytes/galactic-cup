@@ -1212,7 +1212,7 @@ t.describe("match lobs and chips", function()
             return s, attacker
         end
 
-        local deep, deep_attacker = ai_shot(938)
+        local deep, deep_attacker = ai_shot(942)
         local advanced, advanced_attacker = ai_shot(880)
         local deep_rng = deep.rng
         local advanced_rng = advanced.rng
@@ -1226,8 +1226,7 @@ t.describe("match lobs and chips", function()
             require("sim.keeper").chip_is_visible(
                 advanced_keeper.pos,
                 advanced_keeper.team,
-                advanced.goal_away,
-                advanced_keeper.keeper_aggression
+                advanced.goal_away
             ),
             "advanced keeper is visibly high"
         )

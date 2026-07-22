@@ -53,17 +53,17 @@ The authoritative values are:
 
 ```text
 boundaries=7202
-final_hash=984bc6f2f2d59e1e
-sequence_digest=60aea810b4ccb46c
+final_hash=9a71cd09b246d6f6
+sequence_digest=623e771bb00362e1
 score=0-0
 outcome=draw
-final_snapshot_bytes=19413
+final_snapshot_bytes=19437
 ```
 
 The complete match produced:
 
 ```text
-catch=1 claim=2 header=2 parry=1 pass=3 shot=1 tackle=151 touch=197
+catch=1 claim=4 header=2 pass=5 reception=1 shot=1 tackle=147 touch=173
 ```
 
 `sim.determinism_evidence` reports the causal tick and expected/actual hash on
@@ -103,6 +103,15 @@ reset, and advances through a post-kickoff boundary. `sim.input_tape` and
 `sim.replay` validate every boundary hash and compare an independently restored
 tape, while the initial snapshot exercises all new keeper fields.
 
+The final neutral-positioning refinement retained the same snapshot-v5 schema
+and all 7,201 input wires, but deliberately regenerated boundary evidence. Base
+depth now varies from the physical one-radius inset at 12 px to an 18 px cap as
+the attack approaches; a bounded 40 px near-post bias makes the far-corner
+concession explicit without preserving the legacy lateral band.
+The frozen outcome is 0-0. The hashes, event counts, and final snapshot size
+above describe that final audited behavior rather than either earlier
+fixed-depth snapshot-v5 candidate.
+
 ## Restore/replay windows
 
 The complete pass captures start-of-window snapshots. Each window is later
@@ -112,8 +121,8 @@ against every pinned boundary:
 | Scenario | Start boundary | Last boundary | Required transition |
 | --- | ---: | ---: | --- |
 | Tackle | 23 | 26 | `tackle` at causal tick 24 |
-| Keeper | 1691 | 1696 | `catch` at causal tick 1693 |
-| Aerial | 1787 | 1792 | `header` at causal tick 1789 |
+| Keeper | 1690 | 1695 | `catch` at causal tick 1692 |
+| Aerial | 1786 | 1791 | `header` at causal tick 1788 |
 | Full time | 7198 | 7201 | `finished`, zero time at causal tick 7200 |
 
 This covers routine play in the uninterrupted complete run except for the
@@ -135,14 +144,14 @@ On the development machine (Zorin OS 18.1, Linux x86_64, native LÖVE 11.5),
 100 operations at boundary tick 120 measured during the final v5 native gate:
 
 ```text
-snapshot_measure version=5 tick=120 bytes=18197 iterations=100 hash=d1f7e58ef54570ea
-snapshot_measure encode_us_each=270.010
-snapshot_measure hash_with_encode_us_each=1546.500
-snapshot_measure restore_us_each=125.180
+snapshot_measure version=5 tick=120 bytes=18292 iterations=100 hash=5e32bb31e3cdb281
+snapshot_measure encode_us_each=242.810
+snapshot_measure hash_with_encode_us_each=1506.240
+snapshot_measure restore_us_each=96.650
 ```
 
 These are observations, not thresholds. The two final fresh native runs
-completed in 28.074 s and 27.459 s and emitted identical result markers.
+completed in 27.507 s and 26.930 s and emitted identical result markers.
 Browser evidence records wall-clock duration per fresh process because
 WebAssembly timings are not interchangeable with native `os.clock`
 measurements.

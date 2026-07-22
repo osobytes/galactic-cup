@@ -1678,6 +1678,7 @@ local TRIANGLE_JOIN = 320 -- supporters this close to the carrier triangulate ar
 -- and stands (no robotic shuffling), only walking again once the spot drifts
 -- meaningfully away. Urgent roles (chasing, receiving, pressing) are exempt.
 local ARRIVE_RADIUS = 60 -- ease in below this distance (no full-speed overshoot)
+local KEEPER_BASE_ARRIVE_RADIUS = 18 -- settle shallow base motion without erasing active tracking
 local STAND_DEADBAND = 14 -- close enough: plant
 local STAND_STILL_SPEED = 25 -- run_vel below this counts as standing (hysteresis memory)
 local PURSUE_LEAD = 0.004 -- prediction horizon per px of distance (s/px)
@@ -2604,11 +2605,19 @@ local function move_players(s, dt, inputs)
                 apply_locomotion(s, p, desired, dt)
             else
                 -- Ordinary keeper movement is owned by the explicit behavior
-                -- state. Base reproduces the legacy line guard; only contextual
-                -- contain/advance commitments use the conservative centre ray.
+                -- state. Base uses shallow dynamic depth plus the lateral corner
+                -- concession; contain/advance can commit further before recovery.
                 local _, dir = ai.steer(p.pos, behavior.target, p.move_speed * dt)
-                local desired = (dir.x ~= 0 or dir.y ~= 0)
-                        and dir:scale(p.move_speed * behavior.movement_scale)
+                local movement_speed = p.move_speed * behavior.movement_scale
+                if p.keeper_state == "base" then
+                    -- Neutral targets are deliberately shallow. Ease into them
+                    -- so ordinary acceleration cannot oscillate past the 18 px
+                    -- base cap and accidentally advertise a committed high line.
+                    local distance = p.pos:dist(behavior.target)
+                    movement_speed = movement_speed
+                        * math.min(1, distance / KEEPER_BASE_ARRIVE_RADIUS)
+                end
+                local desired = (dir.x ~= 0 or dir.y ~= 0) and dir:scale(movement_speed)
                     or Vec2.new(0, 0)
                 apply_locomotion(s, p, desired, dt)
             end
@@ -3221,12 +3230,7 @@ local function ai_outfield_decision(s, owner_idx, owner)
                 keeper_player
                 and owner.settle_timer <= 0
                 and owner.pos:dist(s.ball) <= DRIBBLE_TOUCH_REACH
-                and keeper.chip_is_visible(
-                    keeper_player.pos,
-                    keeper_player.team,
-                    g,
-                    keeper_player.keeper_aggression
-                )
+                and keeper.chip_is_visible(keeper_player.pos, keeper_player.team, g)
             then
                 vz = keeper.chip_launch({
                     origin = owner.pos,

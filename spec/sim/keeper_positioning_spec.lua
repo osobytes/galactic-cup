@@ -113,6 +113,40 @@ local function place_support(value, offset)
 end
 
 t.describe("keeper behavior integration", function()
+    t.it("moves through the physical neutral depth range in both directions", function()
+        for _, mirrored in ipairs({
+            { team = "home", far = Vec2.new(480, 400), near = Vec2.new(161, 270), direction = 1 },
+            { team = "away", far = Vec2.new(480, 140), near = Vec2.new(799, 270), direction = -1 },
+        }) do
+            local far = scenario(mirrored.team, mirrored.far)
+            local far_keeper = far.state.players[far.keeper]
+            for _ = 1, 120 do
+                step(far.state)
+            end
+            local goal_line_x = mirrored.team == "home" and 0 or 960
+            local far_depth = (far_keeper.pos.x - goal_line_x) * mirrored.direction
+            t.near(far_depth, 12, 1e-6, mirrored.team .. " far neutral depth")
+            t.eq(far_keeper.keeper_state, "base")
+
+            local near = scenario(mirrored.team, mirrored.near)
+            local near_keeper = near.state.players[near.keeper]
+            local max_near_depth = 0
+            for _ = 1, 120 do
+                step(near.state)
+                local step_depth = (near_keeper.pos.x - goal_line_x) * mirrored.direction
+                max_near_depth = math.max(max_near_depth, step_depth)
+                t.is_true(
+                    step_depth <= 18.000001,
+                    mirrored.team .. " actual neutral movement stays below its cap"
+                )
+            end
+            local near_depth = (near_keeper.pos.x - goal_line_x) * mirrored.direction
+            t.is_true(near_depth > 17.5, mirrored.team .. " keeper actually steps off its inset")
+            t.is_true(max_near_depth > 17.5, mirrored.team .. " reaches the dynamic depth")
+            t.eq(near_keeper.keeper_state, "base")
+        end
+    end)
+
     t.it("advances on the conservative centre ray without an anticipation stat gate", function()
         for _, mirrored in ipairs({
             { team = "home", ball = Vec2.new(150, 220), direction = 1 },
