@@ -7,6 +7,8 @@ local TUNE = require("sim.tuning").values
 
 local metrics = {}
 
+---@alias KeeperMetricState KeeperBehaviorState|"unclassified"
+
 -- Seconds a team must hold the ball before its possession is "settled" —
 -- the unit turnovers are counted in (see observe).
 metrics.SETTLE_HOLD = 0.7
@@ -43,6 +45,17 @@ metrics.SETTLE_HOLD = 0.7
 ---@field prev_owner_id string?
 ---@field prev_owner_role "controlled"|"ai"|nil
 ---@field dribble { controlled: DribbleMetricCollector, ai: DribbleMetricCollector }
+---@field keeper_state_s table<KeeperBehaviorState, number>
+---@field keeper_saves_by_state table<KeeperMetricState, integer>
+---@field keeper_goals_by_state table<KeeperMetricState, integer>
+---@field keeper_shot_depth_sum number
+---@field keeper_shot_depth_count integer
+---@field chip_shots integer
+---@field chip_on_target integer
+---@field chip_goals integer
+---@field pending_shot_team "home"|"away"|nil
+---@field pending_shot_type KeeperShotType?
+---@field pending_shot_keeper_state KeeperBehaviorState?
 
 -- Per-match results. Rate metrics are nil when their denominator never
 -- happened (e.g. save_rate with zero on-target shots) and are skipped by the
@@ -77,6 +90,31 @@ metrics.SETTLE_HOLD = 0.7
 ---@field ai_dribble_touches_per_min number
 ---@field ai_dribble_heavy_losses_per_min number
 ---@field ai_jukes integer
+---@field keeper_base_s number
+---@field keeper_advance_s number
+---@field keeper_contain_s number
+---@field keeper_set_s number
+---@field keeper_retreat_s number
+---@field keeper_recover_s number
+---@field keeper_shot_depth_mean number?
+---@field chip_shots integer
+---@field chip_on_target integer
+---@field chip_goals integer
+---@field chip_conversion number?
+---@field keeper_saves_base integer
+---@field keeper_saves_advance integer
+---@field keeper_saves_contain integer
+---@field keeper_saves_set integer
+---@field keeper_saves_retreat integer
+---@field keeper_saves_recover integer
+---@field keeper_saves_unclassified integer
+---@field keeper_goals_base integer
+---@field keeper_goals_advance integer
+---@field keeper_goals_contain integer
+---@field keeper_goals_set integer
+---@field keeper_goals_retreat integer
+---@field keeper_goals_recover integer
+---@field keeper_goals_unclassified integer
 ---@field fun number?  -- composite score, stamped on by the headless runner
 
 -- Trapezoid desirability bands {zero_lo, good_lo, good_hi, zero_hi}: worth 1
@@ -123,6 +161,29 @@ function metrics.new(s)
             jukes = 0,
         }
     end
+    ---@return table<KeeperBehaviorState, number>
+    local function keeper_behavior_bucket()
+        return {
+            base = 0,
+            advance = 0,
+            contain = 0,
+            set = 0,
+            retreat = 0,
+            recover = 0,
+        }
+    end
+    ---@return table<KeeperMetricState, integer>
+    local function keeper_metric_bucket()
+        return {
+            base = 0,
+            advance = 0,
+            contain = 0,
+            set = 0,
+            retreat = 0,
+            recover = 0,
+            unclassified = 0,
+        }
+    end
     return {
         t = 0,
         goals = {},
@@ -146,6 +207,17 @@ function metrics.new(s)
         prev_owner_id = prev_owner and prev_owner.id or nil,
         prev_owner_role = prev_role,
         dribble = { controlled = dribble_bucket(), ai = dribble_bucket() },
+        keeper_state_s = keeper_behavior_bucket(),
+        keeper_saves_by_state = keeper_metric_bucket(),
+        keeper_goals_by_state = keeper_metric_bucket(),
+        keeper_shot_depth_sum = 0,
+        keeper_shot_depth_count = 0,
+        chip_shots = 0,
+        chip_on_target = 0,
+        chip_goals = 0,
+        pending_shot_team = nil,
+        pending_shot_type = nil,
+        pending_shot_keeper_state = nil,
     }
 end
 
@@ -171,6 +243,13 @@ end
 function metrics.observe(c, s, dt)
     c.t = c.t + dt
 
+    for _, player in ipairs(s.players) do
+        if player.is_keeper then
+            local state = player.keeper_state or "base"
+            c.keeper_state_s[state] = c.keeper_state_s[state] + dt
+        end
+    end
+
     for _, e in ipairs(s.events) do
         local team = e.player and c.team_of[e.player] or nil
         local is_keeper = e.player ~= nil and c.keeper[e.player]
@@ -179,6 +258,11 @@ function metrics.observe(c, s, dt)
             c.pending_pass = team
         elseif e.kind == "catch" or e.kind == "parry" then
             c.saves = c.saves + 1
+            local state = e.keeper_state or "unclassified"
+            c.keeper_saves_by_state[state] = c.keeper_saves_by_state[state] + 1
+            c.pending_shot_team = nil
+            c.pending_shot_type = nil
+            c.pending_shot_keeper_state = nil
         elseif
             (e.kind == "shot" or e.kind == "header" or e.kind == "volley" or e.kind == "bicycle")
             and not is_keeper
@@ -187,6 +271,19 @@ function metrics.observe(c, s, dt)
             c.shots = c.shots + 1
             c.longest_drought = math.max(c.longest_drought, c.t - c.last_chance_t)
             c.last_chance_t = c.t
+            c.pending_shot_team = team
+            c.pending_shot_type = e.shot_type
+            c.pending_shot_keeper_state = e.keeper_state
+            if e.keeper_depth then
+                c.keeper_shot_depth_sum = c.keeper_shot_depth_sum + e.keeper_depth
+                c.keeper_shot_depth_count = c.keeper_shot_depth_count + 1
+            end
+            if e.shot_type == "chip" then
+                c.chip_shots = c.chip_shots + 1
+                if e.on_target then
+                    c.chip_on_target = c.chip_on_target + 1
+                end
+            end
         elseif e.kind == "touch" and e.player and c.prev_owner_id == e.player then
             local role = c.prev_owner_role or "ai"
             local bucket = c.dribble[role]
@@ -209,6 +306,16 @@ function metrics.observe(c, s, dt)
         c.longest_drought = math.max(c.longest_drought, c.t - c.last_chance_t)
         c.last_chance_t = c.t
         c.pending_pass = nil -- a goal ends any pass in flight
+        if c.pending_shot_team == team then
+            local state = c.pending_shot_keeper_state or "unclassified"
+            c.keeper_goals_by_state[state] = c.keeper_goals_by_state[state] + 1
+            if c.pending_shot_type == "chip" then
+                c.chip_goals = c.chip_goals + 1
+            end
+        end
+        c.pending_shot_team = nil
+        c.pending_shot_type = nil
+        c.pending_shot_keeper_state = nil
     end
 
     local owner_team = s.owner and s.players[s.owner].team or nil
@@ -375,6 +482,33 @@ function metrics.finish(c, s)
                 and ai_dribble.heavy_losses / (ai_dribble.carry_s / 60)
             or 0,
         ai_jukes = ai_dribble.jukes,
+        keeper_base_s = c.keeper_state_s.base,
+        keeper_advance_s = c.keeper_state_s.advance,
+        keeper_contain_s = c.keeper_state_s.contain,
+        keeper_set_s = c.keeper_state_s.set,
+        keeper_retreat_s = c.keeper_state_s.retreat,
+        keeper_recover_s = c.keeper_state_s.recover,
+        keeper_shot_depth_mean = c.keeper_shot_depth_count > 0
+                and c.keeper_shot_depth_sum / c.keeper_shot_depth_count
+            or nil,
+        chip_shots = c.chip_shots,
+        chip_on_target = c.chip_on_target,
+        chip_goals = c.chip_goals,
+        chip_conversion = c.chip_shots > 0 and c.chip_goals / c.chip_shots or nil,
+        keeper_saves_base = c.keeper_saves_by_state.base,
+        keeper_saves_advance = c.keeper_saves_by_state.advance,
+        keeper_saves_contain = c.keeper_saves_by_state.contain,
+        keeper_saves_set = c.keeper_saves_by_state.set,
+        keeper_saves_retreat = c.keeper_saves_by_state.retreat,
+        keeper_saves_recover = c.keeper_saves_by_state.recover,
+        keeper_saves_unclassified = c.keeper_saves_by_state.unclassified,
+        keeper_goals_base = c.keeper_goals_by_state.base,
+        keeper_goals_advance = c.keeper_goals_by_state.advance,
+        keeper_goals_contain = c.keeper_goals_by_state.contain,
+        keeper_goals_set = c.keeper_goals_by_state.set,
+        keeper_goals_retreat = c.keeper_goals_by_state.retreat,
+        keeper_goals_recover = c.keeper_goals_by_state.recover,
+        keeper_goals_unclassified = c.keeper_goals_by_state.unclassified,
     }
 end
 

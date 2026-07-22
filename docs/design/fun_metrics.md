@@ -346,3 +346,37 @@ until phase 4 automates it).
   completion 0.578 → 0.572, turnovers/min 3.56 → 3.45, and possession balance
   0.420 → 0.418. The larger sample shows no new systemic collapse or keeper
   overcommitment.
+
+- **2026-07-22 — explicit keeper commitment and chip counterplay.** The default
+  base state retains the legacy twelve-pixel goal-line guard and lateral band;
+  the conservative centre-ray is now reserved for contextual contain/advance
+  commitments. Ground windups visibly set the keeper, lob/through-ball cues
+  retreat it, and release-time movement consumes reaction time without changing
+  physical reach or catch/parry RNG. Chip type and launch are now locked at
+  commit: AI declines infeasible chips, while a human-requested infeasible chip
+  remains a deterministic poor chip instead of turning into a ground-shot
+  decoy during the keeper's retreat.
+
+  The required final 100-match audit measured fun 0.360, goals 1.620,
+  shots/goal 25.679, save rate 0.872, pass completion 0.575, turnovers/min
+  3.487, and possession balance 0.430. Save rate is within -0.002 of the last
+  0.874 audit rather than reproducing the rejected keeper-wall experiments.
+  Keeper state occupancy was 214.807 s base, 0.090 s advance, 0.203 s contain,
+  7.306 s set, 4.927 s retreat, and 0.820 s recover per match; mean shot-release
+  depth was 16.950 px. Across the sample, 32 chips were selected, 28 were on
+  target, and 9 scored.
+
+  Outcome attribution is now honest about strikes without release metadata.
+  Mean saves per match were: base 0, advance 0.020, contain 0, set 5.600,
+  retreat 0.160, recover 0.040, unclassified 6.680. Mean goals were: base 0,
+  advance 0, contain 0, set 1.050, retreat 0.090, recover 0.030, unclassified
+  0.230. The unclassified bucket contains aerial/context-free outcomes that
+  were formerly misreported as base.
+
+  After this audit, `love . --tripwire write` deliberately migrated the
+  checked-in 30-seed guardrail. Key old → new values: fun 0.343941 → 0.365731,
+  goals 1.633333 → 1.766667, shots/goal 27.644231 → 25.993210, save rate
+  0.876442 → 0.860101, pass completion 0.578242 → 0.579522, turnovers/min
+  3.331794 → 3.724430, possession balance 0.427225 → 0.429692, drought
+  11.958889 → 11.355556, and decided-late 0.586640 → 0.651684. This is an
+  audited mechanics migration, not a balance tweak made to manufacture green.

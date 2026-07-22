@@ -1,8 +1,8 @@
 # OMP-1 determinism evidence
 
-Status: **native pass on the authoritative snapshot-v3 fixture; current
-Chrome/Firefox v3 verification is enforced by CI**. The accepted snapshot-v1
-browser evidence remains preserved as a historical artifact below.
+Status: **native pass on the authoritative snapshot-v5 fixture**. The accepted
+snapshot-v4 Chrome/Firefox evidence remains historical until CI records the v5
+browser run; the snapshot-v1 browser artifact is also preserved below.
 
 This report closes the OMP-1 evidence line. It proves that one complete,
 recorded eight-slot fixture has a stable state boundary after every fixed
@@ -22,7 +22,7 @@ the explicit refresh command is invoked.
 | Identity field | Frozen value |
 | --- | --- |
 | Fixture | `omp1-nebula-orion-eight-streams-v1` |
-| Tape / input / snapshot versions | `1 / 1 / 3` |
+| Tape / input / snapshot versions | `1 / 1 / 5` |
 | Build | `omp1-determinism-v1` |
 | Source | `issue-39-canonical-recording-v1` |
 | Content | `nebula-orion-showcase-content-v1` |
@@ -40,7 +40,7 @@ with an integer tick budget and version the fixture.
 
 ## Hash and repeated-run result
 
-Every boundary is encoded with canonical snapshot version 3 and hashed with
+Every boundary is encoded with canonical snapshot version 5 and hashed with
 the browser-safe FNV-1a-64 implementation. Verification performs these three
 checks:
 
@@ -53,18 +53,17 @@ The authoritative values are:
 
 ```text
 boundaries=7202
-final_hash=bd570642f2d94a76
-sequence_digest=2f53cb0492611a59
-score=0-1
-outcome=away
-final_snapshot_bytes=17759
+final_hash=984bc6f2f2d59e1e
+sequence_digest=60aea810b4ccb46c
+score=0-0
+outcome=draw
+final_snapshot_bytes=19413
 ```
 
 The complete match produced:
 
 ```text
-block=3 catch=6 claim=2 header=13 parry=1 pass=8
-shot=5 tackle=421 touch=493 volley=8
+catch=1 claim=2 header=2 parry=1 pass=3 shot=1 tackle=151 touch=197
 ```
 
 `sim.determinism_evidence` reports the causal tick and expected/actual hash on
@@ -75,22 +74,34 @@ The deliberate refresh command is separate:
 love . --determinism-refresh
 ```
 
-Refreshing the recording is a snapshot/input contract change. Review the
-identity, every changed wire/hash, event counts, score, and restore windows
-before committing it.
+Refreshing the recording is a snapshot/state-evidence contract change. It
+replays and re-encodes every existing wire, asserts byte equality, and cannot
+invoke bot policy to replace the authoritative input contract. Review the
+identity, hashes, event counts, score, and restore windows before committing it.
 
 When the checked-in snapshot version differs from the current schema, refresh
-validates a migration identity that changes only `snapshot_version`, decodes
-the frozen frame wires, and consumes every one in order to regenerate snapshot
-hashes. It never rematerializes bot inputs for a schema-only migration. Bot
-materialization remains available only for an intentional same-schema
-re-recording.
+validates a migration identity that changes only `snapshot_version`. Whether
+the schema changes or not, it decodes the frozen frame wires and consumes every
+one in order to regenerate snapshot hashes. Bot materialization is not part of
+the refresh path.
 
-The snapshot-v3 migration retained all 7,201 input wires byte-for-byte
+The snapshot-v5 migration retained all 7,201 snapshot-v4 input wires
+byte-for-byte
 (`SHA-256 a717c094e69229e7149e6d184a8a3dcc7a12476a0c07109eff1552de01bf2292`).
-The score, event counts, and restore windows also stayed fixed; boundary hashes,
-the sequence digest, and snapshot sizes changed because v3 canonically includes
-the keeper's anticipation and set/lean state.
+The migration source was the exact fixture on `main`; only the schema identity
+and regenerated evidence changed. The new explicit keeper set/context behavior
+intentionally changes the frozen outcome from `0-1` to `0-0`; event counts,
+restore windows, boundary hashes, the sequence digest, and snapshot size drift
+accordingly. The tape contains no selected chip, so this outcome change is not
+caused by hidden chip accuracy or altered input wires.
+
+The draw removes the old full-match goal/kickoff window. That loss is disclosed
+rather than manufacturing a replacement result or weakening the keeper state
+contract. Snapshot-v5 coverage instead builds a bounded synthetic input tape
+from a pre-goal canonical snapshot, crosses the goal line, performs the kickoff
+reset, and advances through a post-kickoff boundary. `sim.input_tape` and
+`sim.replay` validate every boundary hash and compare an independently restored
+tape, while the initial snapshot exercises all new keeper fields.
 
 ## Restore/replay windows
 
@@ -101,13 +112,12 @@ against every pinned boundary:
 | Scenario | Start boundary | Last boundary | Required transition |
 | --- | ---: | ---: | --- |
 | Tackle | 23 | 26 | `tackle` at causal tick 24 |
-| Keeper | 1692 | 1697 | `catch` at causal tick 1694 |
-| Aerial | 1788 | 1793 | `header` at causal tick 1790 |
-| Goal / kickoff | 3730 | 3735 | Away goal and home kickoff at causal tick 3732 |
+| Keeper | 1691 | 1696 | `catch` at causal tick 1693 |
+| Aerial | 1787 | 1792 | `header` at causal tick 1789 |
 | Full time | 7198 | 7201 | `finished`, zero time at causal tick 7200 |
 
-This covers routine play in the uninterrupted complete run and the adversarial
-boundaries required before rollback work. The harness uses the same canonical
+This covers routine play in the uninterrupted complete run except for the
+explicitly disclosed goal-window drift above. The harness uses the same canonical
 identity, effective-frame, snapshot, and boundary-hash shapes as
 `sim.input_tape` and `sim.replay`, while exposing a bounded incremental step
 API so love.js yields to the browser between batches.
@@ -122,19 +132,20 @@ result markers, and then reports the existing snapshot microbenchmark:
 ```
 
 On the development machine (Zorin OS 18.1, Linux x86_64, native LÖVE 11.5),
-1,000 operations at boundary tick 120 measured:
+100 operations at boundary tick 120 measured during the final v5 native gate:
 
 ```text
-snapshot_measure version=3 tick=120 bytes=16311 iterations=1000 hash=c26961d5806dc8ee
-snapshot_measure encode_us_each=187.375
-snapshot_measure hash_with_encode_us_each=1392.625
-snapshot_measure restore_us_each=86.862
+snapshot_measure version=5 tick=120 bytes=18197 iterations=100 hash=d1f7e58ef54570ea
+snapshot_measure encode_us_each=270.010
+snapshot_measure hash_with_encode_us_each=1546.500
+snapshot_measure restore_us_each=125.180
 ```
 
-These are observations, not thresholds. The complete two-state native
-verification took approximately 25 seconds on that machine. Browser evidence
-records wall-clock duration per fresh process because WebAssembly timings are
-not interchangeable with native `os.clock` measurements.
+These are observations, not thresholds. The two final fresh native runs
+completed in 28.074 s and 27.459 s and emitted identical result markers.
+Browser evidence records wall-clock duration per fresh process because
+WebAssembly timings are not interchangeable with native `os.clock`
+measurements.
 
 For the actual love.js runtime matrix:
 
@@ -153,10 +164,10 @@ than skips, if Chrome or Firefox is missing.
 
 ## Runtime verification
 
-The authoritative snapshot-v3 fixture passes the two-fresh-process native
+The authoritative snapshot-v5 fixture passes the two-fresh-process native
 command above. CI builds a clean love.js artifact and runs the same current
 fixture in real Chrome and Firefox; that workflow, rather than a hand-edited
-evidence file, supplies the v3 browser integration proof.
+evidence file, supplies the current browser integration proof.
 
 ### Historical snapshot-v1 browser evidence
 
@@ -167,7 +178,7 @@ evidence file, supplies the v3 browser integration proof.
 
 Those four historical browser executions produced final hash
 `b379a3a3ab5d7682` and sequence digest `0ff53075e3e626e0`. They are not presented
-as proof for the migrated v3 hashes.
+as proof for the current v5 hashes.
 
 The clean browser artifact was built from source commit `16fad22`, with package
 SHA-256 `2ec87dfa91770ea6b6772444c490808bf4ef7eaf2eca9693a3e7fbca27187f4f`.
@@ -204,21 +215,20 @@ browser artifact packaging path is replaced by this evidence work.
 ## Remaining OMP-2 risks
 
 - The checked-in browser artifact is historical snapshot-v1 evidence. Current
-  snapshot-v3 Chrome/Firefox proof runs in CI and is not a substitute for
+  snapshot-v5 Chrome/Firefox proof runs in CI and is not a substitute for
   Windows, macOS, or cross-architecture floating-point evidence.
 - The full-time boundary currently depends on floating countdown semantics
   and consumes 7,201 inputs for a nominal 7,200-tick duration.
 - Canonical snapshots intentionally include all declared simulation state and
-  are about 15–17 KiB here. OMP-2 needs memory/bandwidth policy before keeping
+  are about 19 KiB here. OMP-2 needs memory/bandwidth policy before keeping
   rollback history.
 - The 850 KiB fixture favors auditability and exact per-tick regression
   diagnosis over repository size. A future compressed format must preserve
   canonical decoded bytes and versioning.
 - The now-total nearest-player comparator uses descending player index for an
   exact-distance tie to preserve the existing native outcome, and quantization
-  now canonicalizes negative zero. Other new
-  rankings and numeric boundaries still need explicit total ordering and
-  cross-runtime evidence.
+  now canonicalizes negative zero. Other new rankings and numeric boundaries
+  still need explicit total ordering and cross-runtime evidence.
 - This suite proves deterministic replay only. It says nothing about late
   input policy, prediction quality, resimulation cost, network packet shape,
   state repair, or transport behavior.

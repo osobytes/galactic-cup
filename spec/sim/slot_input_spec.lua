@@ -212,6 +212,7 @@ t.describe("fixed match input slots", function()
             speed = 500,
             vz = 0,
             spin = 0,
+            shot_type = "ground",
         }
         s.ball.x, s.ball.y = 325, 270
         s.ball_vel.x, s.ball_vel.y = 1000, 0

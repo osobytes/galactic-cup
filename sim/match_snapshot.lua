@@ -21,7 +21,7 @@ local input_frame = require("sim.input_frame")
 ---@class MatchSnapshotModule
 local match_snapshot = {}
 
-match_snapshot.VERSION = 3
+match_snapshot.VERSION = 5
 
 match_snapshot.MATCH_FIELDS = {
     "field",
@@ -83,7 +83,14 @@ match_snapshot.PLAYER_FIELDS = {
     "dodge_dir",
     "reach",
     "handling",
+    "keeper_aggression",
     "keeper_anticipation",
+    "keeper_state",
+    "keeper_state_timer",
+    "keeper_release_state",
+    "keeper_release_motion",
+    "keeper_release_kind",
+    "keeper_release_depth",
     "keeper_set",
     "dive_timer",
     "dive_dir",
@@ -148,6 +155,10 @@ local EVENT_FIELDS = {
     "outcome",
     "jumping",
     "difficulty",
+    "shot_type",
+    "keeper_state",
+    "keeper_depth",
+    "on_target",
 }
 
 local MARKING_FIELDS = {
@@ -163,6 +174,7 @@ local WINDUP_FIELDS = {
     "speed",
     "vz",
     "spin",
+    "shot_type",
 }
 
 local ASSIGNMENT_FIELDS = {
@@ -293,6 +305,7 @@ local function copy_player(source, path, make_vec)
                     speed = copy_scalar(shot.speed, field_path .. ".speed"),
                     vz = copy_scalar(shot.vz, field_path .. ".vz"),
                     spin = copy_scalar(shot.spin, field_path .. ".spin"),
+                    shot_type = copy_scalar(shot.shot_type, field_path .. ".shot_type"),
                 }
             end
         else

@@ -10,10 +10,10 @@ local tuning = require("sim.tuning")
 local short_match_tape = {}
 
 short_match_tape.EXPECTED_BOUNDARY_HASHES = {
-    "ac97bcf0fcd1b611",
-    "255365c7a2cb2034",
-    "86f1ea77ae984d0a",
-    "aa04be205c4bc3ad",
+    "186a5aa37a619bdd",
+    "548a898dba13b800",
+    "b11e26a198c1caf6",
+    "2c2eb9f0bd62cd81",
 }
 
 ---@return InputTape tape

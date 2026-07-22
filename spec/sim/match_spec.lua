@@ -1012,6 +1012,46 @@ t.describe("match lobs and chips", function()
         return false
     end
 
+    ---@param keeper_x number
+    ---@param shot_speed number
+    ---@return MatchState
+    ---@return MatchPlayer
+    ---@return MatchPlayer
+    local function human_chip_state(keeper_x, shot_speed)
+        local s = new_match()
+        local shooter = s.players[s.controlled]
+        local defending_keeper
+        local parking_y = 30
+        for _, player in ipairs(s.players) do
+            if player.team == "away" and player.is_keeper then
+                defending_keeper = player
+            elseif player ~= shooter and not player.is_keeper then
+                player.pos = Vec2.new(player.team == "home" and 300 or 820, parking_y)
+                player.anchor = player.pos
+                player.vel = Vec2.new(0, 0)
+                player.run_vel = Vec2.new(0, 0)
+                parking_y = parking_y + 45
+            end
+        end
+        defending_keeper = assert(defending_keeper)
+        shooter.pos = Vec2.new(700, 270)
+        shooter.anchor = shooter.pos
+        shooter.facing = Vec2.new(1, 0)
+        shooter.vel = Vec2.new(0, 0)
+        shooter.run_vel = Vec2.new(0, 0)
+        shooter.shot_speed = shot_speed
+        defending_keeper.pos = Vec2.new(keeper_x, 270)
+        defending_keeper.anchor = defending_keeper.pos
+        defending_keeper.vel = Vec2.new(0, 0)
+        defending_keeper.run_vel = Vec2.new(0, 0)
+        s.owner = s.controlled
+        s.ball = shooter.pos:add(Vec2.new(18, 0))
+        s.ball_vel = Vec2.new(0, 0)
+        s.pickup_cd = 1
+        s.block_grace = 1
+        return s, shooter, defending_keeper
+    end
+
     t.it("a chip shot leaves the ground", function()
         local s = new_match()
         s.players[s.controlled].facing = Vec2.new(1, 0)
@@ -1020,8 +1060,195 @@ t.describe("match lobs and chips", function()
         step_frames(s, WINDUP_FRAMES)
         t.is_true(s.owner == nil, "shot released")
         t.is_true(s.ball_vz > 0, "the chip launches upward")
+        local shot_event
+        for _, event in ipairs(s.events) do
+            if event.kind == "shot" then
+                shot_event = event
+            end
+        end
+        t.eq(assert(shot_event).shot_type, "chip")
+        t.is_true(assert(shot_event).keeper_depth ~= nil)
         match.step(s, 0.016, NO_INPUT)
         t.is_true(s.ball_z > 0, "and the ball is airborne next frame")
+    end)
+
+    t.it("locks human chip type and launch before a telegraphed keeper retreat", function()
+        local s, shooter, defending_keeper = human_chip_state(880, 500)
+        match.step(s, 0, input({ shoot = true, lob = true }))
+        local committed = assert(shooter.windup_shot)
+        local committed_vz = committed.vz
+        t.eq(committed.shot_type, "chip")
+        t.is_true(committed_vz > 0)
+
+        defending_keeper.pos = Vec2.new(938, 270)
+        defending_keeper.keeper_state = "retreat"
+        shooter.windup_timer = 0
+        match.step(s, 0, NO_INPUT)
+
+        t.eq(s.owner, nil)
+        t.eq(s.ball_vz, committed_vz)
+        t.eq(defending_keeper.keeper_release_kind, "chip")
+        t.eq(defending_keeper.keeper_release_state, "retreat")
+        t.eq(defending_keeper.keeper_release_motion, 0)
+        local event
+        for _, candidate in ipairs(s.events) do
+            if candidate.kind == "shot" then
+                event = candidate
+            end
+        end
+        t.eq(assert(event).shot_type, "chip")
+    end)
+
+    t.it("keeps an infeasible human chip verb instead of disguising a ground shot", function()
+        local s, shooter, defending_keeper = human_chip_state(938, 50)
+        match.step(s, 0, input({ shoot = true, lob = true }))
+        local committed = assert(shooter.windup_shot)
+        t.eq(committed.shot_type, "chip")
+        t.is_true(committed.vz > 0)
+        t.eq(
+            require("sim.keeper").chip_launch({
+                origin = shooter.pos,
+                target = shooter.pos:add(committed.dir),
+                keeper_pos = defending_keeper.pos,
+                defending_team = "away",
+                goal = s.goal_away,
+                horizontal_speed = committed.speed,
+                friction = 0.3,
+                gravity = 900,
+                keeper_clearance = 60,
+                crossbar = 70,
+                desired_goal_height = 65,
+            }),
+            nil
+        )
+
+        shooter.windup_timer = 0
+        match.step(s, 0, NO_INPUT)
+        t.eq(defending_keeper.keeper_release_kind, "chip")
+        t.is_true(s.ball_vz > 0)
+    end)
+
+    t.it("flies a solved chip over the actual keeper plane and under the bar", function()
+        local s, shooter, defending_keeper = human_chip_state(880, 500)
+        defending_keeper.move_speed = 0
+        match.step(s, 0, input({ shoot = true, lob = true }))
+        local committed = assert(shooter.windup_shot)
+        t.eq(committed.shot_type, "chip")
+        shooter.windup_timer = 0
+        match.step(s, 0, NO_INPUT)
+        t.eq(s.ball_vz, committed.vz)
+
+        local crossed_keeper = false
+        for _ = 1, 120 do
+            local before_x = s.ball.x
+            match.step(s, 1 / 60, NO_INPUT)
+            if
+                not crossed_keeper
+                and before_x < defending_keeper.pos.x
+                and s.ball.x >= defending_keeper.pos.x
+            then
+                crossed_keeper = true
+                t.is_true(s.ball_z > 60, "the locked flight clears the actual keeper plane")
+            end
+            if s.score.home > 0 then
+                break
+            end
+        end
+        t.is_true(crossed_keeper)
+        t.eq(s.score.home, 1, "the same flight crosses the goal plane under the bar")
+    end)
+
+    t.it("lets ordinary team AI select the same visible high-keeper chip", function()
+        ---@param keeper_x number
+        ---@return MatchState
+        ---@return MatchPlayer
+        local function ai_shot(keeper_x)
+            local s = match.new({
+                home = teams.nebula,
+                away = teams.orion,
+                field = { w = 960, h = 540 },
+                human_controlled = false,
+                seed = 91,
+            })
+            local attacker_idx, attacker, defending_keeper
+            local parking_y = 30
+            for index, player in ipairs(s.players) do
+                if player.team == "home" and not player.is_keeper and not attacker then
+                    attacker_idx = index
+                    attacker = player
+                elseif player.team == "away" and player.is_keeper then
+                    defending_keeper = player
+                elseif not player.is_keeper then
+                    player.pos = Vec2.new(player.team == "home" and 300 or 820, parking_y)
+                    player.anchor = player.pos
+                    parking_y = parking_y + 45
+                end
+            end
+            attacker = assert(attacker)
+            defending_keeper = assert(defending_keeper)
+            attacker.pos = Vec2.new(730, 270)
+            attacker.anchor = attacker.pos
+            attacker.facing = Vec2.new(1, 0)
+            attacker.vel = Vec2.new(0, 0)
+            attacker.run_vel = Vec2.new(0, 0)
+            attacker.settle_timer = 0
+            attacker.shot_speed = 400
+            for _, player in ipairs(s.players) do
+                if player.team == "away" and not player.is_keeper then
+                    player.pos = attacker.pos:add(Vec2.new(0, 55))
+                    player.anchor = player.pos
+                    break
+                end
+            end
+            defending_keeper.pos = Vec2.new(keeper_x, 230)
+            defending_keeper.anchor = defending_keeper.pos
+            defending_keeper.vel = Vec2.new(0, 0)
+            defending_keeper.run_vel = Vec2.new(0, 0)
+            s.owner = assert(attacker_idx)
+            s.ball = attacker.pos:add(Vec2.new(18, 0))
+            s.ball_vel = Vec2.new(0, 0)
+            s.pickup_cd = 1
+            s.block_grace = 1
+            return s, attacker
+        end
+
+        local deep, deep_attacker = ai_shot(938)
+        local advanced, advanced_attacker = ai_shot(880)
+        local deep_rng = deep.rng
+        local advanced_rng = advanced.rng
+        match.step(deep, 1 / 60, NO_INPUT)
+        match.step(advanced, 1 / 60, NO_INPUT)
+
+        t.eq(assert(deep_attacker.windup_shot).shot_type, "ground")
+        local advanced_keeper = advanced.players[6]
+        local advanced_shot = assert(advanced_attacker.windup_shot)
+        t.is_true(
+            require("sim.keeper").chip_is_visible(
+                advanced_keeper.pos,
+                advanced_keeper.team,
+                advanced.goal_away,
+                advanced_keeper.keeper_aggression
+            ),
+            "advanced keeper is visibly high"
+        )
+        t.is_true(advanced_attacker.pos:dist(advanced.ball) <= 24, "AI controls the ball")
+        t.is_true(require("sim.keeper").chip_launch({
+            origin = advanced_attacker.pos,
+            target = advanced_attacker.pos:add(advanced_shot.dir),
+            keeper_pos = advanced_keeper.pos,
+            defending_team = "away",
+            goal = advanced.goal_away,
+            horizontal_speed = advanced_shot.speed,
+            friction = 0.3,
+            gravity = 900,
+            keeper_clearance = 60,
+            crossbar = 70,
+            desired_goal_height = 65,
+        }) ~= nil, "the visible chip has a feasible under-bar path")
+        t.eq(assert(advanced_attacker.windup_shot).shot_type, "chip")
+        t.is_true(assert(advanced_attacker.windup_shot).vz > 0)
+        t.eq(deep.rng, deep_rng, "ground selection consumes no hidden accuracy draw")
+        t.eq(advanced.rng, advanced_rng, "chip selection consumes no hidden accuracy draw")
     end)
 
     t.it("a driven shot stays on the ground", function()
@@ -3046,7 +3273,13 @@ t.describe("match wind-up telegraphs (T5)", function()
         end
         -- Manually start the wind-up on the carrier (simulates the AI deciding to shoot).
         carrier.windup_timer = 0.12 -- mid-wind-up
-        carrier.windup_shot = { dir = Vec2.new(-1, 0), speed = 500, vz = 0, spin = 0 }
+        carrier.windup_shot = {
+            dir = Vec2.new(-1, 0),
+            speed = 500,
+            vz = 0,
+            spin = 0,
+            shot_type = "ground",
+        }
         -- Place the human defender ball-side within poke range.
         local me = s.players[s.controlled]
         me.pos = Vec2.new(carrier.pos.x - 24, carrier.pos.y) -- on the ball side

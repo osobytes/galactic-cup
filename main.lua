@@ -139,9 +139,12 @@ if has_flag("--determinism-refresh") then
     function love.load()
         local evidence = require("sim.determinism_evidence")
         local recording = evidence.record()
+        -- Validate and serialize before opening the checked-in fixture. A
+        -- coverage assertion must never truncate the last known-good evidence.
+        local payload = evidence.serialize_recording(recording)
         local path = "data/omp1_determinism.lua"
         local file = assert(io.open(path, "w"))
-        file:write(evidence.serialize_recording(recording))
+        file:write(payload)
         file:close()
         print(
             ("determinism fixture refreshed: %s (%d frames, %d boundaries)"):format(
