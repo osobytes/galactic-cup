@@ -240,6 +240,17 @@ function correction_smoothing.advance(state, source, dt)
     }
 end
 
+-- Capture a corrected authority pose and spend the current render frame's dt
+-- immediately. This preserves continuity at the start of the frame without
+-- allowing consecutive correction frames to freeze the displayed trajectory.
+---@param state CorrectionSmoothingState
+---@param source MatchState
+---@param dt number
+---@return CorrectionSmoothingState
+function correction_smoothing.reconcile(state, source, dt)
+    return correction_smoothing.advance(correction_smoothing.correct(state, source), source, dt)
+end
+
 -- Clear offsets at a scene discontinuity while preserving configured tuning.
 ---@param state CorrectionSmoothingState
 ---@param source MatchState

@@ -100,6 +100,34 @@ t.describe("render correction smoothing", function()
         t.eq(correction_smoothing.diagnostics(model).active_count, 0)
     end)
 
+    t.it("advances player and ball poses on every consecutive correction frame", function()
+        local authoritative = new_match()
+        local authoritative_hash = state_hash(authoritative)
+        local player_id = authoritative.players[1].id
+        local model = correction_smoothing.new(authoritative)
+        local previous = correction_smoothing.pose(model)
+
+        for frame = 1, 5 do
+            local corrected = corrected_match(authoritative, frame * 20, frame * 12)
+            local corrected_hash = state_hash(corrected)
+            model = correction_smoothing.reconcile(model, corrected, 0.02)
+            local pose = correction_smoothing.pose(model)
+            t.is_true(pose.players[player_id].x > previous.players[player_id].x)
+            t.is_true(pose.ball.x > previous.ball.x)
+            t.is_true(pose.players[player_id].x < corrected.players[1].pos.x)
+            t.is_true(pose.ball.x < corrected.ball.x)
+            local diagnostics = correction_smoothing.diagnostics(model)
+            t.eq(diagnostics.active_count, 2)
+            t.is_true(
+                diagnostics.maximum_magnitude < correction_smoothing.DEFAULT_HARD_SNAP_DISTANCE
+            )
+            t.eq(state_hash(corrected), corrected_hash)
+            previous = pose
+        end
+
+        t.eq(state_hash(authoritative), authoritative_hash)
+    end)
+
     t.it("hard-snaps corrections at the 160-world-unit threshold", function()
         local authoritative = new_match()
         local corrected = corrected_match(authoritative, 160, 160)

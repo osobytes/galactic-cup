@@ -25,14 +25,16 @@ controller's copied current snapshot.
 
 `game.render.correction_smoothing` keeps correction offsets outside
 `MatchState`. A small correction begins at the preceding displayed player/ball
-pose, then sheds its offset linearly over 100 ms using render `dt`. A correction
-at or above 160 world units hard-snaps to authority. Repeated corrections
-compose from the current displayed pose, while renderer-owned gait speed and
-lean follow that smoothed trajectory rather than the corrected simulation
-jump. HUD score/time and every simulation query still read the corrected state
-immediately. Goal/kickoff and replay transitions, full time, restart,
-laboratory teardown, and synchronization failure clear offsets rather than
-easing across scene boundaries.
+pose and immediately spends that render frame's `dt`, then sheds the remaining
+offset linearly over 100 ms. Consecutive correction frames therefore keep
+advancing instead of freezing until a gap. A correction at or above 160 world
+units hard-snaps to authority. Repeated corrections compose from the current
+displayed pose, while renderer-owned gait speed and lean follow that smoothed
+trajectory rather than the corrected simulation jump. HUD score/time and every
+simulation query still read the corrected state immediately. Goal/kickoff and
+replay transitions, full time, restart, laboratory teardown, and
+synchronization failure clear offsets rather than easing across scene
+boundaries.
 
 A synchronization terminal stops input and stays visible in the lab overlay,
 but it is not presented as the match's `full_time` phase.
