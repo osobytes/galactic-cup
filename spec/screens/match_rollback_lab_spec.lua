@@ -13,6 +13,7 @@ local Match = require("game.screens.match")
 local RealMatch = require("game.screens.real_match")
 local ScreenStack = require("game.screen_stack")
 local bloom = require("game.render.bloom")
+local correction_smoothing = require("game.render.correction_smoothing")
 local replay = require("game.render.replay")
 local view_state = require("game.render.view_state")
 local tuning_panel = require("game.ui.tuning_panel")
@@ -72,6 +73,44 @@ local function rollback_goal_fixture()
     state.pickup_cd = 999
     state.block_grace = 999
     return match_snapshot.capture(state)
+end
+
+---@param screen MatchScreen
+local function seed_render_correction(screen)
+    local previous = match_snapshot.restore(match_snapshot.capture(screen.state))
+    local player = previous.players[1]
+    player.pos = Vec2.new(player.pos.x - 40, player.pos.y)
+    previous.ball = Vec2.new(previous.ball.x - 20, previous.ball.y)
+    screen._render_smoothing = correction_smoothing.new(previous)
+    screen._render_smoothing = correction_smoothing.correct(screen._render_smoothing, screen.state)
+    screen._render_pose = correction_smoothing.pose(screen._render_smoothing)
+    t.is_true(correction_smoothing.diagnostics(screen._render_smoothing).active_count > 0)
+end
+
+---@param screen MatchScreen
+local function prepare_forced_home_goal(screen)
+    for _, player in ipairs(screen.state.players) do
+        player.pos = Vec2.new(player.pos.x, 50)
+    end
+    screen.state.owner = nil
+    screen.state.pickup_cd = 1
+    screen.state.block_grace = 1
+    screen.state.ball = Vec2.new(screen.state.field.w - 7, screen.state.field.h / 2)
+    screen.state.ball_vel = Vec2.new(1000, 0)
+    screen.state.ball_z, screen.state.ball_vz = 0, 0
+end
+
+---@param screen MatchScreen
+local function start_actual_goal_replay(screen)
+    for _ = 1, 40 do
+        screen:update(1 / 60)
+    end
+    prepare_forced_home_goal(screen)
+    screen:update(fixed_clock.TICK_SECONDS)
+    t.eq(screen.state.score.home, 1)
+    t.is_true(screen.state.kickoff_hold > 0)
+    t.is_true(replay.active())
+    t.is_true(screen._replay_state == nil)
 end
 
 t.describe("match screen rollback laboratory (tier 2)", function()
@@ -203,9 +242,12 @@ t.describe("match screen rollback laboratory (tier 2)", function()
                     max_rollback_ticks = 1,
                 },
             })
+            seed_render_correction(terminal)
             terminal:update(2 * fixed_clock.TICK_SECONDS)
             t.eq(assert(terminal._rollback_debug).status, "unconfirmed_window_exceeded")
             t.is_true(#terminal._rollback_outputs > 0)
+            t.eq(assert(terminal._rollback_debug).active_smoothing_count, 0)
+            t.near(assert(terminal._rollback_debug).correction_magnitude, 0)
             terminal._kickoff_banner = 0
             t.is_true(
                 terminal:broadcast_phase() == nil,
@@ -266,6 +308,7 @@ t.describe("match screen rollback laboratory (tier 2)", function()
             screen:update(3 * fixed_clock.TICK_SECONDS)
             view_state.update(screen.state.players, fixed_clock.TICK_SECONDS)
             t.is_true(view_state.get(screen.state.players[1].id) ~= nil)
+            seed_render_correction(screen)
             screen._last_score = 8
             screen._last_home = 4
             screen._last_scoring_team = "home"
@@ -284,6 +327,8 @@ t.describe("match screen rollback laboratory (tier 2)", function()
             t.eq(debug.rollback_count, 0)
             t.eq(debug.network_pending, 0)
             t.eq(debug.event_status, "active")
+            t.eq(debug.active_smoothing_count, 0)
+            t.near(debug.correction_magnitude, 0)
             t.eq(screen._clock.tick, 0)
             t.eq(screen._clock.accumulator, 0)
             t.eq(#screen._frame_events, 0)
@@ -300,6 +345,99 @@ t.describe("match screen rollback laboratory (tier 2)", function()
             t.is_true(view_state.get(screen.state.players[1].id) == nil)
             t.is_true(not screen._input_adapter.pending.switch)
             t.eq(screen.state.controlled, screen.state.slot_players[3])
+        end)
+    end)
+
+    t.it("clears smoothing at kickoff, full time, restart, and stack teardown", function()
+        with_keyboard(function()
+            local kickoff = Match.new()
+            prepare_forced_home_goal(kickoff)
+            seed_render_correction(kickoff)
+            kickoff:update(fixed_clock.TICK_SECONDS)
+            t.eq(kickoff.state.score.home, 1)
+            t.is_true(kickoff.state.kickoff_hold > 0)
+            t.eq(correction_smoothing.diagnostics(kickoff._render_smoothing).active_count, 0)
+            replay.reset()
+
+            local full_time = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    profile_name = "clean",
+                },
+            })
+            seed_render_correction(full_time)
+            full_time.state.finished = true
+            full_time:update(0)
+            t.eq(assert(full_time._rollback_debug).active_smoothing_count, 0)
+
+            local stack = ScreenStack.new()
+            local teardown = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    profile_name = "clean",
+                },
+            })
+            seed_render_correction(teardown)
+            stack:push(teardown)
+            t.is_true(stack:pop() == teardown)
+            t.eq(correction_smoothing.diagnostics(teardown._render_smoothing).active_count, 0)
+            t.eq(assert(teardown._rollback_debug).active_smoothing_count, 0)
+        end)
+    end)
+
+    t.it("keeps actual goal replay gait coherent and clears smoothing on both exits", function()
+        with_keyboard(function()
+            local natural = Match.new()
+            start_actual_goal_replay(natural)
+            t.is_true(
+                view_state.get(natural.state.players[1].id) == nil,
+                "successful replay entry must discard the post-goal kickoff pose"
+            )
+
+            natural:update(1 / 60)
+            local replay_state = assert(natural._replay_state)
+            for _, player in ipairs(replay_state.players) do
+                local view = assert(view_state.get(player.id))
+                t.near(view.speed, 0)
+                t.near(view.phase, 0)
+                t.near(view.lean, 0)
+            end
+            for _ = 1, 12 do
+                natural:update(1 / 60)
+            end
+            local saw_gait = false
+            local saw_lean = false
+            for _, player in ipairs(assert(natural._replay_state).players) do
+                local view = assert(view_state.get(player.id))
+                saw_gait = saw_gait or (view.speed > 0 and view.phase > 0)
+                saw_lean = saw_lean or math.abs(view.lean) > 0
+            end
+            t.is_true(saw_gait, "active replay frames must preserve gait progression")
+            t.is_true(saw_lean, "active replay frames must preserve lean progression")
+            seed_render_correction(natural)
+
+            natural:update(2)
+            natural:update(100)
+            t.is_true(not replay.active())
+            t.is_true(natural._replay_state == nil)
+            local natural_live = assert(view_state.get(natural.state.players[1].id))
+            t.near(natural_live.speed, 0)
+            t.near(natural_live.phase, 0)
+            t.near(natural_live.lean, 0)
+            t.eq(correction_smoothing.diagnostics(natural._render_smoothing).active_count, 0)
+
+            local skipped = Match.new()
+            start_actual_goal_replay(skipped)
+            skipped:update(1 / 60)
+            seed_render_correction(skipped)
+            skipped:event({ kind = "key", key = "space" })
+            t.is_true(not replay.active())
+            t.is_true(skipped._replay_state == nil)
+            local skipped_live = assert(view_state.get(skipped.state.players[1].id))
+            t.near(skipped_live.speed, 0)
+            t.near(skipped_live.phase, 0)
+            t.near(skipped_live.lean, 0)
+            t.eq(correction_smoothing.diagnostics(skipped._render_smoothing).active_count, 0)
         end)
     end)
 
@@ -390,9 +528,35 @@ t.describe("playable rollback ScreenStack flow (tier 3)", function()
             })
             stack:push(screen)
             local saw_correction = false
+            local saw_smoothing = false
+            local saw_settling = false
             for _ = 1, 160 do
                 stack:update(fixed_clock.TICK_SECONDS)
                 saw_correction = saw_correction or #screen._rollback_corrections > 0
+                local frame_debug = assert(screen._rollback_debug)
+                if
+                    not saw_smoothing
+                    and #screen._rollback_corrections > 0
+                    and frame_debug.active_smoothing_count > 0
+                then
+                    saw_smoothing = true
+                    local magnitude_before = frame_debug.correction_magnitude
+                    local hash_before = match_snapshot.hash(
+                        rollback_playable_lab.current_snapshot(assert(screen._rollback_lab))
+                    )
+                    stack:update(fixed_clock.TICK_SECONDS / 4)
+                    local settled_debug = assert(screen._rollback_debug)
+                    t.eq(#screen._rollback_corrections, 0)
+                    t.is_true(settled_debug.correction_magnitude < magnitude_before)
+                    t.eq(
+                        match_snapshot.hash(
+                            rollback_playable_lab.current_snapshot(assert(screen._rollback_lab))
+                        ),
+                        hash_before,
+                        "render-only settling must not change the client snapshot hash"
+                    )
+                    saw_settling = true
+                end
                 local status = assert(screen._rollback_debug).status
                 if status ~= "active" and status ~= "settling" then
                     break
@@ -400,6 +564,8 @@ t.describe("playable rollback ScreenStack flow (tier 3)", function()
             end
             local debug = assert(screen._rollback_debug)
             t.is_true(saw_correction)
+            t.is_true(saw_smoothing)
+            t.is_true(saw_settling)
             t.is_true(debug.rollback_count > 0)
             t.is_true(debug.resimulated_ticks > 0)
             t.eq(debug.status, "converged")
@@ -413,6 +579,8 @@ t.describe("playable rollback ScreenStack flow (tier 3)", function()
             t.eq(debug.confirmed_input_tick, debug.reference_tick - 1)
             t.eq(debug.confirmed_output_tick, debug.reference_tick - 1)
             t.eq(debug.network_pending, 0)
+            t.eq(debug.active_smoothing_count, 0)
+            t.near(debug.correction_magnitude, 0)
         end)
     end)
 

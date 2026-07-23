@@ -11,6 +11,7 @@ local teams = require("data.teams")
 local tactics = require("data.tactics")
 local pitch = require("game.render.pitch")
 local bloom = require("game.render.bloom")
+local correction_smoothing = require("game.render.correction_smoothing")
 local effects = require("game.render.effects")
 local match_hud_render = require("game.render.match_hud")
 local view_state = require("game.render.view_state")
@@ -36,6 +37,10 @@ local FIELD_H = 540
 ---@field duration number?
 ---@field max_goals integer?
 ---@field initial_snapshot MatchSnapshot? -- Optional canonical development fixture seam.
+
+---@class MatchRollbackDebugModel : RollbackPlayableLabDebugModel
+---@field correction_magnitude number
+---@field active_smoothing_count integer
 
 ---@class MatchScreenOptions
 ---@field formation string?
@@ -72,7 +77,7 @@ local FIELD_H = 540
 ---@field _input_adapter MatchInputAdapterState
 ---@field _frame_events MatchEvent[] -- Events produced by every simulation tick in the latest render update.
 ---@field _rollback_lab RollbackPlayableLab?
----@field _rollback_debug RollbackPlayableLabDebugModel?
+---@field _rollback_debug MatchRollbackDebugModel?
 ---@field _rollback_outputs RollbackTickOutput[]
 ---@field _rollback_event_diffs RollbackEventDiff[]
 ---@field _rollback_confirmed_steps RollbackEventStep[]
@@ -80,6 +85,8 @@ local FIELD_H = 540
 ---@field _presentation_full_time boolean
 ---@field _pending_confirmed_kickoff boolean
 ---@field _confirmed_lifecycle_ids table<string, boolean>
+---@field _render_smoothing CorrectionSmoothingState
+---@field _render_pose CorrectionSmoothingPose
 local Match = {}
 Match.__index = Match
 
@@ -99,6 +106,60 @@ local function append_values(target, source)
     for _, value in ipairs(source) do
         target[#target + 1] = value
     end
+end
+
+---@param self MatchScreen
+local function refresh_smoothing_debug(self)
+    if self._rollback_debug == nil then
+        return
+    end
+    local diagnostics = correction_smoothing.diagnostics(self._render_smoothing)
+    self._rollback_debug.correction_magnitude = diagnostics.maximum_magnitude
+    self._rollback_debug.active_smoothing_count = diagnostics.active_count
+end
+
+---@param self MatchScreen
+---@param reset_view boolean?
+local function clear_render_smoothing(self, reset_view)
+    self._render_smoothing = correction_smoothing.clear(self._render_smoothing, self.state)
+    self._render_pose = correction_smoothing.pose(self._render_smoothing)
+    if reset_view ~= false then
+        view_state.reset()
+    end
+    refresh_smoothing_debug(self)
+end
+
+---@param self MatchScreen
+---@param dt number
+---@param corrected boolean
+---@param lifecycle_reset boolean
+---@param update_view boolean
+local function update_render_smoothing(self, dt, corrected, lifecycle_reset, update_view)
+    if lifecycle_reset then
+        clear_render_smoothing(self, update_view)
+    elseif corrected then
+        self._render_smoothing =
+            correction_smoothing.reconcile(self._render_smoothing, self.state, dt)
+        self._render_pose = correction_smoothing.pose(self._render_smoothing)
+        refresh_smoothing_debug(self)
+    else
+        self._render_smoothing =
+            correction_smoothing.advance(self._render_smoothing, self.state, dt)
+        self._render_pose = correction_smoothing.pose(self._render_smoothing)
+        refresh_smoothing_debug(self)
+    end
+    if update_view then
+        view_state.update(self.state.players, dt, self._render_pose)
+    end
+end
+
+---@param debug MatchRollbackDebugModel?
+---@return boolean
+local function synchronization_failed(debug)
+    if debug == nil then
+        return false
+    end
+    return debug.status ~= "active" and debug.status ~= "settling" and debug.status ~= "converged"
 end
 
 ---@param self MatchScreen
@@ -136,8 +197,8 @@ local function finish_replay(self)
     replay.stop()
     self._replay_state = nil
     effects.reset_visuals()
-    view_state.reset()
-    view_state.update(self.state.players, 0)
+    clear_render_smoothing(self)
+    view_state.update(self.state.players, 0, self._render_pose)
     if self._pending_confirmed_kickoff and not self._presentation_full_time then
         self._kickoff_banner = 1.15
     end
@@ -177,7 +238,7 @@ function Match:consume_confirmed_lifecycle(event)
         self._last_scoring_team = scoring_team
         if replay.start_at(scoring_team, event.tick) then
             effects.reset()
-            view_state.reset()
+            clear_render_smoothing(self)
             self._replay_state = nil
         end
     elseif payload.kind == "kickoff" then
@@ -284,12 +345,16 @@ function Match:restart()
         })
         self.state =
             match_snapshot.restore(rollback_playable_lab.current_snapshot(self._rollback_lab))
-        self._rollback_debug = rollback_playable_lab.debug_model(self._rollback_lab)
+        local debug = rollback_playable_lab.debug_model(self._rollback_lab)
+        ---@cast debug MatchRollbackDebugModel
+        self._rollback_debug = debug
     else
         self._rollback_lab = nil
         self._rollback_debug = nil
         self.state = initial
     end
+    self._render_smoothing = correction_smoothing.new(self.state)
+    self._render_pose = correction_smoothing.pose(self._render_smoothing)
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
     self._shoot_held_prev = false
     self._pass_held_prev = false
@@ -319,6 +384,14 @@ function Match:restart()
     effects.reset()
     audio.load()
     audio.reset()
+    refresh_smoothing_debug(self)
+end
+
+-- ScreenStack calls this before discarding the laboratory. Presentation state
+-- is cleared explicitly even though the authoritative match remains untouched.
+function Match:teardown()
+    self._replay_state = nil
+    clear_render_smoothing(self)
 end
 
 -- Product/offline matches retain their state-edge behavior. Rollback matches
@@ -496,7 +569,9 @@ function Match:update(dt)
         return
     end
     if match_is_over(self) then
-        advance_rollback_replay(self, dt)
+        if not advance_rollback_replay(self, dt) then
+            clear_render_smoothing(self)
+        end
         audio.tick(dt)
         return
     end
@@ -552,6 +627,8 @@ function Match:update(dt)
     -- zero simulation progress.
     self._input_adapter = match_input_adapter.sample(self._input_adapter, frame_input)
     self._frame_events = {}
+    local score_before = self.state.score.home + self.state.score.away
+    local kickoff_before = self.state.kickoff_hold
     if self._rollback_lab then
         local lab = assert(self._rollback_lab)
         fixed_clock.advance(self._clock, dt, function(_)
@@ -570,7 +647,9 @@ function Match:update(dt)
             self.state = match_snapshot.restore(rollback_playable_lab.current_snapshot(lab))
             return batch.status == "active" or batch.status == "settling"
         end)
-        self._rollback_debug = rollback_playable_lab.debug_model(lab)
+        local debug = rollback_playable_lab.debug_model(lab)
+        ---@cast debug MatchRollbackDebugModel
+        self._rollback_debug = debug
         reconcile_rollback_replay(self)
         consume_rollback_presentation(self)
         if not replay.active() then
@@ -599,11 +678,24 @@ function Match:update(dt)
 
     -- Presentation is never a second simulation authority. It follows normal
     -- render dt even on frames that consume zero or several simulation ticks.
-    -- In laboratory mode this follows the corrected displayed client directly;
-    -- correction smoothing remains a later presentation concern.
+    -- A correction begins at the preceding displayed pose, then sheds only its
+    -- render-owned offset. Confirmed replay footage keeps its own view timeline
+    -- while hidden live corrections continue to reconcile independently.
     local drawing_rollback_replay = self._rollback_lab ~= nil and replay.active()
+    local score_after = self.state.score.home + self.state.score.away
+    local lifecycle_reset = score_after ~= score_before
+        or (self._rollback_lab == nil and score_after > self._last_score)
+        or self.state.kickoff_hold > kickoff_before
+        or self.state.finished
+        or synchronization_failed(self._rollback_debug)
+    update_render_smoothing(
+        self,
+        dt,
+        #self._rollback_corrections > 0,
+        lifecycle_reset,
+        not drawing_rollback_replay
+    )
     if not drawing_rollback_replay then
-        view_state.update(self.state.players, dt)
         effects.tick(dt)
     end
     audio.tick(dt)
@@ -665,6 +757,7 @@ function Match:draw_frame(s, vp)
         away_color = self.away_color,
         arena = self.arena,
         arena_pulse = math.min(1, self._kickoff_banner),
+        render_pose = s == self.state and self._render_pose or nil,
     })
 
     local phase = self:broadcast_phase()
@@ -709,6 +802,10 @@ function Match:draw_rollback_overlay(vp)
             model.latest_rollback_depth,
             model.max_rollback_depth,
             model.resimulated_ticks
+        ),
+        ("smoothing %d  max %.1f wu"):format(
+            model.active_smoothing_count,
+            model.correction_magnitude
         ),
         ("predicted %d rows / %d ticks"):format(
             model.predicted_slot_samples,

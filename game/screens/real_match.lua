@@ -143,4 +143,8 @@ function RealMatch:draw()
     self.match:draw()
 end
 
+function RealMatch:teardown()
+    self.match:teardown()
+end
+
 return RealMatch

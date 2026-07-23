@@ -8,6 +8,8 @@
 
 local view_state = {}
 
+view_state.MAX_DISPLAY_SPEED = 480
+
 ---@class PlayerView
 ---@field px number  -- last world x
 ---@field py number  -- last world y
@@ -28,22 +30,24 @@ local CADENCE = 0.066
 
 ---@param players MatchPlayer[]
 ---@param dt number
-function view_state.update(players, dt)
+---@param pose CorrectionSmoothingPose?
+function view_state.update(players, dt, pose)
     for _, p in ipairs(players) do
+        local pos = pose and pose.players[p.id] or p.pos
         local v = state[p.id]
         if not v then
-            state[p.id] = { px = p.pos.x, py = p.pos.y, speed = 0, phase = 0, lean = 0 }
+            state[p.id] = { px = pos.x, py = pos.y, speed = 0, phase = 0, lean = 0 }
         elseif dt > 0 then
-            local vx = (p.pos.x - v.px) / dt
-            local vy = (p.pos.y - v.py) / dt
-            local sp = math.sqrt(vx * vx + vy * vy)
+            local vx = (pos.x - v.px) / dt
+            local vy = (pos.y - v.py) / dt
+            local sp = math.min(view_state.MAX_DISPLAY_SPEED, math.sqrt(vx * vx + vy * vy))
             -- Exponential smoothing so the gait doesn't strobe on jittery steps.
             local k = clamp(dt * 8, 0, 1)
             v.speed = v.speed + (sp - v.speed) * k
             v.phase = v.phase + sp * dt * CADENCE
             local target_lean = clamp(vx / 120, -1, 1)
             v.lean = v.lean + (target_lean - v.lean) * clamp(dt * 10, 0, 1)
-            v.px, v.py = p.pos.x, p.pos.y
+            v.px, v.py = pos.x, pos.y
         end
     end
 end

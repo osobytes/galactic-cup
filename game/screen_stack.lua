@@ -5,6 +5,7 @@
 ---@field update fun(self: Screen, dt: number)?
 ---@field event fun(self: Screen, evt: InputEvent)?
 ---@field draw fun(self: Screen)?
+---@field teardown fun(self: Screen)?
 
 ---@alias InputEvent ActionEvent | { kind: "key", key: string } | { kind: "click", x: number, y: number, button: number } | RawGamepadEvent
 
@@ -23,18 +24,31 @@ function ScreenStack:push(screen)
     self.screens[#self.screens + 1] = screen
 end
 
+---@param screen Screen?
+local function teardown(screen)
+    if screen and screen.teardown then
+        screen:teardown()
+    end
+end
+
 ---@param screen Screen
 function ScreenStack:replace(screen)
+    teardown(self.screens[#self.screens])
     self.screens[#self.screens] = screen
 end
 
 function ScreenStack:clear()
+    for index = #self.screens, 1, -1 do
+        teardown(self.screens[index])
+    end
     self.screens = {}
 end
 
 ---@return Screen?
 function ScreenStack:pop()
-    return table.remove(self.screens)
+    local screen = table.remove(self.screens)
+    teardown(screen)
+    return screen
 end
 
 ---@return Screen?
