@@ -378,7 +378,7 @@ function rollback_snapshot_history.first_difference(history, tick, expected)
         return nil, status
     end
     local entry = assert(history._entries[ring_index(history, tick)])
-    return match_snapshot.first_difference(expected, entry.snapshot), status
+    return match_snapshot.first_difference_canonical(expected, entry.snapshot), status
 end
 
 -- Compare retained canonical boundaries without copying them through a
@@ -412,9 +412,7 @@ function rollback_snapshot_history.compare(expected, actual, tick)
     end
     local expected_entry = assert(expected._entries[ring_index(expected, tick)])
     local actual_entry = assert(actual._entries[ring_index(actual, tick)])
-    local first_difference =
-        match_snapshot.first_difference(expected_entry.snapshot, actual_entry.snapshot)
-    if first_difference == nil then
+    if expected_entry.canonical_wire == actual_entry.canonical_wire then
         return {
             matched = true,
             expected_status = expected_status,
@@ -424,6 +422,9 @@ function rollback_snapshot_history.compare(expected, actual, tick)
             first_difference = nil,
         }
     end
+    local first_difference =
+        match_snapshot.first_difference_canonical(expected_entry.snapshot, actual_entry.snapshot)
+    assert(first_difference, "distinct canonical snapshot wires must have a difference")
     local expected_hash = assert(rollback_snapshot_history.boundary_hash(expected, tick))
     local actual_hash = assert(rollback_snapshot_history.boundary_hash(actual, tick))
     return {

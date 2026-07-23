@@ -221,6 +221,34 @@ t.describe("canonical match snapshots", function()
         t.eq(match_snapshot.hash(reordered), match_snapshot.hash(snapshot))
     end)
 
+    t.it("compares owned canonical snapshots without normalizing them again", function()
+        local left = match_snapshot.capture(new_state())
+        local right = match_snapshot.capture(new_state())
+        t.eq(match_snapshot.first_difference_canonical(left, right), nil)
+        right.state.score.home = 1
+
+        local expected = assert(match_snapshot.first_difference(left, right))
+        ---@type any
+        local snapshot_module = match_snapshot
+        local original_capture = match_snapshot.capture
+        local original_restore = match_snapshot.restore
+        snapshot_module.capture = function()
+            error("canonical comparison must not capture")
+        end
+        snapshot_module.restore = function()
+            error("canonical comparison must not restore")
+        end
+        local ok, actual = pcall(match_snapshot.first_difference_canonical, left, right)
+        snapshot_module.capture = original_capture
+        snapshot_module.restore = original_restore
+
+        assert(ok, actual)
+        local found = assert(actual)
+        t.eq(found.path, expected.path)
+        t.eq(found.expected, expected.expected)
+        t.eq(found.actual, expected.actual)
+    end)
+
     t.it("rejects unhandled state and player fields", function()
         local state = new_state()
         rawset(state, "future_match_field", 1)

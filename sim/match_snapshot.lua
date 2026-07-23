@@ -728,12 +728,10 @@ local function compare_vec(path, left, right)
     return nil
 end
 
----@param left MatchSnapshot
----@param right MatchSnapshot
+---@param a MatchSnapshot
+---@param b MatchSnapshot
 ---@return MatchSnapshotDifference?
-function match_snapshot.first_difference(left, right)
-    local a = match_snapshot.capture(match_snapshot.restore(left))
-    local b = match_snapshot.capture(match_snapshot.restore(right))
+local function first_difference_canonical(a, b)
     if a.version ~= b.version then
         return difference("version", a.version, b.version)
     end
@@ -890,6 +888,28 @@ function match_snapshot.first_difference(left, right)
         end
     end
     return nil
+end
+
+---@param left MatchSnapshot
+---@param right MatchSnapshot
+---@return MatchSnapshotDifference?
+function match_snapshot.first_difference(left, right)
+    local a = match_snapshot.capture(match_snapshot.restore(left))
+    local b = match_snapshot.capture(match_snapshot.restore(right))
+    return first_difference_canonical(a, b)
+end
+
+-- Compare snapshots already returned by capture(), or equally canonical owned
+-- copies, without repeating their full restore/capture validation pass.
+---@param left MatchSnapshot
+---@param right MatchSnapshot
+---@return MatchSnapshotDifference?
+function match_snapshot.first_difference_canonical(left, right)
+    assert(type(left) == "table", "left canonical match snapshot is required")
+    assert(type(right) == "table", "right canonical match snapshot is required")
+    assert(type(left.state) == "table", "left canonical match snapshot state is required")
+    assert(type(right.state) == "table", "right canonical match snapshot state is required")
+    return first_difference_canonical(left, right)
 end
 
 return match_snapshot
