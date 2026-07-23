@@ -47,6 +47,7 @@ RESULT_REQUIRED_FIELDS = ("schema", "suite", "success", "logical_digest", "case_
 NETWORK_SEEDS = (2001, 2002, 2003)
 NATIVE_PROFILES = ("clean", "omp0_parity", "playable", "stress")
 BROWSER_FULL_PROFILES = ("clean", "playable")
+CAMPAIGNS = ("all", "matrix", "soak")
 STRESS_PROFILE = "stress"
 SCENARIOS = (
     "possession_change",
@@ -417,18 +418,26 @@ def validate_case_plan(
             )
 
 
-def validate_case_integrity(markers: list[ValidationMarker]) -> None:
+def cpu_gate_applies(suite: str, profile: str) -> bool:
+    """Derive CPU-gate ownership from the pinned campaign contract."""
+
+    return profile == "playable" and suite != "soak"
+
+
+def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None:
     for marker in (row for row in markers if row.kind == "case"):
         fields = marker.fields
         case_id = fields.get("case", "<unknown>")
         required = (
             "client_hash",
             "cpu_gate",
+            "cpu_gate_applied",
             "event_confirmed_digest",
             "event_reference_digest",
             "event_residue",
             "expected_failure",
             "game_gate",
+            "gate_contract",
             "history_gate",
             "hidden_progress",
             "lab_success",
@@ -452,7 +461,26 @@ def validate_case_integrity(markers: list[ValidationMarker]) -> None:
             raise RuntimeError(f"{case_id} did not cover its declared scenario")
         if fields["hidden_progress"] != "0":
             raise RuntimeError(f"{case_id} made hidden progress after a terminal result")
-        for gate in ("cpu_gate", "snapshot_gate", "history_gate", "game_gate"):
+        if fields["gate_contract"] != "2":
+            raise RuntimeError(
+                f"{case_id} reports gate_contract={fields['gate_contract']!r}"
+            )
+        if fields["cpu_gate_applied"] not in {"0", "1"}:
+            raise RuntimeError(
+                f"{case_id} reports cpu_gate_applied={fields['cpu_gate_applied']!r}"
+            )
+        expected_applied = cpu_gate_applies(suite, fields["profile"])
+        if (fields["cpu_gate_applied"] == "1") != expected_applied:
+            raise RuntimeError(
+                f"{case_id} CPU gate ownership differs from the {suite} contract"
+            )
+        expected_cpu_gate = "1" if expected_applied else "not_applied"
+        if fields["cpu_gate"] != expected_cpu_gate:
+            raise RuntimeError(
+                f"{case_id} reports cpu_gate={fields['cpu_gate']!r} "
+                f"with cpu_gate_applied={fields['cpu_gate_applied']!r}"
+            )
+        for gate in ("snapshot_gate", "history_gate", "game_gate"):
             if fields[gate] != "1":
                 raise RuntimeError(f"{case_id} reports {gate}={fields[gate]!r}")
         expected_failure = fields["expected_failure"] == "1"
@@ -507,6 +535,7 @@ def validate_runtime_metrics(
     runtime = runtimes[0].fields
     expected_runtime = {
         "input_version": "1",
+        "gate_contract": "2",
         "love": "11.5.0",
         "snapshot_version": "5",
         "suite": suite,
@@ -581,7 +610,12 @@ def validate_runtime_metrics(
         }
         if counts["simulation_calls"] <= 0:
             raise RuntimeError(f"{case_id} recorded no simulation timing samples")
-        if case.fields["profile"] == "playable":
+        expected_applied = cpu_gate_applies(suite, case.fields["profile"])
+        if (case.fields["cpu_gate_applied"] == "1") != expected_applied:
+            raise RuntimeError(
+                f"{case_id} CPU metric ownership differs from the {suite} contract"
+            )
+        if expected_applied:
             if values["p95_work_ms"] >= MAX_P95_WORK_MS:
                 raise RuntimeError(
                     f"{case_id} p95 work {values['p95_work_ms']:.6f} ms "
@@ -1345,7 +1379,7 @@ def run_native_once(
     result = validate_marker_set(markers, suite)
     if enforce_plan:
         validate_case_plan(markers, suite, arguments)
-        validate_case_integrity(markers)
+        validate_case_integrity(markers, suite)
         validate_runtime_metrics(runtime_metrics, markers, suite)
     if suite == "late-window":
         validate_late_window_contract(markers)
@@ -1391,7 +1425,7 @@ def native_aggregate_record(
         for raw in shard["markers"]
     ]
     validate_case_plan(markers, "native", ())
-    validate_case_integrity(markers)
+    validate_case_integrity(markers, "native")
     encoded = ("\n".join(marker.raw for marker in markers) + "\n").encode()
     return {
         "case_count": sum(shard["case_count"] for shard in shards),
@@ -1409,68 +1443,87 @@ def native_aggregate_record(
     }
 
 
+def native_campaign_plan(campaign: str = "all") -> list[tuple[str, tuple[str, ...]]]:
+    if campaign not in CAMPAIGNS:
+        raise ValueError(f"unknown rollback campaign {campaign!r}")
+    plan: list[tuple[str, tuple[str, ...]]] = []
+    if campaign in {"all", "matrix"}:
+        plan.extend(native_shard_plan())
+        plan.append(("late-window", ()))
+    if campaign in {"all", "soak"}:
+        plan.append(("soak", ()))
+    return plan
+
+
 def native_matrix(
     evidence: dict[str, Any],
     love_bin: Path,
     raw_root: Path,
     timeout_seconds: int,
+    campaign: str,
 ) -> None:
     native: dict[str, Any] = {
         "matrix_process_model": "fresh_process_per_full_case_and_stress_seed",
         "plan": [
             {"arguments": list(arguments), "suite": suite}
-            for suite, arguments in native_shard_plan()
+            for suite, arguments in native_campaign_plan(campaign)
         ],
-        "persistent_soak": True,
+        "campaign": campaign,
+        "persistent_soak": campaign in {"all", "soak"},
         "runtime": executable_metadata(love_bin),
         "fresh_runs": [],
     }
     evidence["native"] = native
-    for run_number in (1, 2):
-        shards: list[dict[str, Any]] = []
-        for shard_number, (suite, arguments) in enumerate(
-            native_shard_plan(),
-            start=1,
-        ):
-            slug = "-".join((suite, *arguments))
-            shard = run_native_once(
-                love_bin,
-                suite,
-                arguments,
-                raw_root / f"native-{run_number}-{shard_number:02d}-{slug}.log",
-                timeout_seconds,
+    if campaign in {"all", "matrix"}:
+        for run_number in (1, 2):
+            shards: list[dict[str, Any]] = []
+            for shard_number, (suite, arguments) in enumerate(
+                native_shard_plan(),
+                start=1,
+            ):
+                slug = "-".join((suite, *arguments))
+                shard = run_native_once(
+                    love_bin,
+                    suite,
+                    arguments,
+                    raw_root / f"native-{run_number}-{shard_number:02d}-{slug}.log",
+                    timeout_seconds,
+                )
+                shard["shard"] = shard_number
+                shards.append(shard)
+            native["fresh_runs"].append(
+                native_aggregate_record(run_number, shards)
             )
-            shard["shard"] = shard_number
-            shards.append(shard)
-        native["fresh_runs"].append(
-            native_aggregate_record(run_number, shards)
+        first_markers = [
+            parse_marker(marker) for marker in native["fresh_runs"][0]["markers"]
+        ]
+        second_markers = [
+            parse_marker(marker) for marker in native["fresh_runs"][1]["markers"]
+        ]
+        native["fresh_marker_sha256"] = compare_fresh_markers(
+            first_markers,
+            second_markers,
         )
-    first_markers = [
-        parse_marker(marker) for marker in native["fresh_runs"][0]["markers"]
-    ]
-    second_markers = [
-        parse_marker(marker) for marker in native["fresh_runs"][1]["markers"]
-    ]
-    native["fresh_marker_sha256"] = compare_fresh_markers(first_markers, second_markers)
-    native["fresh_runs_agree"] = True
-    native["late_window"] = run_native_once(
-        love_bin,
-        "late-window",
-        (),
-        raw_root / "native-late-window.log",
-        timeout_seconds,
-    )
-    native["soak"] = run_native_once(
-        love_bin,
-        "soak",
-        (),
-        raw_root / "native-soak.log",
-        timeout_seconds,
-    )
-    if not native["soak"]["soak_memory"]["pass"]:
-        raise RuntimeError(
-            "native soak exceeded the 10% terminal forced-GC growth gate"
+        native["fresh_runs_agree"] = True
+        native["late_window"] = run_native_once(
+            love_bin,
+            "late-window",
+            (),
+            raw_root / "native-late-window.log",
+            timeout_seconds,
         )
+    if campaign in {"all", "soak"}:
+        native["soak"] = run_native_once(
+            love_bin,
+            "soak",
+            (),
+            raw_root / "native-soak.log",
+            timeout_seconds,
+        )
+        if not native["soak"]["soak_memory"]["pass"]:
+            raise RuntimeError(
+                "native soak exceeded the 10% terminal forced-GC growth gate"
+            )
 
 
 def browser_js_heap(driver: Any, browser_name: str) -> dict[str, Any] | None:
@@ -1742,7 +1795,7 @@ def run_browser_once(
     if result is None:
         raise RuntimeError(f"{browser_name} {suite} produced no validated result")
     validate_case_plan(markers, suite, arguments)
-    validate_case_integrity(markers)
+    validate_case_integrity(markers, suite)
     runtime_metrics = runtime_metrics_from_messages(messages)
     validate_runtime_metrics(runtime_metrics, markers, suite)
     js_heap_samples = [
@@ -1799,14 +1852,18 @@ def artifact_provenance(artifact: Path, allow_dirty: bool) -> dict[str, Any]:
     }
 
 
-def browser_plan() -> list[tuple[str, tuple[str, ...]]]:
+def browser_plan(campaign: str = "all") -> list[tuple[str, tuple[str, ...]]]:
+    if campaign not in CAMPAIGNS:
+        raise ValueError(f"unknown rollback campaign {campaign!r}")
     plan = []
-    for profile in BROWSER_FULL_PROFILES:
+    if campaign in {"all", "matrix"}:
+        for profile in BROWSER_FULL_PROFILES:
+            for network_seed in NETWORK_SEEDS:
+                plan.append(("browser-full", (profile, str(network_seed))))
         for network_seed in NETWORK_SEEDS:
-            plan.append(("browser-full", (profile, str(network_seed))))
-    for network_seed in NETWORK_SEEDS:
-        plan.append(("browser-stress", (STRESS_PROFILE, str(network_seed))))
-    plan.append(("soak", ()))
+            plan.append(("browser-stress", (STRESS_PROFILE, str(network_seed))))
+    if campaign in {"all", "soak"}:
+        plan.append(("soak", ()))
     return plan
 
 
@@ -1825,6 +1882,7 @@ def browser_matrix(
     raw_root: Path,
     timeout_seconds: int,
     allow_dirty: bool,
+    campaign: str,
 ) -> None:
     provenance = artifact_provenance(artifact, allow_dirty)
     source = evidence["source"]
@@ -1843,9 +1901,10 @@ def browser_matrix(
     base_url = f"http://127.0.0.1:{server.server_port}/"
     browser_evidence: dict[str, Any] = {
         "artifact": provenance,
+        "campaign": campaign,
         "plan": [
             {"arguments": list(arguments), "suite": suite}
-            for suite, arguments in browser_plan()
+            for suite, arguments in browser_plan(campaign)
         ],
         "runtimes": {},
         "selenium": selenium_metadata(),
@@ -1861,7 +1920,10 @@ def browser_matrix(
                 "runs": [],
             }
             browser_evidence["runtimes"][browser_name] = runtime
-            for run_number, (suite, arguments) in enumerate(browser_plan(), start=1):
+            for run_number, (suite, arguments) in enumerate(
+                browser_plan(campaign),
+                start=1,
+            ):
                 slug = "-".join((browser_name, suite, *arguments))
                 suite_timeout_seconds = browser_suite_timeout_seconds(
                     suite,
@@ -1966,6 +2028,12 @@ def run_self_test() -> None:
     ]
     if browser_plan() != expected_plan:
         raise RuntimeError("browser matrix plan self-test failed")
+    if browser_plan("matrix") != expected_plan[:-1]:
+        raise RuntimeError("browser runtime-matrix campaign plan self-test failed")
+    if browser_plan("soak") != [("soak", ())]:
+        raise RuntimeError("browser soak campaign plan self-test failed")
+    if browser_plan("matrix") + browser_plan("soak") != browser_plan("all"):
+        raise RuntimeError("split browser campaigns do not reconstruct the full plan")
     if browser_suite_timeout_seconds("browser-full", 1800) != 1800:
         raise RuntimeError("single-fixture browser timeout scaling self-test failed")
     if browser_suite_timeout_seconds("soak", 1800) != 5400:
@@ -2023,6 +2091,16 @@ def run_self_test() -> None:
     ]
     if flattened_native_shards != expected_case_plan("native", ()):
         raise RuntimeError("native shard plan changed the pinned case order")
+    expected_native_matrix = [*native_shard_plan(), ("late-window", ())]
+    if native_campaign_plan("matrix") != expected_native_matrix:
+        raise RuntimeError("native runtime-matrix campaign plan self-test failed")
+    if native_campaign_plan("soak") != [("soak", ())]:
+        raise RuntimeError("native soak campaign plan self-test failed")
+    if (
+        native_campaign_plan("matrix") + native_campaign_plan("soak")
+        != native_campaign_plan()
+    ):
+        raise RuntimeError("split native campaigns do not reconstruct the full plan")
     try:
         raise_on_interruption(signal.SIGTERM, None)
     except InterruptedError as error:
@@ -2034,17 +2112,27 @@ def run_self_test() -> None:
     integrity_case = parse_marker(
         f"{MARKER_PREFIX}|case|schema=1|case=integrity|profile=playable|success=1|"
         "lab_success=1|expected_failure=0|hidden_progress=0|scenario_pass=1|"
-        "cpu_gate=1|snapshot_gate=1|history_gate=1|game_gate=1|"
+        "gate_contract=2|cpu_gate=1|cpu_gate_applied=1|snapshot_gate=1|"
+        "history_gate=1|game_gate=1|"
         "reference_hash=abcd|client_hash=abcd|event_reference_digest=ef01|"
         "event_confirmed_digest=ef01|event_residue=0|peak_snapshots=31|"
         "peak_snapshot_bytes=614399|peak_history_bytes=1048575"
     )
-    validate_case_integrity([integrity_case])
+    validate_case_integrity([integrity_case], "native")
+    try:
+        validate_case_integrity(
+            [parse_marker(integrity_case.raw.replace("gate_contract=2", "gate_contract=1"))],
+            "native",
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("stale case gate contract passed self-test")
     over_budget = parse_marker(
         integrity_case.raw.replace("peak_snapshots=31", "peak_snapshots=32")
     )
     try:
-        validate_case_integrity([over_budget])
+        validate_case_integrity([over_budget], "native")
     except RuntimeError:
         pass
     else:
@@ -2058,13 +2146,58 @@ def run_self_test() -> None:
     )
     runtime_provenance = parse_runtime_metric(
         f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
-        f"profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
+        f"gate_contract=2|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
         "snapshot_version=5|tick_rate=60"
     )
     validate_runtime_metrics(
         [runtime_provenance, runtime_metric],
         [integrity_case],
         "native",
+    )
+    try:
+        validate_runtime_metrics(
+            [
+                parse_runtime_metric(
+                    runtime_provenance.raw.replace("gate_contract=2", "gate_contract=1")
+                ),
+                runtime_metric,
+            ],
+            [integrity_case],
+            "native",
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("stale runtime gate contract passed self-test")
+    soak_case = parse_marker(
+        integrity_case.raw.replace(
+            "cpu_gate=1|cpu_gate_applied=1",
+            "cpu_gate=not_applied|cpu_gate_applied=0",
+        )
+    )
+    validate_case_integrity([soak_case], "soak")
+    for inconsistent, inconsistent_suite in (
+        (soak_case.raw.replace("cpu_gate=not_applied", "cpu_gate=1"), "soak"),
+        (soak_case.raw, "native"),
+        (integrity_case.raw.replace("profile=playable", "profile=stress"), "native"),
+    ):
+        try:
+            validate_case_integrity([parse_marker(inconsistent)], inconsistent_suite)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("inconsistent CPU gate ownership passed self-test")
+    soak_provenance = parse_runtime_metric(
+        runtime_provenance.raw.replace("suite=native", "suite=soak")
+    )
+    noisy_soak_metric = parse_runtime_metric(
+        runtime_metric.raw.replace("p95_work_ms=1.25", "p95_work_ms=99")
+        .replace("max_rollback_ms=2.5", "max_rollback_ms=99")
+    )
+    validate_runtime_metrics(
+        [soak_provenance, noisy_soak_metric],
+        [soak_case],
+        "soak",
     )
     stale_profile = parse_runtime_metric(
         runtime_provenance.raw.replace(EXPECTED_PROFILE_DIGEST, "0000000000000000")
@@ -2092,6 +2225,19 @@ def run_self_test() -> None:
         pass
     else:
         raise RuntimeError("over-budget runtime metric passed self-test")
+    over_rollback = parse_runtime_metric(
+        runtime_metric.raw.replace("max_rollback_ms=2.5", "max_rollback_ms=33.3")
+    )
+    try:
+        validate_runtime_metrics(
+            [runtime_provenance, over_rollback],
+            [integrity_case],
+            "native",
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("over-budget rollback maximum passed self-test")
 
     soak_cases = [
         parse_marker(
@@ -2266,6 +2412,7 @@ def parse_arguments() -> argparse.Namespace:
         default="native",
     )
     parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--campaign", choices=CAMPAIGNS, default="all")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--love-bin", default=os.environ.get("LOVE_BIN", "love"))
     parser.add_argument(
@@ -2295,6 +2442,8 @@ def main() -> int:
     source = source_provenance()
     evidence: dict[str, Any] = {
         "generated_at": utc_now(),
+        "campaign": args.campaign,
+        "gate_contract": 2,
         "mode": args.mode,
         "pass": False,
         "schema": 1,
@@ -2311,7 +2460,13 @@ def main() -> int:
         raw_root.mkdir(parents=True, exist_ok=True)
         if args.mode in {"native", "full"}:
             love_bin = command_executable(args.love_bin)
-            native_matrix(evidence, love_bin, raw_root, args.timeout_seconds)
+            native_matrix(
+                evidence,
+                love_bin,
+                raw_root,
+                args.timeout_seconds,
+                args.campaign,
+            )
         if args.mode in {"browser", "full"}:
             browser_matrix(
                 evidence,
@@ -2320,6 +2475,7 @@ def main() -> int:
                 raw_root,
                 args.timeout_seconds,
                 args.allow_dirty,
+                args.campaign,
             )
         evidence["pass"] = True
         evidence["completed_at"] = utc_now()

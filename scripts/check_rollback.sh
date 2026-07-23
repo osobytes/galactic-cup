@@ -12,7 +12,8 @@ forward=()
 usage() {
     printf '%s\n' \
         "Usage: $0 [--native|--browser|--full] [--artifact DIR] [--output FILE]" \
-        "          [--runtime-browser chrome|firefox] [--allow-dirty] [--self-test]" \
+        "          [--runtime-browser chrome|firefox] [--campaign all|matrix|soak]" \
+        "          [--allow-dirty] [--self-test]" \
         "          [rollback_validation.py options]"
 }
 

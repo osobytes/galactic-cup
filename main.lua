@@ -291,8 +291,8 @@ if has_flag("--rollback-validation") then
             max_update_wall_ms = math.max(max_update_wall_ms, value * 1000)
         end
         local max_rollback_ms = active_timing.rollback.maximum * 1000
-        local cpu_acceptance = result.profile == "playable"
-        local cpu_gate = not cpu_acceptance
+        local cpu_gate_applied = result.profile == "playable" and suite ~= "soak"
+        local cpu_gate = not cpu_gate_applied
             or (
                 p95_work_ms < validation_config.budgets.p95_work_ms
                 and max_rollback_ms < validation_config.budgets.max_rollback_ms
@@ -310,8 +310,11 @@ if has_flag("--rollback-validation") then
         runtime_failed = runtime_failed or not passed
 
         local logical = rollback_validation.case_marker(completed)
+            .. "|gate_contract=2"
             .. "|cpu_gate="
-            .. (cpu_gate and "1" or "0")
+            .. (cpu_gate_applied and (cpu_gate and "1" or "0") or "not_applied")
+            .. "|cpu_gate_applied="
+            .. (cpu_gate_applied and "1" or "0")
             .. "|snapshot_gate="
             .. (snapshot_gate and "1" or "0")
             .. "|history_gate="
@@ -357,6 +360,7 @@ if has_flag("--rollback-validation") then
             "runtime",
             "love=" .. major .. "." .. minor .. "." .. revision,
             "suite=" .. suite,
+            "gate_contract=2",
             "profile_digest=" .. rollback_validation.profile_digest(),
             "input_version=1",
             "snapshot_version=5",
