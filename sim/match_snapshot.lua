@@ -509,9 +509,49 @@ function match_snapshot.number_bytes(number)
     return sign .. ":" .. tostring(exponent) .. ":" .. tostring(high) .. ":" .. tostring(low)
 end
 
+---@param value integer
+---@return integer
+local function unsigned_decimal_bytes(value)
+    local bytes = 1
+    while value >= 10 do
+        value = math.floor(value / 10)
+        bytes = bytes + 1
+    end
+    return bytes
+end
+
+---@param value integer
+---@return integer
+local function integer_decimal_bytes(value)
+    if value < 0 then
+        return unsigned_decimal_bytes(-value) + 1
+    end
+    return unsigned_decimal_bytes(value)
+end
+
+---@param number number
+---@return integer
+local function number_payload_bytes(number)
+    assert(is_finite_number(number), "canonical numbers must be finite")
+    if number == 0 then
+        return 1
+    end
+    local mantissa, exponent = math.frexp(math.abs(number))
+    ---@cast exponent integer
+    local high = math.floor(mantissa * 67108864)
+    local low = math.floor((mantissa * 67108864 - high) * 134217728 + 0.5)
+    return 4
+        + integer_decimal_bytes(exponent)
+        + unsigned_decimal_bytes(high)
+        + unsigned_decimal_bytes(low)
+end
+
 ---@class MatchSnapshotEncoder
 ---@field parts string[]?
 ---@field bytes integer
+
+---@type table<string, string>
+local NAME_WIRES = {}
 
 ---@param encoder MatchSnapshotEncoder
 ---@param value string
@@ -532,18 +572,22 @@ local function append_scalar(encoder, value)
     elseif kind == "boolean" then
         append_literal(encoder, value and "b1;" or "b0;")
     elseif kind == "number" then
-        local payload = match_snapshot.number_bytes(value)
-        encoder.bytes = encoder.bytes + #payload + 2
         local parts = encoder.parts
         if parts then
+            local payload = match_snapshot.number_bytes(value)
+            encoder.bytes = encoder.bytes + #payload + 2
             parts[#parts + 1] = "n" .. payload .. ";"
+        else
+            encoder.bytes = encoder.bytes + number_payload_bytes(value) + 2
         end
     elseif kind == "string" then
-        local length = tostring(#value)
-        encoder.bytes = encoder.bytes + #length + #value + 3
         local parts = encoder.parts
         if parts then
+            local length = tostring(#value)
+            encoder.bytes = encoder.bytes + #length + #value + 3
             parts[#parts + 1] = "s" .. length .. ":" .. value .. ";"
+        else
+            encoder.bytes = encoder.bytes + unsigned_decimal_bytes(#value) + #value + 3
         end
     else
         assert(false, "unsupported canonical scalar")
@@ -553,12 +597,12 @@ end
 ---@param encoder MatchSnapshotEncoder
 ---@param name string
 local function append_name(encoder, name)
-    local length = tostring(#name)
-    encoder.bytes = encoder.bytes + #length + #name + 3
-    local parts = encoder.parts
-    if parts then
-        parts[#parts + 1] = "k" .. length .. ":" .. name .. ";"
+    local wire = NAME_WIRES[name]
+    if wire == nil then
+        wire = "k" .. tostring(#name) .. ":" .. name .. ";"
+        NAME_WIRES[name] = wire
     end
+    append_literal(encoder, wire)
 end
 
 ---@param encoder MatchSnapshotEncoder
