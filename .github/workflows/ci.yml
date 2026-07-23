@@ -14,6 +14,84 @@ concurrency:
     cancel-in-progress: true
 
 jobs:
+    rollback_scope:
+        name: OMP-2 rollback impact filter
+        runs-on: ubuntu-24.04
+        outputs:
+            run: ${{ steps.scope.outputs.run }}
+
+        steps:
+            - name: Check out source history
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  fetch-depth: 0
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+            - name: Detect rollback-impacting changes
+              id: scope
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  EVENT_BEFORE: ${{ github.event.before }}
+                  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                  rollback_paths=(
+                      .github/workflows/ci.yml
+                      conf.lua
+                      main.lua
+                      core
+                      data
+                      game
+                      sim
+                      scripts/browser_determinism.py
+                      scripts/browser_matrix.py
+                      scripts/browser_matrix-requirements.txt
+                      scripts/browser_storage_host.js
+                      scripts/check_rollback.sh
+                      scripts/rollback_validation.py
+                      scripts/web_build.py
+                      scripts/web_build.sh
+                      scripts/web_serve.py
+                      scripts/webrtc_proof_host.js
+                      scripts/webrtc_proof_runner.js
+                      scripts/webrtc_proof_suite.js
+                  )
+
+                  run=true
+                  range=""
+                  if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+                      if [ "$EVENT_NAME" = "pull_request" ]; then
+                          base="$PR_BASE_SHA"
+                          range="$base...HEAD"
+                      else
+                          base="$EVENT_BEFORE"
+                          range="$base..HEAD"
+                      fi
+
+                      if [ -n "$base" ] && ! [[ "$base" =~ ^0+$ ]] && \
+                          git cat-file -e "$base^{commit}" 2>/dev/null; then
+                          if git diff --quiet "$range" -- "${rollback_paths[@]}"; then
+                              run=false
+                          else
+                              status=$?
+                              if [ "$status" -gt 1 ]; then
+                                  echo "Change comparison failed; running rollback gates."
+                                  range=""
+                              fi
+                          fi
+                      else
+                          echo "Comparison commit unavailable; running rollback gates."
+                          range=""
+                      fi
+                  fi
+
+                  echo "run=$run" >> "$GITHUB_OUTPUT"
+                  echo "rollback_scope=$run range=${range:-manual}"
+                  if [ "$run" = "true" ] && [ -n "$range" ]; then
+                      if ! git diff --name-only "$range" -- "${rollback_paths[@]}"; then
+                          echo "Changed-path reporting failed after a fail-open decision."
+                      fi
+                  fi
+
     quality:
         name: Lua quality gate
         runs-on: ubuntu-24.04
@@ -137,6 +215,8 @@ jobs:
 
     rollback_native:
         name: OMP-2 rollback native
+        needs: rollback_scope
+        if: needs.rollback_scope.outputs.run == 'true'
         runs-on: ubuntu-24.04
         timeout-minutes: 180
 
@@ -186,6 +266,8 @@ jobs:
 
     rollback_browser:
         name: OMP-2 rollback browser (${{ matrix.browser }})
+        needs: rollback_scope
+        if: needs.rollback_scope.outputs.run == 'true'
         runs-on: ubuntu-24.04
         timeout-minutes: 180
         strategy:
@@ -235,3 +317,31 @@ jobs:
                       ${{ runner.temp }}/omp2-rollback-${{ matrix.browser }}-raw
                   if-no-files-found: error
                   retention-days: 14
+
+    rollback_gate:
+        name: OMP-2 rollback gate
+        needs: [rollback_scope, rollback_native, rollback_browser]
+        if: always()
+        runs-on: ubuntu-24.04
+
+        steps:
+            - name: Require scoped rollback evidence
+              env:
+                  BROWSER_RESULT: ${{ needs.rollback_browser.result }}
+                  NATIVE_RESULT: ${{ needs.rollback_native.result }}
+                  RUN_ROLLBACK: ${{ needs.rollback_scope.outputs.run }}
+                  SCOPE_RESULT: ${{ needs.rollback_scope.result }}
+              run: |
+                  if [ "$SCOPE_RESULT" != "success" ]; then
+                      echo "Rollback impact detection did not succeed."
+                      exit 1
+                  fi
+                  if [ "$RUN_ROLLBACK" = "false" ]; then
+                      echo "No rollback-impacting changes; long evidence jobs were skipped."
+                      exit 0
+                  fi
+                  if [ "$NATIVE_RESULT" != "success" ] || [ "$BROWSER_RESULT" != "success" ]; then
+                      echo "Rollback evidence failed: native=$NATIVE_RESULT browser=$BROWSER_RESULT"
+                      exit 1
+                  fi
+                  echo "Native, Chrome, and Firefox rollback evidence passed."

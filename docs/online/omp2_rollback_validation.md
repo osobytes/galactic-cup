@@ -149,8 +149,17 @@ The complete browser campaign uses a pinned love.js artifact and Selenium assets
     --output /tmp/omp2-rollback-browser.json
 ```
 
-CI runs native, Chrome, and Firefox as distinct required jobs from the exact pull-request head and
-uploads normalized JSON plus raw logs. Evidence records source and artifact hashes,
+CI runs native, Chrome, and Firefox as distinct evidence jobs from the exact pull-request head and
+uploads normalized JSON plus raw logs. Pull requests run those long jobs only when their
+cumulative diff touches the workflow, runtime entry points, `core/`, `data/`, `game/`, `sim/`, or
+the rollback/browser build and validation scripts. Manual workflow dispatches always run them,
+and missing or invalid comparison history fails open by running them. A stable
+`OMP-2 rollback gate` job succeeds immediately for an unaffected change or requires all three
+evidence jobs for an affected change, so a required-check policy never depends on a skipped
+matrix job. The ordinary quality, browser artifact smoke, and OMP-1 browser determinism jobs
+remain unconditional.
+
+Evidence records source and artifact hashes,
 executable/browser/driver identity, profile/tape hashes, every logical marker, timing totals and
 percentiles, retained-byte breakdowns, memory checkpoints, and bounded teardown/orphan status.
 Browser teardown combines descendant tracking with a pre-launch/post-run executable census so an
