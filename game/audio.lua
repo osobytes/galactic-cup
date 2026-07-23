@@ -1,7 +1,7 @@
 -- Synthesized audio for the match screen. All SFX are generated at load time
 -- from mathematical waveforms — no asset files. Each SFX is ≤ 0.4 s at 22050 Hz
--- mono. Event-driven playback consumes state.events every frame; the crowd bed
--- is a continuous loop at low volume.
+-- mono. Offline playback keeps the state-event adapter; rollback playback
+-- consumes confirmed stable events. The crowd bed is a continuous low loop.
 --
 -- HEADLESS CONTRACT: conf.lua disables t.modules.audio and t.modules.sound in
 -- test mode, making love.audio and love.sound nil. Every function in this module
@@ -56,6 +56,10 @@ local _prev_finished = false
 local _prev_time_left = -1
 local _crowd_swell_t = 0.0 -- countdown for crowd swell (seconds remaining)
 local CROWD_SWELL_DUR = 3.0
+---@type table<string, boolean>
+local _confirmed_ids = {}
+---@type table<string, integer>
+local _confirmed_cues = {}
 
 ---@return number
 local function sfx_volume()
@@ -384,6 +388,66 @@ local function play(name)
     clone:play()
 end
 
+---@param name string
+local function count_confirmed_cue(name)
+    _confirmed_cues[name] = (_confirmed_cues[name] or 0) + 1
+end
+
+local function start_goal_swell()
+    _crowd_swell_t = CROWD_SWELL_DUR
+    if _crowd_src and not _muted then
+        _crowd_src:setVolume(goal_swell_volume())
+    end
+end
+
+-- Consume one stable event only after its rollback step is confirmed. Event
+-- identity, rather than mutable score/time edges, is the deduplication key.
+---@param event RollbackWrappedEvent
+---@return boolean consumed
+function audio.consume_confirmed(event)
+    assert(
+        type(event) == "table" and type(event.id) == "string",
+        "confirmed audio event is invalid"
+    )
+    if _confirmed_ids[event.id] then
+        return false
+    end
+    _confirmed_ids[event.id] = true
+
+    local name = nil
+    if event.domain:sub(1, 6) == "match/" then
+        local kind = event.payload.kind
+        if CUE_GAIN[kind] then
+            name = kind
+        end
+    elseif event.domain == "lifecycle/goal" then
+        name = "goal"
+    elseif event.domain == "lifecycle/kickoff" then
+        name = "kickoff"
+    elseif event.domain == "lifecycle/full_time" then
+        name = "full_time"
+    end
+    if name == nil then
+        return true
+    end
+
+    count_confirmed_cue(name)
+    play(name)
+    if name == "goal" then
+        start_goal_swell()
+    end
+    return true
+end
+
+---@return table<string, integer>
+function audio.confirmed_cue_counts()
+    local result = {}
+    for name, count in pairs(_confirmed_cues) do
+        result[name] = count
+    end
+    return result
+end
+
 --- Advance continuous ambience without consuming or replaying match events.
 ---@param dt number
 function audio.tick(dt)
@@ -443,10 +507,7 @@ function audio.consume(state)
 
     if scored then
         play("goal")
-        _crowd_swell_t = CROWD_SWELL_DUR
-        if _crowd_src and not _muted then
-            _crowd_src:setVolume(goal_swell_volume())
-        end
+        start_goal_swell()
     end
 
     if state.finished and not _prev_finished then
@@ -478,6 +539,8 @@ function audio.reset()
     _crowd_swell_t = 0
     _prev_time_left = -1
     _prev_finished = false
+    _confirmed_ids = {}
+    _confirmed_cues = {}
 
     if not love.audio or not love.sound then
         return

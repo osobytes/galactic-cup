@@ -32,10 +32,34 @@ Corrected outputs replace the complete speculative stable-event tail before
 new outputs are appended. Confirmation runs after corrections and again after
 catch-up, which frees the oldest event slot at the exact 30-tick supported
 edge. Each render update aggregates every output, event diff, confirmed step,
-and correction rather than retaining only its last fixed tick. These copied
-batches are a seam for the presentation reconciliation work; the current
-legacy replay, effects, event audio, goal celebration, and observer paths do
-not consume speculative rollback state.
+and correction rather than retaining only its last fixed tick.
+
+Presentation consumes those copied batches under one policy:
+
+- short-lived action particles may appear speculatively only while keyed by
+  stable event ID; revoke and replace deltas remove the old keyed particles;
+- a correction clears the renderer-owned loose-ball trail before sampling the
+  corrected displayed state;
+- audio, statistics, goal celebration/replay, kickoff, full time, and result
+  completion consume newly confirmed steps only and deduplicate stable IDs;
+- a screen-owned confirmed-lifecycle ledger gates all audio, replay, banner,
+  full-time, and result side effects, so a duplicate record cannot restart a
+  cue or presentation beat;
+- replay frames are keyed by simulation boundary. A correction truncates the
+  obsolete interval and records corrected retained snapshots at the same keys;
+- a confirmed goal starts its replay at the corrected pre-goal boundary, even
+  if newer live boundaries already exist;
+- renderer-owned celebration/replay continues after the rollback simulation
+  reaches a terminal status. Full-time result navigation waits until that
+  sequence finishes or the player explicitly skips it;
+- the legacy non-rollback match keeps its state/event adapter, so product and
+  offline behavior remain unchanged.
+
+Renderer-owned presentation state never feeds simulation or reference
+authority. A confirmed event remains published exactly once even when newer
+unconfirmed ticks later roll back. The opening kickoff remains the trusted
+match-start beat: the legacy reset path plays it immediately, before any
+rollback-confirmed post-goal lifecycle events exist.
 
 Reference full time ends match-input production. Later fixed updates advance
 transport only: they resend the retained final remote rows, poll, reconcile,

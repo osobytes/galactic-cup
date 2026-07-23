@@ -35,6 +35,7 @@ local FIELD_H = 540
 ---@field settlement_ticks integer?
 ---@field duration number?
 ---@field max_goals integer?
+---@field initial_snapshot MatchSnapshot? -- Optional canonical development fixture seam.
 
 ---@class MatchScreenOptions
 ---@field formation string?
@@ -76,6 +77,9 @@ local FIELD_H = 540
 ---@field _rollback_event_diffs RollbackEventDiff[]
 ---@field _rollback_confirmed_steps RollbackEventStep[]
 ---@field _rollback_corrections RollbackPlayableCorrection[]
+---@field _presentation_full_time boolean
+---@field _pending_confirmed_kickoff boolean
+---@field _confirmed_lifecycle_ids table<string, boolean>
 local Match = {}
 Match.__index = Match
 
@@ -94,6 +98,132 @@ end
 local function append_values(target, source)
     for _, value in ipairs(source) do
         target[#target + 1] = value
+    end
+end
+
+---@param self MatchScreen
+local function reconcile_rollback_replay(self)
+    local lab = assert(self._rollback_lab)
+    local first_boundary = nil
+    for _, correction in ipairs(self._rollback_corrections) do
+        first_boundary = first_boundary and math.min(first_boundary, correction.replaced_from_tick)
+            or correction.replaced_from_tick
+    end
+    if first_boundary then
+        replay.truncate_from(first_boundary)
+        effects.reset_trail()
+    end
+    for _, output in ipairs(self._rollback_outputs) do
+        first_boundary = first_boundary and math.min(first_boundary, output.start_boundary)
+            or output.start_boundary
+    end
+    if first_boundary == nil then
+        return
+    end
+    for boundary = first_boundary, self.state.input_tick do
+        local lookup = rollback_playable_lab.snapshot(lab, boundary)
+        if lookup.status == "present" or lookup.status == "retained" then
+            replay.record_boundary(
+                boundary,
+                match_snapshot.restore(assert(lookup.snapshot, "replay snapshot is missing"))
+            )
+        end
+    end
+end
+
+---@param self MatchScreen
+local function finish_replay(self)
+    replay.stop()
+    self._replay_state = nil
+    effects.reset_visuals()
+    view_state.reset()
+    view_state.update(self.state.players, 0)
+    if self._pending_confirmed_kickoff and not self._presentation_full_time then
+        self._kickoff_banner = 1.15
+    end
+    self._pending_confirmed_kickoff = false
+end
+
+---@param self MatchScreen
+---@param dt number
+---@return boolean was_active
+local function advance_rollback_replay(self, dt)
+    if self._rollback_lab == nil or not replay.active() then
+        return false
+    end
+    self._replay_state = replay.step(dt)
+    if self._replay_state then
+        view_state.update(self._replay_state.players, dt)
+    else
+        finish_replay(self)
+    end
+    return true
+end
+
+-- Consume one confirmed lifecycle record exactly once. The screen-owned ledger
+-- gates every associated side effect; audio deduplication is a second guard,
+-- not the authority that decides whether replay/HUD/result state may restart.
+---@param event RollbackWrappedLifecycleEvent
+---@return boolean consumed
+function Match:consume_confirmed_lifecycle(event)
+    if self._confirmed_lifecycle_ids[event.id] then
+        return false
+    end
+    self._confirmed_lifecycle_ids[event.id] = true
+    audio.consume_confirmed(event)
+    local payload = event.payload
+    if payload.kind == "goal" then
+        local scoring_team = assert(payload.team, "confirmed goal is missing its scoring team")
+        self._last_scoring_team = scoring_team
+        if replay.start_at(scoring_team, event.tick) then
+            effects.reset()
+            view_state.reset()
+            self._replay_state = nil
+        end
+    elseif payload.kind == "kickoff" then
+        self._pending_confirmed_kickoff = true
+        if not replay.active() and not self._presentation_full_time then
+            self._kickoff_banner = 1.15
+            self._pending_confirmed_kickoff = false
+        end
+    elseif payload.kind == "full_time" then
+        self._presentation_full_time = true
+        self._pending_confirmed_kickoff = false
+    end
+    return true
+end
+
+-- Route rollback action deltas through the currently drawn timeline. Live
+-- effects are consumed reversibly but never spawned over confirmed past
+-- footage.
+---@param diff RollbackEventDiff
+---@return boolean presented
+function Match:consume_rollback_event_diff(diff)
+    if self._rollback_lab ~= nil and replay.active() then
+        effects.discard_event_diff(diff)
+        return false
+    end
+    effects.apply_event_diff(diff)
+    return true
+end
+
+---@param self MatchScreen
+local function consume_rollback_presentation(self)
+    for _, diff in ipairs(self._rollback_event_diffs) do
+        self:consume_rollback_event_diff(diff)
+    end
+    for _, step in ipairs(self._rollback_confirmed_steps) do
+        for _, event in ipairs(step.match_events) do
+            effects.confirm_event(event.id)
+            audio.consume_confirmed(event)
+        end
+        for _, event in ipairs(step.lifecycle_events) do
+            self:consume_confirmed_lifecycle(event)
+        end
+    end
+    if self._pending_confirmed_kickoff and not replay.active() then
+        self._kickoff_banner = 1.15
+        self._pending_confirmed_kickoff = false
     end
 end
 
@@ -128,17 +258,20 @@ function Match:restart()
     local away = self._opts.away or teams.orion
     local rollback_options = self._opts.rollback_lab
     local ownership = rollback_options and sim_match.ownership_for_teams(home, away) or nil
-    local initial = sim_match.new({
-        home = home,
-        away = away,
-        field = { w = FIELD_W, h = FIELD_H },
-        home_formation = self._opts.formation,
-        tactic = self._opts.tactic and tactics[self._opts.tactic] or nil,
-        seed = self._opts.seed,
-        duration = rollback_options and rollback_options.duration or nil,
-        max_goals = rollback_options and rollback_options.max_goals or nil,
-        input_ownership = ownership,
-    })
+    local initial = rollback_options
+            and rollback_options.initial_snapshot
+            and match_snapshot.restore(rollback_options.initial_snapshot)
+        or sim_match.new({
+            home = home,
+            away = away,
+            field = { w = FIELD_W, h = FIELD_H },
+            home_formation = self._opts.formation,
+            tactic = self._opts.tactic and tactics[self._opts.tactic] or nil,
+            seed = self._opts.seed,
+            duration = rollback_options and rollback_options.duration or nil,
+            max_goals = rollback_options and rollback_options.max_goals or nil,
+            input_ownership = ownership,
+        })
     if rollback_options then
         self._rollback_lab = rollback_playable_lab.new(match_snapshot.capture(initial), {
             local_slot = rollback_options.local_slot,
@@ -169,6 +302,9 @@ function Match:restart()
     self._rollback_event_diffs = {}
     self._rollback_confirmed_steps = {}
     self._rollback_corrections = {}
+    self._presentation_full_time = false
+    self._pending_confirmed_kickoff = false
+    self._confirmed_lifecycle_ids = {}
     self._last_score = 0
     self._last_home = 0
     self._last_scoring_team = nil
@@ -176,25 +312,44 @@ function Match:restart()
     self._onboarding = onboarding.new(self._opts.show_onboarding == true)
     self._replay_state = nil
     replay.reset()
+    if self._rollback_lab then
+        replay.record_boundary(0, self.state)
+    end
     view_state.reset()
     effects.reset()
     audio.load()
     audio.reset()
 end
 
+-- Product/offline matches retain their state-edge behavior. Rollback matches
+-- expose full time only after the stable lifecycle step is confirmed.
+---@return boolean
+function Match:full_time_confirmed()
+    if self._rollback_lab then
+        return self._presentation_full_time
+    end
+    return self.state.finished
+end
+
+-- A confirmed goal sequence owns the screen until it finishes or the player
+-- explicitly skips it. Result navigation must not replace an active replay.
+---@return boolean
+function Match:result_completion_blocked()
+    return self._rollback_lab ~= nil and replay.active()
+end
+
 ---@param evt InputEvent
 function Match:event(evt)
     if evt.kind == "action" then
-        if match_is_over(self) then
-            if self._profile == "playtest" and evt.action == "confirm" then
-                self:restart()
+        if replay.active() then
+            if evt.action == "confirm" or evt.action == "pass_switch" then
+                finish_replay(self)
             end
             return
         end
-        if replay.active() then
-            if evt.action == "confirm" or evt.action == "pass_switch" then
-                replay.stop()
-                effects.reset()
+        if match_is_over(self) then
+            if self._profile == "playtest" and evt.action == "confirm" then
+                self:restart()
             end
             return
         end
@@ -213,6 +368,14 @@ function Match:event(evt)
         self:restart()
         return
     end
+    -- A confirmed goal replay remains skippable after the rollback simulation
+    -- has converged. The next Return may then use the normal rematch behavior.
+    if replay.active() then
+        if evt.key == "space" or evt.key == "return" or evt.key == "k" then
+            finish_replay(self)
+        end
+        return
+    end
     -- After full time only the rematch keys act; match inputs stop buffering.
     if match_is_over(self) then
         if self._profile == "playtest" and (evt.key == "r" or evt.key == "return") then
@@ -228,14 +391,6 @@ function Match:event(evt)
     end
     if self._profile == "playtest" and tuning_panel.open then
         tuning_panel.key(evt.key, love.keyboard.isDown("lshift", "rshift"))
-        return
-    end
-    -- During a replay the only action is skipping it.
-    if replay.active() then
-        if evt.key == "space" or evt.key == "return" or evt.key == "k" then
-            replay.stop()
-            effects.reset() -- drop replay particles before live play returns
-        end
         return
     end
     -- Contextual actions: the same key means the natural thing for the moment.
@@ -335,12 +490,13 @@ function Match:update(dt)
             view_state.update(self._replay_state.players, dt)
             effects.update(self._replay_state, dt)
         else
-            effects.reset() -- replay over: clean slate for the live kickoff
+            finish_replay(self)
         end
         audio.tick(dt)
         return
     end
     if match_is_over(self) then
+        advance_rollback_replay(self, dt)
         audio.tick(dt)
         return
     end
@@ -415,6 +571,11 @@ function Match:update(dt)
             return batch.status == "active" or batch.status == "settling"
         end)
         self._rollback_debug = rollback_playable_lab.debug_model(lab)
+        reconcile_rollback_replay(self)
+        consume_rollback_presentation(self)
+        if not replay.active() then
+            effects.sample_ball(self.state)
+        end
     else
         fixed_clock.advance(self._clock, dt, function(_)
             local next, tick_input = match_input_adapter.next_tick(self._input_adapter)
@@ -440,9 +601,13 @@ function Match:update(dt)
     -- render dt even on frames that consume zero or several simulation ticks.
     -- In laboratory mode this follows the corrected displayed client directly;
     -- correction smoothing remains a later presentation concern.
-    view_state.update(self.state.players, dt)
-    effects.tick(dt)
+    local drawing_rollback_replay = self._rollback_lab ~= nil and replay.active()
+    if not drawing_rollback_replay then
+        view_state.update(self.state.players, dt)
+        effects.tick(dt)
+    end
     audio.tick(dt)
+    advance_rollback_replay(self, dt)
     local controlled = self.state.players[self.state.controlled]
     local owner = self.state.owner and self.state.players[self.state.owner] or nil
     self._onboarding = onboarding.update(self._onboarding, {
@@ -466,6 +631,8 @@ function Match:update(dt)
             self._last_scoring_team = scoring_team
             if replay.start(scoring_team) then
                 effects.reset() -- the scene jumps back in time; drop live particles
+                view_state.reset()
+                self._replay_state = nil
             end
         end
         self._last_home, self._last_score = sh, sh + sa
@@ -474,18 +641,14 @@ end
 
 ---@return BroadcastPhase?
 function Match:broadcast_phase()
-    if self._rollback_debug then
-        if self._rollback_debug.status == "converged" and self.state.finished then
-            return "full_time"
-        end
-    elseif self.state.finished then
-        return "full_time"
-    end
     if replay.celebrating() then
         return "goal"
     end
     if replay.active() then
         return "replay"
+    end
+    if self:full_time_confirmed() then
+        return "full_time"
     end
     if self._kickoff_banner > 0 then
         return "kickoff"
