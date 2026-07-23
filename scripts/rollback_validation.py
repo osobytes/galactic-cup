@@ -1190,6 +1190,7 @@ def run_native_once(
         "--rollback-validation",
         suite,
         *arguments,
+        "--external-sample-ack",
     ]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -1210,6 +1211,7 @@ def run_native_once(
         process = subprocess.Popen(
             command,
             cwd=ROOT,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -1236,6 +1238,17 @@ def run_native_once(
                             f"marker-{len(markers_from_messages(messages))}-{marker.kind}"
                         )
                         checkpoint["validation_marker"] = marker.raw
+                        if (
+                            marker.kind == "case"
+                            and marker.fields.get("sample") == "final"
+                            and marker.fields.get("forced_gc") == "1"
+                        ):
+                            if process.stdin is None:
+                                raise RuntimeError(
+                                    "native final sample acknowledgement pipe is unavailable"
+                                )
+                            process.stdin.write("GC_ROLLBACK_SAMPLE_ACK\n")
+                            process.stdin.flush()
             except Exception as error:
                 reader_errors.append(str(error))
 
@@ -1258,6 +1271,8 @@ def run_native_once(
                 if reader.is_alive():
                     reader_errors.append("native output reader did not stop")
             finally:
+                if process.stdin is not None:
+                    process.stdin.close()
                 resources = sampler.finish()
     duration_seconds = round(time.monotonic() - started, 6)
     if reader_errors:
@@ -1985,6 +2000,33 @@ def run_self_test() -> None:
         )
         if record["case_count"] != 1 or not record["teardown"]["orphan_free"]:
             raise RuntimeError("fake native launcher self-test failed")
+        held_case = case + "|sample=final|forced_gc=1"
+        held_script = Path(temp) / "fake-love-held"
+        held_script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"print({held_case!r}, flush=True)\n"
+            "if sys.stdin.readline().strip() != 'GC_ROLLBACK_SAMPLE_ACK':\n"
+            "    raise SystemExit(2)\n"
+            f"print({result!r}, flush=True)\n",
+            encoding="utf-8",
+        )
+        held_script.chmod(0o755)
+        held_record = run_native_once(
+            held_script,
+            "native",
+            (),
+            Path(temp) / "fake-held.log",
+            5,
+            enforce_plan=False,
+        )
+        held_checkpoint = next(
+            row
+            for row in held_record["resources"]["checkpoints"]
+            if row.get("validation_marker") == held_case
+        )
+        if held_checkpoint.get("rss_bytes", 0) <= 0:
+            raise RuntimeError("terminal sample acknowledgement race self-test failed")
         detached_script = Path(temp) / "fake-love-detached"
         detached_script.write_text(
             "#!/usr/bin/env python3\n"

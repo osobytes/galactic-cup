@@ -81,6 +81,8 @@ heap metric to this harness. Each checkpoint first finalizes the completed case'
 releases its result and timing buffers, installs the next empty timing accumulator, and forces a
 full Lua collection before emitting the marker that triggers the external process sample.
 Lua heap, process-tree RSS, and Chrome JS heap all include the final fifth-fixture checkpoint.
+Native holds at that terminal marker until the evidence process acknowledges its RSS sample, so
+the runtime cannot exit between marker delivery and measurement.
 
 ## Event and presentation integrity
 

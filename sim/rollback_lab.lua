@@ -466,13 +466,17 @@ end
 
 ---@param state RollbackLabRunState
 ---@param boundary integer
-local function trace_replay_boundary(state, boundary)
-    local lookup = rollback_session.snapshot(state.session, boundary)
-    assert(
-        lookup.status == "present" or lookup.status == "retained",
-        "rollback lab replay boundary is not retained"
-    )
-    local snapshot = assert(lookup.snapshot, "rollback lab replay boundary snapshot is missing")
+---@param supplied MatchSnapshot?
+local function trace_replay_boundary(state, boundary, supplied)
+    local snapshot = supplied
+    if snapshot == nil then
+        local lookup = rollback_session.snapshot(state.session, boundary)
+        assert(
+            lookup.status == "present" or lookup.status == "retained",
+            "rollback lab replay boundary is not retained"
+        )
+        snapshot = assert(lookup.snapshot, "rollback lab replay boundary snapshot is missing")
+    end
     state.event_trace[#state.event_trace + 1] = {
         kind = "replay_boundary",
         boundary = boundary,
@@ -520,8 +524,8 @@ local function apply_client_outputs(state, from_tick, through_tick, outputs)
         return false
     end
     trace_diff(state, diff)
-    for _, output in ipairs(outputs) do
-        trace_replay_boundary(state, output.end_boundary)
+    for index, output in ipairs(outputs) do
+        trace_replay_boundary(state, output.end_boundary, steps[index].snapshot)
     end
     return true
 end

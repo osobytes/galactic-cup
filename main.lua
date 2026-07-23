@@ -144,6 +144,7 @@ if has_flag("--rollback-validation") then
     local validation_config = rollback_validation.config()
     local suite_arg, profile_arg, seed_arg = args_after("--rollback-validation")
     local suite = suite_arg or "native"
+    local external_sample_ack = has_flag("--external-sample-ack")
     ---@cast suite RollbackValidationSuite
     local network_seed = nil
     if seed_arg ~= nil then
@@ -390,6 +391,12 @@ if has_flag("--rollback-validation") then
             print(logical)
             print(metrics)
             flush_stdout()
+            if sample == "final" and external_sample_ack then
+                assert(
+                    io.read("*l") == "GC_ROLLBACK_SAMPLE_ACK",
+                    "rollback validation did not receive its external sample acknowledgement"
+                )
+            end
         end
         return result
     end
