@@ -1756,6 +1756,12 @@ def run_self_test() -> None:
     soak_gate = soak_memory_evidence(soak_markers, soak_resources, "chrome")
     if not soak_gate["pass"]:
         raise RuntimeError("passing soak memory self-test failed")
+    if not growth_gate({"warmup": 1000, "peak": 1100}, "inclusive-threshold")[
+        "pass"
+    ]:
+        raise RuntimeError("inclusive memory-growth threshold failed self-test")
+    if growth_gate({"warmup": 1000, "peak": 1101}, "over-threshold")["pass"]:
+        raise RuntimeError("over-threshold memory growth passed self-test")
     soak_resources["checkpoints"][-1]["rss_bytes"] = 4000
     if soak_memory_evidence(soak_markers, soak_resources, "chrome")["pass"]:
         raise RuntimeError("over-budget soak memory self-test passed")

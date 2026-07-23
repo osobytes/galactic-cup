@@ -76,7 +76,9 @@ event bytes use their documented deterministic retained-history encodings. They 
 payload counts, not estimates of Lua allocator overhead. The soak measures allocator behavior
 separately: Lua heap in-process, the complete Linux process-tree RSS externally, Chrome JS heap
 through CDP, and Firefox process-tree RSS because Firefox exposes no equivalent supported JS
-heap metric to this harness.
+heap metric to this harness. Each checkpoint first finalizes the completed case's metrics,
+releases its result and timing buffers, installs the next empty timing accumulator, and forces a
+full Lua collection before emitting the marker that triggers the external process sample.
 
 ## Event and presentation integrity
 

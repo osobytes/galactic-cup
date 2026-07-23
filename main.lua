@@ -362,6 +362,7 @@ if has_flag("--rollback-validation") then
             local sample = completed.sample
             local soak_digest = completed.result.event_metrics.confirmed_digest
             completed = nil
+            active_timing = new_case_timing()
             if sample ~= nil then
                 collectgarbage("collect")
                 local heap_bytes = math.floor(collectgarbage("count") * 1024 + 0.5)
@@ -374,7 +375,6 @@ if has_flag("--rollback-validation") then
             print(logical)
             print(metrics)
             flush_stdout()
-            active_timing = new_case_timing()
         end
         return result
     end
