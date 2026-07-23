@@ -81,8 +81,12 @@ end
 ---@param dt number
 function RealMatch:update(dt)
     if self.match:full_time_confirmed() then
-        self.full_time_elapsed = self.full_time_elapsed + dt
+        local blocked = self.match:result_completion_blocked()
         self.match:update(dt)
+        if blocked or self.match:result_completion_blocked() then
+            return
+        end
+        self.full_time_elapsed = self.full_time_elapsed + dt
         if self.full_time_elapsed >= FULL_TIME_HOLD then
             complete(self)
         end
@@ -106,6 +110,9 @@ function RealMatch:update(dt)
         end
     end
     if self.match:full_time_confirmed() then
+        if self.match:result_completion_blocked() then
+            return
+        end
         self.full_time_elapsed = self.full_time_elapsed + dt
         if self.full_time_elapsed >= FULL_TIME_HOLD then
             complete(self)
@@ -116,6 +123,10 @@ end
 ---@param event InputEvent
 function RealMatch:event(event)
     if self.match:full_time_confirmed() then
+        if self.match:result_completion_blocked() then
+            self.match:event(event)
+            return
+        end
         if
             self.full_time_elapsed >= FULL_TIME_SKIP_DELAY
             and event.kind == "action"

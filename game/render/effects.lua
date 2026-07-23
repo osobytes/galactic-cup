@@ -31,6 +31,8 @@ local trail = {}
 local last_sample ---@type { x: number, y: number }?
 ---@type table<string, boolean>
 local speculative_events = {}
+---@type table<string, boolean>
+local suppressed_events = {}
 
 local function add(x, y, vx, vy, life, size, color, kind, event_id)
     particles[#particles + 1] = {
@@ -71,12 +73,20 @@ local function ring(x, y, life, size, color, event_id)
     add(x, y, 0, 0, life, size, color, "ring", event_id)
 end
 
--- Drop all live effects (call on a fresh match / kickoff so nothing carries over).
-function effects.reset()
+-- Drop drawable state while retaining stable-event bookkeeping. Replay exit
+-- uses this so an action suppressed while past footage was visible cannot
+-- reappear late if that same speculative ID is subsequently replaced.
+function effects.reset_visuals()
     particles = {}
     trail = {}
     last_sample = nil
+end
+
+-- Drop all live effects (call on a fresh match / kickoff so nothing carries over).
+function effects.reset()
+    effects.reset_visuals()
     speculative_events = {}
+    suppressed_events = {}
 end
 
 ---@param e MatchEvent
@@ -132,6 +142,7 @@ end
 ---@param id string
 local function revoke_event(id)
     speculative_events[id] = nil
+    suppressed_events[id] = nil
     for index = #particles, 1, -1 do
         if particles[index].event_id == id then
             table.remove(particles, index)
@@ -141,7 +152,11 @@ end
 
 ---@param event RollbackWrappedEvent
 local function add_speculative(event)
-    if event.domain:sub(1, 6) ~= "match/" or speculative_events[event.id] then
+    if
+        event.domain:sub(1, 6) ~= "match/"
+        or speculative_events[event.id]
+        or suppressed_events[event.id]
+    then
         return
     end
     speculative_events[event.id] = true
@@ -157,11 +172,39 @@ function effects.apply_event_diff(diff)
         revoke_event(event.id)
     end
     for _, replacement in ipairs(diff.replaced) do
+        local was_suppressed = suppressed_events[replacement.before.id]
+            or suppressed_events[replacement.after.id]
         revoke_event(replacement.before.id)
-        add_speculative(replacement.after)
+        if was_suppressed then
+            suppressed_events[replacement.after.id] = true
+        else
+            add_speculative(replacement.after)
+        end
     end
     for _, event in ipairs(diff.added) do
         add_speculative(event)
+    end
+end
+
+-- Consume live/corrected event deltas without creating drawable state while a
+-- confirmed replay owns the screen. Suppressed IDs remain reversible and keep
+-- replacements from surfacing late after the replay transition.
+---@param diff RollbackEventDiff
+function effects.discard_event_diff(diff)
+    for _, event in ipairs(diff.revoked) do
+        revoke_event(event.id)
+    end
+    for _, replacement in ipairs(diff.replaced) do
+        revoke_event(replacement.before.id)
+        if replacement.after.domain:sub(1, 6) == "match/" then
+            suppressed_events[replacement.after.id] = true
+        end
+    end
+    for _, event in ipairs(diff.added) do
+        revoke_event(event.id)
+        if event.domain:sub(1, 6) == "match/" then
+            suppressed_events[event.id] = true
+        end
     end
 end
 
@@ -170,6 +213,7 @@ end
 ---@param event_id string
 function effects.confirm_event(event_id)
     speculative_events[event_id] = nil
+    suppressed_events[event_id] = nil
 end
 
 -- A corrected authoritative boundary invalidates renderer-owned loose-ball

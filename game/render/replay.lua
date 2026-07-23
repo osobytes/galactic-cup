@@ -384,7 +384,7 @@ function replay.start_at(scoring_team, boundary)
     return start_at_index(scoring_team, assert(index))
 end
 
----@return { count: integer, oldest_boundary: integer?, newest_boundary: integer?, boundaries: integer[] }
+---@return { count: integer, oldest_boundary: integer?, newest_boundary: integer?, boundaries: integer[], phase: string?, celebration_elapsed: number }
 function replay.diagnostics()
     local boundaries = {}
     for index, frame in ipairs(buf) do
@@ -395,6 +395,8 @@ function replay.diagnostics()
         oldest_boundary = buf[1] and buf[1]._replay_boundary or nil,
         newest_boundary = buf[#buf] and buf[#buf]._replay_boundary or nil,
         boundaries = boundaries,
+        phase = phase,
+        celebration_elapsed = cel_elapsed,
     }
 end
 

@@ -3,6 +3,7 @@ local audio = require("game.audio")
 local match_observer = require("game.match_observer")
 local effects = require("game.render.effects")
 local replay = require("game.render.replay")
+local view_state = require("game.render.view_state")
 local Match = require("game.screens.match")
 local RealMatch = require("game.screens.real_match")
 local fixed_clock = require("sim.fixed_clock")
@@ -135,6 +136,118 @@ t.describe("rollback presentation consumers", function()
         t.is_true(audio.confirmed_cue_counts().kickoff == nil)
     end)
 
+    t.it("gates every confirmed lifecycle side effect by stable ID", function()
+        local screen = Match.new({
+            rollback_lab = {
+                profile_name = "clean",
+                duration = 2,
+            },
+        })
+        for boundary = 1, 40 do
+            replay.record_boundary(boundary, screen.state)
+        end
+        local goal = wrapped_lifecycle_event("confirmed-goal", 40, "goal")
+        local kickoff = wrapped_lifecycle_event("confirmed-kickoff", 40, "kickoff")
+        local full_time = wrapped_lifecycle_event("confirmed-full-time", 41, "full_time")
+
+        t.is_true(screen:consume_confirmed_lifecycle(goal))
+        t.is_true(replay.active())
+        replay.step(0.5)
+        local elapsed = replay.diagnostics().celebration_elapsed
+        t.is_true(not screen:consume_confirmed_lifecycle(goal))
+        t.eq(
+            replay.diagnostics().celebration_elapsed,
+            elapsed,
+            "duplicate goal cannot restart replay"
+        )
+
+        t.is_true(screen:consume_confirmed_lifecycle(kickoff))
+        t.is_true(screen._pending_confirmed_kickoff)
+        t.is_true(not screen:consume_confirmed_lifecycle(kickoff))
+        t.is_true(screen._pending_confirmed_kickoff)
+
+        t.is_true(screen:consume_confirmed_lifecycle(full_time))
+        t.is_true(screen:full_time_confirmed())
+        t.is_true(
+            not screen._pending_confirmed_kickoff,
+            "full time supersedes a queued kickoff banner"
+        )
+        t.is_true(not screen:consume_confirmed_lifecycle(full_time))
+        t.is_true(screen:full_time_confirmed())
+        t.is_true(replay.active(), "duplicate full time cannot stop or restart confirmed replay")
+
+        local counts = audio.confirmed_cue_counts()
+        t.eq(counts.goal, 1)
+        t.eq(counts.kickoff, 1)
+        t.eq(counts.full_time, 1)
+    end)
+
+    t.it("isolates replay view state and live effects through entry and exit", function()
+        local screen = Match.new({
+            rollback_lab = {
+                profile_name = "clean",
+                duration = 2,
+            },
+        })
+        local player = screen.state.players[1]
+        local player_id = player.id
+        view_state.reset()
+        view_state.update(screen.state.players, 0)
+        player.pos = player.pos:add(Vec2.new(100, 0))
+        view_state.update(screen.state.players, 0.1)
+        t.is_true(assert(view_state.get(player_id)).phase > 0)
+
+        for boundary = 1, 40 do
+            replay.record_boundary(boundary, screen.state)
+        end
+        local goal = wrapped_lifecycle_event("view-goal", 40, "goal")
+        t.is_true(screen:consume_confirmed_lifecycle(goal))
+        t.is_true(view_state.get(player_id) == nil, "replay entry drops live gait history")
+
+        screen:update(0)
+        local replay_view = assert(view_state.get(player_id))
+        t.eq(replay_view.speed, 0)
+        t.eq(replay_view.phase, 0)
+        t.eq(replay_view.lean, 0)
+
+        local shot = wrapped_match_event("future-shot", 41, "shot", player_id)
+        t.is_true(not screen:consume_rollback_event_diff({
+            added = { shot },
+            revoked = {},
+            replaced = {},
+        }))
+        local replay_effects = effects.diagnostics()
+        t.eq(replay_effects.particle_count, 0, "live particles stay off past replay footage")
+        t.eq(#replay_effects.speculative_ids, 0, "live effects are not retained as drawable IDs")
+
+        -- A live-only position discontinuity must not contaminate the replay's
+        -- derived speed/phase while replay footage is the drawn timeline.
+        player.pos = player.pos:add(Vec2.new(10000, 0))
+        screen:update(0.01)
+        replay_view = assert(view_state.get(player_id))
+        t.is_true(replay_view.speed < 1000, "replay gait ignores the hidden live timeline")
+        t.is_true(replay_view.phase < 1, "replay gait remains continuous")
+
+        screen:event({ kind = "action", action = "confirm" })
+        t.is_true(not replay.active())
+        local live_view = assert(view_state.get(player_id))
+        t.eq(live_view.speed, 0)
+        t.eq(live_view.phase, 0)
+        t.eq(live_view.lean, 0)
+
+        local pass = wrapped_match_event("future-shot", 41, "pass", player_id)
+        t.is_true(screen:consume_rollback_event_diff({
+            added = {},
+            revoked = {},
+            replaced = { { before = shot, after = pass } },
+        }))
+        t.eq(
+            effects.diagnostics().particle_count,
+            0,
+            "a suppressed event replacement cannot surface after replay"
+        )
+    end)
+
     t.it("drops an invalid loose-ball trail on correction", function()
         effects.reset()
         local state =
@@ -197,7 +310,7 @@ t.describe("rollback presentation consumers", function()
         t.eq(assert(replay.boundary_sample(40)).ball_y, 200)
     end)
 
-    t.it("gates RealMatch result completion on confirmed full time", function()
+    t.it("defers RealMatch completion until a confirmed replay is explicitly skipped", function()
         local lab_match = Match.new({
             rollback_lab = {
                 profile_name = "clean",
@@ -228,8 +341,24 @@ t.describe("rollback presentation consumers", function()
         lab_match.state.finished = true
         screen:update(0)
         t.eq(completed, 0, "speculative state.finished must not complete the result")
-        lab_match._presentation_full_time = true
-        screen:update(0.9)
+
+        for boundary = 1, 40 do
+            replay.record_boundary(boundary, lab_match.state)
+        end
+        lab_match:consume_confirmed_lifecycle(wrapped_lifecycle_event("overlap-goal", 40, "goal"))
+        lab_match:consume_confirmed_lifecycle(
+            wrapped_lifecycle_event("overlap-full-time", 41, "full_time")
+        )
+        screen:update(1)
+        t.eq(completed, 0, "full-time hold cannot navigate during confirmed replay")
+        t.is_true(lab_match:result_completion_blocked())
+
+        screen:event({ kind = "action", action = "confirm" })
+        t.is_true(not lab_match:result_completion_blocked())
+        screen:update(0.89)
+        t.eq(completed, 0, "skipping replay still preserves the full-time hold")
+        screen:update(0.02)
+        t.eq(completed, 1)
         screen:update(1)
         t.eq(completed, 1)
     end)

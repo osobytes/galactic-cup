@@ -456,12 +456,29 @@ t.describe("playable rollback ScreenStack flow (tier 3)", function()
             stack:push(real)
             local saw_correction = false
             local saw_goal_presentation = false
-            for _ = 1, 360 do
+            local saw_terminal_replay = false
+            local replay_finished_at = nil
+            local completed_at = nil
+            for iteration = 1, 600 do
                 stack:update(fixed_clock.TICK_SECONDS)
                 saw_correction = saw_correction or #match._rollback_corrections > 0
                 saw_goal_presentation = saw_goal_presentation
                     or match:broadcast_phase() == "goal"
                     or replay.active()
+                local status = assert(match._rollback_debug).status
+                if status == "converged" and replay.active() then
+                    saw_terminal_replay = true
+                    t.eq(completed, 0, "terminal replay must block result navigation")
+                elseif
+                    saw_terminal_replay
+                    and replay_finished_at == nil
+                    and not replay.active()
+                then
+                    replay_finished_at = iteration
+                end
+                if completed > 0 and completed_at == nil then
+                    completed_at = iteration
+                end
                 if completed > 0 and assert(match._rollback_debug).status == "converged" then
                     break
                 end
@@ -471,9 +488,20 @@ t.describe("playable rollback ScreenStack flow (tier 3)", function()
             local cues = audio.confirmed_cue_counts()
             t.is_true(saw_correction)
             t.is_true(saw_goal_presentation, "confirmed goal starts celebration/replay")
+            t.is_true(saw_terminal_replay, "confirmed replay overlaps terminal convergence")
+            t.is_true(replay_finished_at ~= nil, "terminal renderer replay finishes naturally")
+            t.is_true(
+                assert(completed_at) > assert(replay_finished_at),
+                "result completion follows replay and full-time hold"
+            )
             t.eq(match.state.score.home, 1)
             t.is_true(match:full_time_confirmed())
             t.eq(debug.status, "converged")
+            t.is_true(not replay.active(), "result begins only after replay becomes inactive")
+            t.is_true(
+                not match._pending_confirmed_kickoff,
+                "full time clears the post-goal kickoff beat"
+            )
             t.eq(completed, 1)
             t.eq(cues.goal, 1)
             t.eq(cues.kickoff, 1)
