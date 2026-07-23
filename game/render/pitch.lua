@@ -16,6 +16,27 @@ local pitch = {}
 local HEX_RADIUS = 26 -- world units, centre to corner
 local NET_BACK_FRAC = 0.55 -- back frame height as a fraction of the crossbar
 
+---@class PitchDrawOptions
+---@field home_color number[]
+---@field away_color number[]
+---@field arena ArenaData?
+---@field arena_pulse number?
+---@field render_pose CorrectionSmoothingPose?
+
+---@param player MatchPlayer
+---@param pose CorrectionSmoothingPose?
+---@return { x: number, y: number }
+local function player_position(player, pose)
+    return (pose and pose.players[player.id]) or player.pos
+end
+
+---@param state MatchState
+---@param pose CorrectionSmoothingPose?
+---@return { x: number, y: number }
+local function ball_position(state, pose)
+    return (pose and pose.ball) or state.ball
+end
+
 -- Screen-space mesh shader for the goal nets. Lazily created and fully
 -- optional: headless tests stub love.graphics without newShader, and a failed
 -- compile just falls back to a plain translucent fill.
@@ -149,10 +170,12 @@ end
 -- Render the whole pitch + entities for one frame.
 ---@param s MatchState
 ---@param vp { w: number, h: number }
----@param opts { home_color: number[], away_color: number[], arena: ArenaData?, arena_pulse: number? }
+---@param opts PitchDrawOptions
 function pitch.draw(s, vp, opts)
     local field = s.field
     local arena = opts.arena or arenas.helios_crown
+    local render_pose = opts.render_pose
+    local rendered_ball = ball_position(s, render_pose)
     local function project(wx, wy)
         return camera.project(wx, wy, field, vp)
     end
@@ -287,9 +310,10 @@ function pitch.draw(s, vp, opts)
     -- Depth-sorted drawables (far first).
     local items = {}
     for i, p in ipairs(s.players) do
-        items[#items + 1] = { kind = "player", p = p, idx = i, depth = p.pos.y }
+        local pos = player_position(p, render_pose)
+        items[#items + 1] = { kind = "player", p = p, pos = pos, idx = i, depth = pos.y }
     end
-    items[#items + 1] = { kind = "ball", depth = s.ball.y }
+    items[#items + 1] = { kind = "ball", depth = rendered_ball.y }
     table.sort(items, function(a, b)
         return a.depth < b.depth
     end)
@@ -302,7 +326,8 @@ function pitch.draw(s, vp, opts)
     for _, it in ipairs(items) do
         if it.kind == "player" then
             local p = it.p
-            local sx, sy, scale = project(p.pos.x, p.pos.y)
+            local pos = it.pos
+            local sx, sy, scale = project(pos.x, pos.y)
             local r = p.radius * scale
             local color = (p.team == "home") and opts.home_color or opts.away_color
             local presentation =
@@ -344,7 +369,7 @@ function pitch.draw(s, vp, opts)
             -- Loose / dribbled ball. (A keeper-held ball is drawn in its hands by the
             -- keeper avatar, so skip the ground ball then.) The shadow stays on the
             -- ground and shrinks/fades with height; the ball lifts by its height.
-            local sx, sy, scale = project(s.ball.x, s.ball.y)
+            local sx, sy, scale = project(rendered_ball.x, rendered_ball.y)
             local z = s.ball_z or 0
             local hk = 1 / (1 + z / 80)
             love.graphics.setColor(0, 0, 0, 0.3 * hk)
@@ -363,8 +388,8 @@ function pitch.draw(s, vp, opts)
             local g = 900 -- matches the sim's GRAVITY
             local vz = s.ball_vz or 0
             local tland = (vz + math.sqrt(vz * vz + 2 * g * bz)) / g
-            local lx = s.ball.x + s.ball_vel.x * tland
-            local ly = s.ball.y + s.ball_vel.y * tland
+            local lx = rendered_ball.x + s.ball_vel.x * tland
+            local ly = rendered_ball.y + s.ball_vel.y * tland
             if
                 tland > 0.05
                 and tland < 3
@@ -392,7 +417,8 @@ function pitch.draw(s, vp, opts)
     local cp = s.players[s.controlled]
     if cp.pass_target then
         local tp = s.players[cp.pass_target]
-        local tsx, tsy, tscale = project(tp.pos.x, tp.pos.y)
+        local target_pos = player_position(tp, render_pose)
+        local tsx, tsy, tscale = project(target_pos.x, target_pos.y)
         local t_now = (love.timer and love.timer.getTime and love.timer.getTime()) or 0
         local pulse = 0.65 + 0.35 * math.abs(math.sin(t_now * 5))
         local team_color = (tp.team == "home") and opts.home_color or opts.away_color
@@ -413,7 +439,8 @@ function pitch.draw(s, vp, opts)
         amt, ccol, label = cp.pass_charge, { 0.45, 0.85, 1 }, "PASS"
     end
     if amt then
-        local sx, sy, scale = project(cp.pos.x, cp.pos.y)
+        local controlled_pos = player_position(cp, render_pose)
+        local sx, sy, scale = project(controlled_pos.x, controlled_pos.y)
         local w, h = 34 * scale, math.max(3, 4 * scale)
         local y0 = sy + 12 * scale
         love.graphics.setColor(0, 0, 0, 0.55)

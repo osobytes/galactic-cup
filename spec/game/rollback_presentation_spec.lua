@@ -1,6 +1,7 @@
 local Vec2 = require("core.vec2")
 local audio = require("game.audio")
 local match_observer = require("game.match_observer")
+local correction_smoothing = require("game.render.correction_smoothing")
 local effects = require("game.render.effects")
 local replay = require("game.render.replay")
 local view_state = require("game.render.view_state")
@@ -200,9 +201,23 @@ t.describe("rollback presentation consumers", function()
         for boundary = 1, 40 do
             replay.record_boundary(boundary, screen.state)
         end
+        local previous = sim_match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+        })
+        previous.players[1].pos = screen.state.players[1].pos:add(Vec2.new(-40, 0))
+        screen._render_smoothing = correction_smoothing.new(previous)
+        screen._render_smoothing =
+            correction_smoothing.correct(screen._render_smoothing, screen.state)
+        screen._render_pose = correction_smoothing.pose(screen._render_smoothing)
+        t.is_true(correction_smoothing.diagnostics(screen._render_smoothing).active_count > 0)
+
         local goal = wrapped_lifecycle_event("view-goal", 40, "goal")
         t.is_true(screen:consume_confirmed_lifecycle(goal))
         t.is_true(view_state.get(player_id) == nil, "replay entry drops live gait history")
+        t.eq(correction_smoothing.diagnostics(screen._render_smoothing).active_count, 0)
+        t.eq(assert(screen._rollback_debug).active_smoothing_count, 0)
 
         screen:update(0)
         local replay_view = assert(view_state.get(player_id))

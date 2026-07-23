@@ -23,10 +23,21 @@ selected network profile, reconciles one delivery batch, and catches the
 displayed client up to the reference boundary. The screen restores only the
 controller's copied current snapshot.
 
-Renderer-owned gait state follows that displayed snapshot every render update,
-so raw corrections remain observable; this mode does not interpolate or smooth
-simulation positions. A synchronization terminal stops input and stays visible
-in the lab overlay, but it is not presented as the match's `full_time` phase.
+`game.render.correction_smoothing` keeps correction offsets outside
+`MatchState`. A small correction begins at the preceding displayed player/ball
+pose and immediately spends that render frame's `dt`, then sheds the remaining
+offset linearly over 100 ms. Consecutive correction frames therefore keep
+advancing instead of freezing until a gap. A correction at or above 160 world
+units hard-snaps to authority. Repeated corrections compose from the current
+displayed pose, while renderer-owned gait speed and lean follow that smoothed
+trajectory rather than the corrected simulation jump. HUD score/time and every
+simulation query still read the corrected state immediately. Goal/kickoff and
+replay transitions, full time, restart, laboratory teardown, and
+synchronization failure clear offsets rather than easing across scene
+boundaries.
+
+A synchronization terminal stops input and stays visible in the lab overlay,
+but it is not presented as the match's `full_time` phase.
 
 Corrected outputs replace the complete speculative stable-event tail before
 new outputs are appended. Confirmation runs after corrections and again after
@@ -70,11 +81,12 @@ frames.
 
 The cached screen overlay reports the selected profile, reference/client/
 transport ticks, confirmation, prediction, rollback depth, resimulation,
-snapshot retention, network pending/high-water counters, and latest confirmed
-convergence. Drawing reads that copied model only. A live `R` in laboratory
-mode reconstructs the reference, bot RNG, rollback and event histories,
-network queue/counters, settlement and convergence state, fixed clock, input
-adapter, and renderer-owned replay/view/effect/audio state while preserving the
+active smoothing count and maximum correction magnitude, snapshot retention,
+network pending/high-water counters, and latest confirmed convergence. Drawing
+reads that copied model only. A live `R` in laboratory mode reconstructs the
+reference, bot RNG, rollback and event histories, network queue/counters,
+settlement and convergence state, fixed clock, input adapter, and
+renderer-owned correction/replay/view/effect/audio state while preserving the
 selected laboratory configuration.
 
 The runner accepts only a validated `InputTape`. The tape already contains
