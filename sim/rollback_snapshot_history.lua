@@ -14,7 +14,7 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field tick integer
 ---@field snapshot MatchSnapshot
 ---@field canonical_bytes integer
----@field canonical_wire string
+---@field canonical_wire string?
 ---@field hash string?
 
 ---@class RollbackSnapshotHistory
@@ -183,13 +183,12 @@ local function store_retained(history, retained)
     if existing then
         remove_entry(history, existing)
     end
-    local canonical_wire = match_snapshot.encode_canonical(retained)
-    local canonical_bytes = #canonical_wire
+    local canonical_bytes = match_snapshot.encoded_size_canonical(retained)
     history._entries[index] = {
         tick = tick,
         snapshot = retained,
         canonical_bytes = canonical_bytes,
-        canonical_wire = canonical_wire,
+        canonical_wire = nil,
         hash = nil,
     }
     history._count = history._count + 1
@@ -337,10 +336,9 @@ function rollback_snapshot_history.restore(history, tick)
     return match_snapshot.restore(entry.snapshot), status
 end
 
--- Hashing is diagnostic and deliberately lazy. Retention keeps the canonical
--- wire already required for exact byte accounting, so requesting a hash never
--- repeats snapshot normalization or encoding. Replacement creates a fresh
--- unhashed entry.
+-- Hashing and canonical wire materialization are diagnostic and deliberately
+-- lazy. Retention counts exact bytes without allocating every wire string.
+-- Replacement creates a fresh unhashed entry.
 ---@param history RollbackSnapshotHistory
 ---@param tick integer
 ---@return string?, RollbackSnapshotLookupStatus
@@ -356,7 +354,9 @@ function rollback_snapshot_history.boundary_hash(history, tick)
     end
     local entry = assert(history._entries[ring_index(history, tick)])
     if entry.hash == nil then
-        entry.hash = fnv1a64.hash(entry.canonical_wire)
+        local wire = entry.canonical_wire or match_snapshot.encode_canonical(entry.snapshot)
+        entry.canonical_wire = wire
+        entry.hash = fnv1a64.hash(wire)
     end
     return entry.hash, status
 end
@@ -412,7 +412,9 @@ function rollback_snapshot_history.compare(expected, actual, tick)
     end
     local expected_entry = assert(expected._entries[ring_index(expected, tick)])
     local actual_entry = assert(actual._entries[ring_index(actual, tick)])
-    if expected_entry.canonical_wire == actual_entry.canonical_wire then
+    local first_difference =
+        match_snapshot.first_difference_canonical(expected_entry.snapshot, actual_entry.snapshot)
+    if first_difference == nil then
         return {
             matched = true,
             expected_status = expected_status,
@@ -422,9 +424,6 @@ function rollback_snapshot_history.compare(expected, actual, tick)
             first_difference = nil,
         }
     end
-    local first_difference =
-        match_snapshot.first_difference_canonical(expected_entry.snapshot, actual_entry.snapshot)
-    assert(first_difference, "distinct canonical snapshot wires must have a difference")
     local expected_hash = assert(rollback_snapshot_history.boundary_hash(expected, tick))
     local actual_hash = assert(rollback_snapshot_history.boundary_hash(actual, tick))
     return {

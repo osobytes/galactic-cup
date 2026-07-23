@@ -363,7 +363,7 @@ local function execute_tick(session, tick)
     )
     assert(rollback_snapshot_history.store_owned(session._snapshot_history, boundary))
     local output = make_output(tick, record, boundary)
-    session._outputs[tick] = copy_output(output)
+    session._outputs[tick] = output
     return output
 end
 

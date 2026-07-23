@@ -509,108 +509,189 @@ function match_snapshot.number_bytes(number)
     return sign .. ":" .. tostring(exponent) .. ":" .. tostring(high) .. ":" .. tostring(low)
 end
 
----@param output string[]
+---@class MatchSnapshotEncoder
+---@field parts string[]?
+---@field bytes integer
+
+---@param encoder MatchSnapshotEncoder
+---@param value string
+local function append_literal(encoder, value)
+    encoder.bytes = encoder.bytes + #value
+    local parts = encoder.parts
+    if parts then
+        parts[#parts + 1] = value
+    end
+end
+
+---@param encoder MatchSnapshotEncoder
 ---@param value any
-local function append_scalar(output, value)
+local function append_scalar(encoder, value)
     local kind = type(value)
     if value == nil then
-        output[#output + 1] = "z;"
+        append_literal(encoder, "z;")
     elseif kind == "boolean" then
-        output[#output + 1] = value and "b1;" or "b0;"
+        append_literal(encoder, value and "b1;" or "b0;")
     elseif kind == "number" then
-        output[#output + 1] = "n" .. match_snapshot.number_bytes(value) .. ";"
+        local payload = match_snapshot.number_bytes(value)
+        encoder.bytes = encoder.bytes + #payload + 2
+        local parts = encoder.parts
+        if parts then
+            parts[#parts + 1] = "n" .. payload .. ";"
+        end
     elseif kind == "string" then
-        output[#output + 1] = "s" .. tostring(#value) .. ":" .. value .. ";"
+        local length = tostring(#value)
+        encoder.bytes = encoder.bytes + #length + #value + 3
+        local parts = encoder.parts
+        if parts then
+            parts[#parts + 1] = "s" .. length .. ":" .. value .. ";"
+        end
     else
         assert(false, "unsupported canonical scalar")
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param name string
-local function append_name(output, name)
-    output[#output + 1] = "k" .. tostring(#name) .. ":" .. name .. ";"
-end
-
----@param output string[]
----@param value Vec2
-local function append_vec(output, value)
-    append_scalar(output, value.x)
-    append_scalar(output, value.y)
-end
-
----@param output string[]
----@param value MarkingConfig
-local function append_marking(output, value)
-    for _, field in ipairs(MARKING_FIELDS) do
-        append_name(output, field)
-        append_scalar(output, value[field])
+local function append_name(encoder, name)
+    local length = tostring(#name)
+    encoder.bytes = encoder.bytes + #length + #name + 3
+    local parts = encoder.parts
+    if parts then
+        parts[#parts + 1] = "k" .. length .. ":" .. name .. ";"
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
+---@param value Vec2
+local function append_vec(encoder, value)
+    append_scalar(encoder, value.x)
+    append_scalar(encoder, value.y)
+end
+
+---@param encoder MatchSnapshotEncoder
+---@param value MarkingConfig
+local function append_marking(encoder, value)
+    for _, field in ipairs(MARKING_FIELDS) do
+        append_name(encoder, field)
+        append_scalar(encoder, value[field])
+    end
+end
+
+---@param encoder MatchSnapshotEncoder
 ---@param value InputOwnership?
-local function append_ownership(output, value)
+local function append_ownership(encoder, value)
     if not value then
-        append_scalar(output, nil)
+        append_scalar(encoder, nil)
         return
     end
-    append_scalar(output, value.version)
+    append_scalar(encoder, value.version)
     for _, team in ipairs({ "home", "away" }) do
-        append_name(output, team)
+        append_name(encoder, team)
         for index = 1, input_frame.FIXTURE_TEAM_SIZE do
-            append_scalar(output, value.rosters[team][index])
+            append_scalar(encoder, value.rosters[team][index])
         end
     end
     for index = 1, input_frame.SLOT_COUNT do
         for _, field in ipairs(ASSIGNMENT_FIELDS) do
-            append_name(output, field)
-            append_scalar(output, value.slots[index][field])
+            append_name(encoder, field)
+            append_scalar(encoder, value.slots[index][field])
         end
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param player MatchPlayer
-local function append_player(output, player)
+local function append_player(encoder, player)
     for _, field in ipairs(match_snapshot.PLAYER_FIELDS) do
-        append_name(output, field)
+        append_name(encoder, field)
         local value = player[field]
         if VECTOR_FIELDS[field] then
-            append_vec(output, value)
+            append_vec(encoder, value)
         elseif OPTIONAL_VECTOR_FIELDS[field] then
             if value then
-                output[#output + 1] = "v;"
-                append_vec(output, value)
+                append_literal(encoder, "v;")
+                append_vec(encoder, value)
             else
-                append_scalar(output, nil)
+                append_scalar(encoder, nil)
             end
         elseif field == "windup_shot" then
             if value then
-                output[#output + 1] = "w;"
+                append_literal(encoder, "w;")
                 for _, windup_field in ipairs(WINDUP_FIELDS) do
-                    append_name(output, windup_field)
+                    append_name(encoder, windup_field)
                     if windup_field == "dir" then
-                        append_vec(output, value.dir)
+                        append_vec(encoder, value.dir)
                     else
-                        append_scalar(output, value[windup_field])
+                        append_scalar(encoder, value[windup_field])
                     end
                 end
             else
-                append_scalar(output, nil)
+                append_scalar(encoder, nil)
             end
         else
-            append_scalar(output, value)
+            append_scalar(encoder, value)
         end
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param values table<integer, integer>
 ---@param count integer
-local function append_sparse_indices(output, values, count)
+local function append_sparse_indices(encoder, values, count)
     for index = 1, count do
-        append_scalar(output, values[index])
+        append_scalar(encoder, values[index])
+    end
+end
+
+---@param encoder MatchSnapshotEncoder
+---@param version integer
+---@param state MatchState
+local function append_state(encoder, version, state)
+    append_literal(encoder, "GCMS;")
+    append_scalar(encoder, version)
+    for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
+        append_name(encoder, field)
+        local value = state[field]
+        if field == "field" then
+            append_scalar(encoder, value.w)
+            append_scalar(encoder, value.h)
+        elseif field == "goal_home" or field == "goal_away" then
+            for _, rect_field in ipairs({ "x", "y", "w", "h" }) do
+                append_scalar(encoder, value[rect_field])
+            end
+        elseif field == "players" then
+            append_scalar(encoder, #value)
+            for index = 1, #value do
+                append_player(encoder, value[index])
+            end
+        elseif field == "ball" or field == "ball_vel" then
+            append_vec(encoder, value)
+        elseif field == "score" or field == "press" then
+            append_scalar(encoder, value.home)
+            append_scalar(encoder, value.away)
+        elseif field == "marking" then
+            append_marking(encoder, value.home)
+            append_marking(encoder, value.away)
+        elseif field == "marks" then
+            append_sparse_indices(encoder, value.home, #state.players)
+            append_sparse_indices(encoder, value.away, #state.players)
+        elseif field == "events" then
+            append_scalar(encoder, #value)
+            for index = 1, #value do
+                for _, event_field in ipairs(EVENT_FIELDS) do
+                    append_name(encoder, event_field)
+                    append_scalar(encoder, value[index][event_field])
+                end
+            end
+        elseif field == "input_ownership" then
+            append_ownership(encoder, value)
+        elseif field == "slot_players" then
+            append_sparse_indices(encoder, value, input_frame.SLOT_COUNT)
+        elseif field == "slot_for_player" then
+            append_sparse_indices(encoder, value, #state.players)
+        else
+            append_scalar(encoder, value)
+        end
     end
 end
 
@@ -618,53 +699,18 @@ end
 ---@param state MatchState
 ---@return string
 local function encode_state(version, state)
-    local output = { "GCMS;" }
-    append_scalar(output, version)
-    for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
-        append_name(output, field)
-        local value = state[field]
-        if field == "field" then
-            append_scalar(output, value.w)
-            append_scalar(output, value.h)
-        elseif field == "goal_home" or field == "goal_away" then
-            for _, rect_field in ipairs({ "x", "y", "w", "h" }) do
-                append_scalar(output, value[rect_field])
-            end
-        elseif field == "players" then
-            append_scalar(output, #value)
-            for index = 1, #value do
-                append_player(output, value[index])
-            end
-        elseif field == "ball" or field == "ball_vel" then
-            append_vec(output, value)
-        elseif field == "score" or field == "press" then
-            append_scalar(output, value.home)
-            append_scalar(output, value.away)
-        elseif field == "marking" then
-            append_marking(output, value.home)
-            append_marking(output, value.away)
-        elseif field == "marks" then
-            append_sparse_indices(output, value.home, #state.players)
-            append_sparse_indices(output, value.away, #state.players)
-        elseif field == "events" then
-            append_scalar(output, #value)
-            for index = 1, #value do
-                for _, event_field in ipairs(EVENT_FIELDS) do
-                    append_name(output, event_field)
-                    append_scalar(output, value[index][event_field])
-                end
-            end
-        elseif field == "input_ownership" then
-            append_ownership(output, value)
-        elseif field == "slot_players" then
-            append_sparse_indices(output, value, input_frame.SLOT_COUNT)
-        elseif field == "slot_for_player" then
-            append_sparse_indices(output, value, #state.players)
-        else
-            append_scalar(output, value)
-        end
-    end
-    return table.concat(output)
+    local encoder = { parts = {}, bytes = 0 }
+    append_state(encoder, version, state)
+    return table.concat(assert(encoder.parts))
+end
+
+---@param version integer
+---@param state MatchState
+---@return integer
+local function encoded_state_size(version, state)
+    local encoder = { parts = nil, bytes = 0 }
+    append_state(encoder, version, state)
+    return encoder.bytes
 end
 
 ---@param snapshot MatchSnapshot
@@ -685,6 +731,17 @@ function match_snapshot.encode_canonical(snapshot)
     assert(snapshot.version == match_snapshot.VERSION, "unsupported canonical snapshot version")
     assert(type(snapshot.state) == "table", "canonical match snapshot state is required")
     return encode_state(snapshot.version, snapshot.state)
+end
+
+-- Count the exact canonical wire bytes for an owned snapshot without
+-- materializing its wire string.
+---@param snapshot MatchSnapshot
+---@return integer
+function match_snapshot.encoded_size_canonical(snapshot)
+    assert(type(snapshot) == "table", "canonical match snapshot is required")
+    assert(snapshot.version == match_snapshot.VERSION, "unsupported canonical snapshot version")
+    assert(type(snapshot.state) == "table", "canonical match snapshot state is required")
+    return encoded_state_size(snapshot.version, snapshot.state)
 end
 
 ---@param snapshot MatchSnapshot

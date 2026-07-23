@@ -130,8 +130,10 @@ t.describe("bounded rollback snapshot history", function()
         local initial_bytes = #match_snapshot.encode(initial)
         local first = assert(rollback_snapshot_history.store(history, initial))
         t.eq(first.replaced, false)
+        t.eq(history._entries[1].canonical_wire, nil)
         t.eq(rollback_snapshot_history.diagnostics(history).canonical_bytes, initial_bytes)
         local first_hash = assert(rollback_snapshot_history.boundary_hash(history, 0))
+        t.eq(#assert(history._entries[1].canonical_wire), initial_bytes)
 
         state.score.home = 1
         local replacement = boundary(state, 0)
