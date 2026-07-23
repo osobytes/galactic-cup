@@ -1,3 +1,5 @@
+local fixed_clock = require("sim.fixed_clock")
+
 ---@class MatchObserver
 ---@field team_of table<string, "home"|"away">
 ---@field keeper table<string, boolean>
@@ -11,6 +13,8 @@
 ---@field pending_pass "home"|"away"|nil
 ---@field last_shooter { home: string?, away: string? }
 ---@field previous_score { home: integer, away: integer }
+---@field confirmed_event_ids table<string, boolean>
+---@field last_confirmed_tick integer
 
 ---@class ObservedMatchSummary
 ---@field home_stats TeamResultStats
@@ -56,6 +60,8 @@ function observer.new(state)
         pending_pass = nil,
         last_shooter = { home = nil, away = nil },
         previous_score = { home = state.score.home, away = state.score.away },
+        confirmed_event_ids = {},
+        last_confirmed_tick = -1,
     }
 end
 
@@ -146,6 +152,86 @@ function observer.observe(value, state, dt, events)
     end
     value.previous_score.home = state.score.home
     value.previous_score.away = state.score.away
+end
+
+---@param value MatchObserver
+---@param event RollbackWrappedMatchEvent
+local function observe_confirmed_event(value, event)
+    if value.confirmed_event_ids[event.id] then
+        return
+    end
+    value.confirmed_event_ids[event.id] = true
+    local payload = event.payload
+    local team = payload.player and value.team_of[payload.player] or nil
+    if payload.kind == "pass" and team then
+        value.passes[team] = value.passes[team] + 1
+        value.pending_pass = team
+        award(value.involvement, payload.player, 1)
+    elseif
+        (
+            payload.kind == "shot"
+            or payload.kind == "header"
+            or payload.kind == "volley"
+            or payload.kind == "bicycle"
+        )
+        and team
+        and payload.player
+        and not value.keeper[payload.player]
+    then
+        value.shots[team] = value.shots[team] + 1
+        value.last_shooter[team] = payload.player
+        award(value.involvement, payload.player, 2)
+    elseif (payload.kind == "catch" or payload.kind == "parry") and team then
+        value.saves[team] = value.saves[team] + 1
+        award(value.involvement, payload.player, 3)
+    elseif
+        payload.kind == "tackle"
+        or payload.kind == "block"
+        or payload.kind == "claim"
+        or payload.kind == "juke"
+        or payload.kind == "reception"
+    then
+        award(value.involvement, payload.player, 1)
+    end
+end
+
+-- Rollback matches publish only newly confirmed, immutable steps. This path is
+-- boundary-addressed and idempotent; it never reads the speculative live state.
+---@param value MatchObserver
+---@param step RollbackEventStep
+---@return boolean observed
+function observer.observe_confirmed(value, step)
+    if step.tick <= value.last_confirmed_tick then
+        return false
+    end
+    assert(
+        step.tick == value.last_confirmed_tick + 1,
+        "confirmed observer steps must be contiguous"
+    )
+    for _, event in ipairs(step.match_events) do
+        observe_confirmed_event(value, event)
+    end
+
+    local owner_team = step.state.owner_team
+    if owner_team then
+        value.possession[owner_team] = value.possession[owner_team] + fixed_clock.TICK_SECONDS
+        if value.pending_pass then
+            if owner_team == value.pending_pass then
+                value.completed_passes[owner_team] = value.completed_passes[owner_team] + 1
+            end
+            value.pending_pass = nil
+        end
+    end
+    if step.state.score.home > value.previous_score.home then
+        award(value.involvement, value.last_shooter.home, 5)
+    end
+    if step.state.score.away > value.previous_score.away then
+        award(value.involvement, value.last_shooter.away, 5)
+    end
+    value.previous_score.home = step.state.score.home
+    value.previous_score.away = step.state.score.away
+    value.last_confirmed_tick = step.tick
+    return true
 end
 
 ---@param value MatchObserver

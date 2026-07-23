@@ -80,7 +80,7 @@ end
 
 ---@param dt number
 function RealMatch:update(dt)
-    if self.match.state.finished then
+    if self.match:full_time_confirmed() then
         self.full_time_elapsed = self.full_time_elapsed + dt
         self.match:update(dt)
         if self.full_time_elapsed >= FULL_TIME_HOLD then
@@ -90,11 +90,22 @@ function RealMatch:update(dt)
     end
     local before = self.match.state.time_left
     self.match:update(dt)
-    local elapsed = before - self.match.state.time_left
-    if elapsed > 0 then
-        match_observer.observe(self.observer, self.match.state, elapsed, self.match._frame_events)
+    if self.match._rollback_lab then
+        for _, step in ipairs(self.match._rollback_confirmed_steps) do
+            match_observer.observe_confirmed(self.observer, step)
+        end
+    else
+        local elapsed = before - self.match.state.time_left
+        if elapsed > 0 then
+            match_observer.observe(
+                self.observer,
+                self.match.state,
+                elapsed,
+                self.match._frame_events
+            )
+        end
     end
-    if self.match.state.finished then
+    if self.match:full_time_confirmed() then
         self.full_time_elapsed = self.full_time_elapsed + dt
         if self.full_time_elapsed >= FULL_TIME_HOLD then
             complete(self)
@@ -104,7 +115,7 @@ end
 
 ---@param event InputEvent
 function RealMatch:event(event)
-    if self.match.state.finished then
+    if self.match:full_time_confirmed() then
         if
             self.full_time_elapsed >= FULL_TIME_SKIP_DELAY
             and event.kind == "action"

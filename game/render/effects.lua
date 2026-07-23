@@ -1,7 +1,7 @@
 -- The "juice" layer: turns one-frame sim events (shots, passes, traps) into
 -- short-lived particles, and samples a fading trail behind a fast loose ball.
--- Renderer-side state only — the sim stays pure. `update` drains MatchState.events
--- and ages everything; `draw_trail`/`draw_over` project and paint.
+-- Renderer-side state only — the sim stays pure. Rollback actions use stable
+-- event keys; `update` remains the offline adapter. Drawing projects and paints.
 
 local effects = {}
 
@@ -22,14 +22,17 @@ local TRAIL_HOT_SPEED = 900 -- ball speed that reads as full "heat" (charged sho
 ---@field size number
 ---@field color number[]
 ---@field kind "spark"|"ring"
+---@field event_id string?
 
 ---@type Particle[]
 local particles = {}
 ---@type { x: number, y: number, z: number, heat: number, life: number, max: number }[]
 local trail = {}
 local last_sample ---@type { x: number, y: number }?
+---@type table<string, boolean>
+local speculative_events = {}
 
-local function add(x, y, vx, vy, life, size, color, kind)
+local function add(x, y, vx, vy, life, size, color, kind, event_id)
     particles[#particles + 1] = {
         x = x,
         y = y,
@@ -40,12 +43,13 @@ local function add(x, y, vx, vy, life, size, color, kind)
         size = size,
         color = color,
         kind = kind,
+        event_id = event_id,
     }
 end
 
 -- A radial spray of sparks. Direction is randomized; index-free so it's fine in
 -- normal game code (unlike workflow scripts, math.random is available here).
-local function burst(x, y, n, speed, life, size, color)
+local function burst(x, y, n, speed, life, size, color, event_id)
     for _ = 1, n do
         local a = math.random() * math.pi * 2
         local sp = speed * (0.45 + math.random() * 0.55)
@@ -57,13 +61,14 @@ local function burst(x, y, n, speed, life, size, color)
             life * (0.6 + math.random() * 0.4),
             size,
             color,
-            "spark"
+            "spark",
+            event_id
         )
     end
 end
 
-local function ring(x, y, life, size, color)
-    add(x, y, 0, 0, life, size, color, "ring")
+local function ring(x, y, life, size, color, event_id)
+    add(x, y, 0, 0, life, size, color, "ring", event_id)
 end
 
 -- Drop all live effects (call on a fresh match / kickoff so nothing carries over).
@@ -71,62 +76,111 @@ function effects.reset()
     particles = {}
     trail = {}
     last_sample = nil
+    speculative_events = {}
 end
 
--- Consume one simulated state's events and position sample. This is separate
--- from `tick` so a render frame that produces zero simulation ticks can still
--- animate existing particles.
----@param s MatchState
-function effects.consume(s)
-    -- Spawn from this frame's events.
-    for _, e in ipairs(s.events) do
-        if e.kind == "shot" then
-            ring(e.x, e.y, 0.30, 16, { 1, 0.95, 0.7 })
-            burst(e.x, e.y, 10, 230, 0.35, 3, { 1, 0.9, 0.55 })
-        elseif e.kind == "pass" then
-            ring(e.x, e.y, 0.24, 11, { 0.8, 0.95, 1 })
-            burst(e.x, e.y, 5, 150, 0.26, 2, { 0.8, 0.95, 1 })
-        elseif e.kind == "touch" then
-            ring(e.x, e.y, 0.28, 13, { 1, 1, 1 })
-        elseif e.kind == "tackle" then
-            -- A hard hit: punchier and warmer than the rest.
-            ring(e.x, e.y, 0.34, 18, { 1, 0.6, 0.3 })
-            burst(e.x, e.y, 12, 260, 0.4, 3, { 1, 0.7, 0.4 })
-        elseif e.kind == "catch" or e.kind == "claim" then
-            -- Clean grab/gather: a tight, confident double ring, no spray.
-            ring(e.x, e.y, 0.3, 12, { 0.8, 1, 0.9 })
-            ring(e.x, e.y, 0.38, 20, { 0.6, 1, 0.8 })
-        elseif e.kind == "parry" then
-            -- Deflection: a sharp cool spark fan.
-            ring(e.x, e.y, 0.3, 16, { 0.7, 0.9, 1 })
-            burst(e.x, e.y, 9, 220, 0.34, 3, { 0.7, 0.9, 1 })
-        elseif e.kind == "header" then
-            -- Aerial flick: a crisp high ring.
-            ring(e.x, e.y, 0.28, 15, { 0.9, 1, 1 })
-            burst(e.x, e.y, 5, 170, 0.28, 2, { 0.9, 1, 1 })
-        elseif e.kind == "volley" then
-            -- A volley is violence: big hot flash.
-            ring(e.x, e.y, 0.34, 20, { 1, 0.8, 0.45 })
-            burst(e.x, e.y, 12, 280, 0.4, 3, { 1, 0.8, 0.45 })
-        elseif e.kind == "bicycle" then
-            -- Acrobatic strike: a larger double flash, whether clean or wild.
-            ring(e.x, e.y, 0.38, 24, { 1, 0.65, 0.35 })
-            ring(e.x, e.y, 0.28, 14, { 0.85, 0.95, 1 })
-            burst(e.x, e.y, 15, 310, 0.44, 3, { 1, 0.7, 0.4 })
-        elseif e.kind == "reception" then
-            -- First touch: clean is compact; a heavy or missed touch splashes wider.
-            local clean = e.outcome == "clean"
-            ring(e.x, e.y, clean and 0.2 or 0.3, clean and 9 or 16, { 0.65, 1, 0.85 })
-            if not clean then
-                burst(e.x, e.y, 5, 150, 0.26, 2, { 0.65, 1, 0.85 })
-            end
-        elseif e.kind == "block" then
-            -- Body block: a blunt thud off a defender, warmer and smaller than a parry.
-            ring(e.x, e.y, 0.26, 14, { 1, 0.85, 0.6 })
-            burst(e.x, e.y, 6, 180, 0.3, 2, { 1, 0.85, 0.6 })
+---@param e MatchEvent
+---@param event_id string?
+local function spawn_event(e, event_id)
+    if e.kind == "shot" then
+        ring(e.x, e.y, 0.30, 16, { 1, 0.95, 0.7 }, event_id)
+        burst(e.x, e.y, 10, 230, 0.35, 3, { 1, 0.9, 0.55 }, event_id)
+    elseif e.kind == "pass" then
+        ring(e.x, e.y, 0.24, 11, { 0.8, 0.95, 1 }, event_id)
+        burst(e.x, e.y, 5, 150, 0.26, 2, { 0.8, 0.95, 1 }, event_id)
+    elseif e.kind == "touch" then
+        ring(e.x, e.y, 0.28, 13, { 1, 1, 1 }, event_id)
+    elseif e.kind == "tackle" then
+        -- A hard hit: punchier and warmer than the rest.
+        ring(e.x, e.y, 0.34, 18, { 1, 0.6, 0.3 }, event_id)
+        burst(e.x, e.y, 12, 260, 0.4, 3, { 1, 0.7, 0.4 }, event_id)
+    elseif e.kind == "catch" or e.kind == "claim" then
+        -- Clean grab/gather: a tight, confident double ring, no spray.
+        ring(e.x, e.y, 0.3, 12, { 0.8, 1, 0.9 }, event_id)
+        ring(e.x, e.y, 0.38, 20, { 0.6, 1, 0.8 }, event_id)
+    elseif e.kind == "parry" then
+        -- Deflection: a sharp cool spark fan.
+        ring(e.x, e.y, 0.3, 16, { 0.7, 0.9, 1 }, event_id)
+        burst(e.x, e.y, 9, 220, 0.34, 3, { 0.7, 0.9, 1 }, event_id)
+    elseif e.kind == "header" then
+        -- Aerial flick: a crisp high ring.
+        ring(e.x, e.y, 0.28, 15, { 0.9, 1, 1 }, event_id)
+        burst(e.x, e.y, 5, 170, 0.28, 2, { 0.9, 1, 1 }, event_id)
+    elseif e.kind == "volley" then
+        -- A volley is violence: big hot flash.
+        ring(e.x, e.y, 0.34, 20, { 1, 0.8, 0.45 }, event_id)
+        burst(e.x, e.y, 12, 280, 0.4, 3, { 1, 0.8, 0.45 }, event_id)
+    elseif e.kind == "bicycle" then
+        -- Acrobatic strike: a larger double flash, whether clean or wild.
+        ring(e.x, e.y, 0.38, 24, { 1, 0.65, 0.35 }, event_id)
+        ring(e.x, e.y, 0.28, 14, { 0.85, 0.95, 1 }, event_id)
+        burst(e.x, e.y, 15, 310, 0.44, 3, { 1, 0.7, 0.4 }, event_id)
+    elseif e.kind == "reception" then
+        -- First touch: clean is compact; a heavy or missed touch splashes wider.
+        local clean = e.outcome == "clean"
+        ring(e.x, e.y, clean and 0.2 or 0.3, clean and 9 or 16, { 0.65, 1, 0.85 }, event_id)
+        if not clean then
+            burst(e.x, e.y, 5, 150, 0.26, 2, { 0.65, 1, 0.85 }, event_id)
+        end
+    elseif e.kind == "block" then
+        -- Body block: a blunt thud off a defender, warmer and smaller than a parry.
+        ring(e.x, e.y, 0.26, 14, { 1, 0.85, 0.6 }, event_id)
+        burst(e.x, e.y, 6, 180, 0.3, 2, { 1, 0.85, 0.6 }, event_id)
+    end
+end
+
+---@param id string
+local function revoke_event(id)
+    speculative_events[id] = nil
+    for index = #particles, 1, -1 do
+        if particles[index].event_id == id then
+            table.remove(particles, index)
         end
     end
+end
 
+---@param event RollbackWrappedEvent
+local function add_speculative(event)
+    if event.domain:sub(1, 6) ~= "match/" or speculative_events[event.id] then
+        return
+    end
+    speculative_events[event.id] = true
+    local payload = event.payload --[[@as MatchEvent]]
+    spawn_event(payload, event.id)
+end
+
+-- Apply a complete stable-event delta. Speculative action visuals are keyed by
+-- event ID, so a correction can revoke or atomically replace their particles.
+---@param diff RollbackEventDiff
+function effects.apply_event_diff(diff)
+    for _, event in ipairs(diff.revoked) do
+        revoke_event(event.id)
+    end
+    for _, replacement in ipairs(diff.replaced) do
+        revoke_event(replacement.before.id)
+        add_speculative(replacement.after)
+    end
+    for _, event in ipairs(diff.added) do
+        add_speculative(event)
+    end
+end
+
+-- Once an event is confirmed it cannot be revoked. Existing particles keep
+-- aging naturally, while the rollback key is retired from bounded state.
+---@param event_id string
+function effects.confirm_event(event_id)
+    speculative_events[event_id] = nil
+end
+
+-- A corrected authoritative boundary invalidates renderer-owned loose-ball
+-- path samples. Action particles remain reconciled separately by stable ID.
+function effects.reset_trail()
+    trail = {}
+    last_sample = nil
+end
+
+---@param s MatchState
+function effects.sample_ball(s)
     -- Sample the ball trail only when it's a fast loose ball, spaced by distance
     -- so the trail looks the same regardless of framerate and never blobs at
     -- rest. Each dot remembers the ball's speed ("heat") and height, so a
@@ -145,6 +199,30 @@ function effects.consume(s)
     else
         last_sample = nil
     end
+end
+
+-- Consume one simulated state's events and position sample. This is the
+-- compatibility adapter used by the non-rollback match path.
+---@param s MatchState
+function effects.consume(s)
+    for _, event in ipairs(s.events) do
+        spawn_event(event, nil)
+    end
+    effects.sample_ball(s)
+end
+
+---@return { particle_count: integer, trail_count: integer, speculative_ids: string[] }
+function effects.diagnostics()
+    local ids = {}
+    for id in pairs(speculative_events) do
+        ids[#ids + 1] = id
+    end
+    table.sort(ids)
+    return {
+        particle_count = #particles,
+        trail_count = #trail,
+        speculative_ids = ids,
+    }
 end
 
 -- Advance renderer-owned particles at display cadence.

@@ -1,9 +1,16 @@
 local t = require("spec.support.runner")
+local Vec2 = require("core.vec2")
+local teams = require("data.teams")
+local audio = require("game.audio")
+local contract = require("game.match_contract")
+local match_observer = require("game.match_observer")
 local input_frame = require("sim.input_frame")
 local fixed_clock = require("sim.fixed_clock")
+local sim_match = require("sim.match")
 local match_snapshot = require("sim.match_snapshot")
 local rollback_playable_lab = require("sim.rollback_playable_lab")
 local Match = require("game.screens.match")
+local RealMatch = require("game.screens.real_match")
 local ScreenStack = require("game.screen_stack")
 local bloom = require("game.render.bloom")
 local replay = require("game.render.replay")
@@ -41,6 +48,30 @@ local function with_keyboard(fn)
     local ok, err = pcall(fn, down)
     love.keyboard = saved
     assert(ok, err)
+end
+
+---@return MatchSnapshot
+local function rollback_goal_fixture()
+    local state = sim_match.new({
+        home = teams.nebula,
+        away = teams.orion,
+        field = { w = 960, h = 540 },
+        duration = 2,
+        max_goals = 2,
+        input_ownership = sim_match.ownership_for_teams(teams.nebula, teams.orion),
+    })
+    for _, player in ipairs(state.players) do
+        player.pos = Vec2.new(180, 40)
+        player.run_vel = Vec2.new(0, 0)
+    end
+    state.owner = nil
+    state.ball = Vec2.new(350, 270)
+    state.ball_vel = Vec2.new(1200, 0)
+    state.ball_z = 10
+    state.ball_vz = 200
+    state.pickup_cd = 999
+    state.block_grace = 999
+    return match_snapshot.capture(state)
 end
 
 t.describe("match screen rollback laboratory (tier 2)", function()
@@ -382,6 +413,73 @@ t.describe("playable rollback ScreenStack flow (tier 3)", function()
             t.eq(debug.confirmed_input_tick, debug.reference_tick - 1)
             t.eq(debug.confirmed_output_tick, debug.reference_tick - 1)
             t.eq(debug.network_pending, 0)
+        end)
+    end)
+
+    t.it("reconciles a rollback goal through confirmed replay and result completion", function()
+        with_keyboard(function()
+            local request = assert(contract.new_request({
+                home_team_id = "nebula",
+                away_team_id = "orion",
+                home_starter_ids = {
+                    "ozzo",
+                    "veil_nyx",
+                    "rok_tann",
+                    "mika_olu",
+                    "sela_dwin",
+                },
+                formation_id = "1-2-1",
+                tactic_id = "balanced",
+                seed = 75,
+            }))
+            local match = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    network_profile = fixed_profile(2),
+                    profile_name = "goal_flow",
+                    network_seed = 7501,
+                    bot_seed = 7502,
+                    settlement_ticks = 128,
+                    initial_snapshot = rollback_goal_fixture(),
+                },
+            })
+            local completed = 0
+            local real = RealMatch.new(request, {
+                on_finished = function()
+                    completed = completed + 1
+                end,
+                on_cancelled = function() end,
+            })
+            real.match = match
+            real.observer = match_observer.new(match.state)
+            local stack = ScreenStack.new()
+            stack:push(real)
+            local saw_correction = false
+            local saw_goal_presentation = false
+            for _ = 1, 360 do
+                stack:update(fixed_clock.TICK_SECONDS)
+                saw_correction = saw_correction or #match._rollback_corrections > 0
+                saw_goal_presentation = saw_goal_presentation
+                    or match:broadcast_phase() == "goal"
+                    or replay.active()
+                if completed > 0 and assert(match._rollback_debug).status == "converged" then
+                    break
+                end
+            end
+
+            local debug = assert(match._rollback_debug)
+            local cues = audio.confirmed_cue_counts()
+            t.is_true(saw_correction)
+            t.is_true(saw_goal_presentation, "confirmed goal starts celebration/replay")
+            t.eq(match.state.score.home, 1)
+            t.is_true(match:full_time_confirmed())
+            t.eq(debug.status, "converged")
+            t.eq(completed, 1)
+            t.eq(cues.goal, 1)
+            t.eq(cues.kickoff, 1)
+            t.eq(cues.full_time, 1)
+            stack:update(1)
+            t.eq(completed, 1, "confirmed result completion remains exactly once")
         end)
     end)
 end)

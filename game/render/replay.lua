@@ -1,5 +1,5 @@
--- Goal replays: a ring buffer of lightweight render snapshots recorded every
--- live frame. When a goal goes in the sequence runs in two phases through the
+-- Goal replays: a bounded, boundary-keyed buffer of lightweight render snapshots.
+-- When a goal goes in the sequence runs in two phases through the
 -- normal renderer (same camera): first a brief CELEBRATION — the scorer wheels
 -- away and teammates converge to mob them — then a slow-motion PLAYBACK of the
 -- last few seconds of footage. Game-layer only — the sim knows nothing of it.
@@ -32,11 +32,17 @@ local MATE_DELAY = 0.25 -- teammates set off this fraction into the run (scorer 
 local MOB_RADIUS = 30 -- how tightly teammates ring the scorer when they arrive
 local STRIKE = { shot = true, header = true, volley = true, bicycle = true } -- events that score
 
-local buf, head, count = {}, 0, 0
+---@class ReplayFrame: MatchState
+---@field _replay_boundary integer
+
+---@type ReplayFrame[]
+local buf = {}
+local legacy_boundary = 0
 local phase = nil -- nil | "celebrate" | "playback"
 local playhead = 1
 local emitted = 0
 local window = {}
+local active_end_boundary = nil
 -- Celebration state (procedural: start poses + targets, animated by elapsed time).
 local cel_elapsed = 0
 ---@type MatchState  -- the goal-moment snapshot (start poses + goals + field)
@@ -63,9 +69,11 @@ local function smooth(u)
 end
 
 function replay.reset()
-    buf, head, count = {}, 0, 0
+    buf = {}
+    legacy_boundary = 0
     phase = nil
     window = {}
+    active_end_boundary = nil
 end
 
 function replay.active()
@@ -80,12 +88,13 @@ end
 function replay.stop()
     phase = nil
     window = {}
+    active_end_boundary = nil
 end
 
--- Record one live frame (call BEFORE the sim step so the goal frame's flight
--- is the last thing in the buffer, not the post-kickoff reset).
 ---@param s MatchState
-function replay.record(s)
+---@param boundary integer
+---@return ReplayFrame
+local function capture_frame(s, boundary)
     local players = {}
     for i, p in ipairs(s.players) do
         players[i] = {
@@ -116,9 +125,8 @@ function replay.record(s)
     for i, e in ipairs(s.events) do
         events[i] = e
     end
-    head = (head % cap()) + 1
-    count = math.min(count + 1, cap())
-    buf[head] = {
+    return {
+        _replay_boundary = boundary,
         field = s.field,
         goal_home = s.goal_home,
         goal_away = s.goal_away,
@@ -136,19 +144,78 @@ function replay.record(s)
     }
 end
 
+---@param boundary integer
+---@return integer?, boolean
+local function boundary_index(boundary)
+    for index, frame in ipairs(buf) do
+        if frame._replay_boundary == boundary then
+            return index, true
+        elseif frame._replay_boundary > boundary then
+            return index, false
+        end
+    end
+    return nil, false
+end
+
+-- Record or replace one canonical simulation boundary. Corrected rollback
+-- footage uses this API so obsolete interval frames cannot survive by index.
+---@param boundary integer
+---@param s MatchState
+function replay.record_boundary(boundary, s)
+    assert(
+        type(boundary) == "number" and boundary == math.floor(boundary) and boundary >= 0,
+        "replay boundary must be a non-negative integer"
+    )
+    local frame = capture_frame(s, boundary)
+    local index, found = boundary_index(boundary)
+    if found then
+        buf[assert(index)] = frame
+    elseif index then
+        table.insert(buf, index, frame)
+    else
+        buf[#buf + 1] = frame
+    end
+    while #buf > cap() do
+        table.remove(buf, 1)
+    end
+end
+
+-- Delete a corrected speculative tail before inserting replacement frames.
+---@param boundary integer
+function replay.truncate_from(boundary)
+    local index = boundary_index(boundary)
+    if index then
+        for cursor = #buf, index, -1 do
+            table.remove(buf, cursor)
+        end
+    end
+    if phase ~= nil and active_end_boundary and boundary <= active_end_boundary then
+        replay.stop()
+    end
+end
+
+-- Record one legacy live frame (called before its simulation step). The
+-- compatibility adapter supplies a private contiguous boundary sequence.
+---@param s MatchState
+function replay.record(s)
+    replay.record_boundary(legacy_boundary, s)
+    legacy_boundary = legacy_boundary + 1
+end
+
 -- Who scored: the most recent player on the scoring team to strike the ball
 -- (shot/header/volley), scanning the buffer back from the goal frame. Falls
 -- back to the scoring-team outfielder nearest the ball (deflections/own goals).
 ---@param scoring_team "home"|"away"
 ---@param last table  -- goal-moment snapshot
+---@param end_index integer
 ---@return string? id
-local function find_scorer(scoring_team, last)
+local function find_scorer(scoring_team, last, end_index)
     local team_of = {}
     for _, p in ipairs(last.players) do
         team_of[p.id] = p.team
     end
-    for k = 0, count - 1 do
-        local fr = buf[((head - 1 - k) % cap()) + 1]
+    for cursor = end_index, 1, -1 do
+        local fr = buf[cursor]
         if fr and fr.events then
             for i = #fr.events, 1, -1 do
                 local e = fr.events[i]
@@ -173,9 +240,10 @@ end
 -- Set up the celebration: scorer wheels away toward the corner they scored in,
 -- outfield teammates converge to mob them, everyone else holds (dejected).
 ---@param scoring_team "home"|"away"
-local function build_celebration(scoring_team)
-    cel_base = buf[head]
-    cel_scorer = find_scorer(scoring_team, cel_base)
+---@param end_index integer
+local function build_celebration(scoring_team, end_index)
+    cel_base = buf[end_index]
+    cel_scorer = find_scorer(scoring_team, cel_base, end_index)
     if not cel_scorer then
         return false
     end
@@ -215,10 +283,12 @@ end
 -- Build the slow-motion window: the last REPLAY_SECONDS of footage plus a
 -- synthetic net-bulge tail (the sim reset to kickoff on the goal frame).
 ---@param n integer
-local function build_window(n)
+---@param end_index integer
+local function build_window(n, end_index)
     window = {}
-    for k = n - 1, 0, -1 do
-        window[#window + 1] = buf[((head - 1 - k) % cap()) + 1]
+    local first = end_index - n + 1
+    for index = first, end_index do
+        window[#window + 1] = buf[index]
     end
     -- Synthetic tail: fly the ball on while everyone holds their final pose,
     -- and let the goal net catch it. The ball drives into the netting, sheds
@@ -274,22 +344,74 @@ end
 -- Begin the goal sequence: a celebration beat, then slow-motion playback of
 -- the last REPLAY_SECONDS (+ net-bulge tail).
 ---@param scoring_team "home"|"away"
+---@param end_index integer
 ---@return boolean started
-function replay.start(scoring_team)
-    local n = math.min(count, math.floor(tuning.values.REPLAY_SECONDS * 60))
+local function start_at_index(scoring_team, end_index)
+    local n = math.min(end_index, math.floor(tuning.values.REPLAY_SECONDS * 60))
     if n < 30 then
         return false -- not enough footage to be worth showing
     end
-    build_window(n)
+    build_window(n, end_index)
+    active_end_boundary = buf[end_index]._replay_boundary
     playhead = 1
     emitted = 0
     -- Celebrate first if we can name a scorer; otherwise cut straight to replay.
-    if build_celebration(scoring_team) then
+    if build_celebration(scoring_team, end_index) then
         phase = "celebrate"
     else
         phase = "playback"
     end
     return true
+end
+
+-- Begin the legacy goal sequence at the newest recorded frame.
+---@param scoring_team "home"|"away"
+---@return boolean started
+function replay.start(scoring_team)
+    return start_at_index(scoring_team, #buf)
+end
+
+-- Begin a confirmed rollback goal sequence at its corrected pre-goal boundary,
+-- even when newer speculative/live simulation boundaries already exist.
+---@param scoring_team "home"|"away"
+---@param boundary integer
+---@return boolean started
+function replay.start_at(scoring_team, boundary)
+    local index, found = boundary_index(boundary)
+    if not found then
+        return false
+    end
+    return start_at_index(scoring_team, assert(index))
+end
+
+---@return { count: integer, oldest_boundary: integer?, newest_boundary: integer?, boundaries: integer[] }
+function replay.diagnostics()
+    local boundaries = {}
+    for index, frame in ipairs(buf) do
+        boundaries[index] = frame._replay_boundary
+    end
+    return {
+        count = #buf,
+        oldest_boundary = buf[1] and buf[1]._replay_boundary or nil,
+        newest_boundary = buf[#buf] and buf[#buf]._replay_boundary or nil,
+        boundaries = boundaries,
+    }
+end
+
+---@param boundary integer
+---@return { ball_x: number, ball_y: number, score_home: integer, score_away: integer }?
+function replay.boundary_sample(boundary)
+    local index, found = boundary_index(boundary)
+    if not found then
+        return nil
+    end
+    local frame = buf[assert(index)]
+    return {
+        ball_x = frame.ball.x,
+        ball_y = frame.ball.y,
+        score_home = frame.score.home,
+        score_away = frame.score.away,
+    }
 end
 
 -- One celebration frame: players ease from their goal-moment poses to their
@@ -357,6 +479,7 @@ function replay.step(dt)
     if i >= #window then
         phase = nil
         window = {}
+        active_end_boundary = nil
         return nil
     end
     local a, b = window[i], window[i + 1]
