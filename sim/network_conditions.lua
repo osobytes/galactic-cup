@@ -48,6 +48,16 @@ local input_frame = require("sim.input_frame")
 ---@field delivered_ledger_entries integer
 ---@field pending_envelopes integer
 ---@field pending_record_references integer
+---@field peak_retained_authoritative_records integer
+---@field peak_delivered_ledger_entries integer
+---@field peak_pending_envelopes integer
+---@field peak_pending_record_references integer
+
+---@class NetworkConditionHighWater
+---@field retained_authoritative_records integer
+---@field delivered_ledger_entries integer
+---@field pending_envelopes integer
+---@field pending_record_references integer
 
 ---@class NetworkResendRequest
 ---@field source_slot integer
@@ -73,6 +83,7 @@ local input_frame = require("sim.input_frame")
 ---@field _delivered_fingerprints table<integer, table<integer, integer>>
 ---@field _max_delivered_sequence integer
 ---@field _counters NetworkConditionCounters
+---@field _high_water NetworkConditionHighWater
 
 ---@class NetworkConditionsModule
 local network_conditions = {}
@@ -208,6 +219,46 @@ local function assert_conditions(conditions)
     assert(type(conditions._pending) == "table", "network pending queue is missing")
     assert(type(conditions._records) == "table", "network authoritative history is missing")
     assert(type(conditions._counters) == "table", "network counters are missing")
+end
+
+---@param conditions NetworkConditions
+---@return NetworkConditionHighWater
+local function diagnostic_counts(conditions)
+    local retained_authoritative_records = 0
+    for _, records in pairs(conditions._records) do
+        retained_authoritative_records = retained_authoritative_records + #records
+    end
+    local delivered_ledger_entries = 0
+    for _, delivered in pairs(conditions._delivered_fingerprints) do
+        for _ in pairs(delivered) do
+            delivered_ledger_entries = delivered_ledger_entries + 1
+        end
+    end
+    local pending_record_references = 0
+    for _, references in pairs(conditions._pending_references) do
+        for _, count in pairs(references) do
+            pending_record_references = pending_record_references + count
+        end
+    end
+    return {
+        retained_authoritative_records = retained_authoritative_records,
+        delivered_ledger_entries = delivered_ledger_entries,
+        pending_envelopes = #conditions._pending,
+        pending_record_references = pending_record_references,
+    }
+end
+
+---@param conditions NetworkConditions
+local function update_high_water(conditions)
+    local current = diagnostic_counts(conditions)
+    local peak = conditions._high_water
+    peak.retained_authoritative_records =
+        math.max(peak.retained_authoritative_records, current.retained_authoritative_records)
+    peak.delivered_ledger_entries =
+        math.max(peak.delivered_ledger_entries, current.delivered_ledger_entries)
+    peak.pending_envelopes = math.max(peak.pending_envelopes, current.pending_envelopes)
+    peak.pending_record_references =
+        math.max(peak.pending_record_references, current.pending_record_references)
 end
 
 ---@param tick any
@@ -484,6 +535,7 @@ local function schedule_packet(
         adjust_pending_references(conditions, duplicate, 1)
         conditions._counters.duplicated = conditions._counters.duplicated + 1
     end
+    update_high_water(conditions)
 
     return {
         sequence = sequence,
@@ -550,6 +602,12 @@ function network_conditions.new(profile, seed)
             reordered = 0,
             history_recovered = 0,
         },
+        _high_water = {
+            retained_authoritative_records = 0,
+            delivered_ledger_entries = 0,
+            pending_envelopes = 0,
+            pending_record_references = 0,
+        },
     }
 end
 
@@ -573,6 +631,7 @@ function network_conditions.send(conditions, send_tick, source_slot, input_tick,
     if duplicate == nil then
         return nil, retain_err, retain_code
     end
+    update_high_water(conditions)
     conditions._clock_tick = send_tick
     local receipt = schedule_packet(conditions, source_slot, send_tick, input_tick, duplicate)
     prune_delivered_ledger(conditions)
@@ -687,6 +746,7 @@ function network_conditions.poll(conditions, delivery_tick)
         record_delivery(conditions, delivery)
         result[index] = copy_delivery(delivery)
     end
+    update_high_water(conditions)
     prune_delivered_ledger(conditions)
     return result
 end
@@ -718,27 +778,17 @@ end
 ---@return NetworkConditionDiagnostics
 function network_conditions.diagnostics(conditions)
     assert_conditions(conditions)
-    local retained_authoritative_records = 0
-    for _, records in pairs(conditions._records) do
-        retained_authoritative_records = retained_authoritative_records + #records
-    end
-    local delivered_ledger_entries = 0
-    for _, delivered in pairs(conditions._delivered_fingerprints) do
-        for _ in pairs(delivered) do
-            delivered_ledger_entries = delivered_ledger_entries + 1
-        end
-    end
-    local pending_record_references = 0
-    for _, references in pairs(conditions._pending_references) do
-        for _, count in pairs(references) do
-            pending_record_references = pending_record_references + count
-        end
-    end
+    local current = diagnostic_counts(conditions)
+    local peak = conditions._high_water
     return {
-        retained_authoritative_records = retained_authoritative_records,
-        delivered_ledger_entries = delivered_ledger_entries,
-        pending_envelopes = #conditions._pending,
-        pending_record_references = pending_record_references,
+        retained_authoritative_records = current.retained_authoritative_records,
+        delivered_ledger_entries = current.delivered_ledger_entries,
+        pending_envelopes = current.pending_envelopes,
+        pending_record_references = current.pending_record_references,
+        peak_retained_authoritative_records = peak.retained_authoritative_records,
+        peak_delivered_ledger_entries = peak.delivered_ledger_entries,
+        peak_pending_envelopes = peak.pending_envelopes,
+        peak_pending_record_references = peak.pending_record_references,
     }
 end
 

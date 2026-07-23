@@ -1,0 +1,953 @@
+-- Pure authoritative-reference rollback laboratory. The reference consumes
+-- only already-materialized tape frames; the client receives those same rows
+-- immediately for local slots or through deterministic network conditions for
+-- remote slots.
+
+local fnv1a64 = require("core.fnv1a64")
+local network_profiles = require("data.network_profiles")
+local input_frame = require("sim.input_frame")
+local input_tape = require("sim.input_tape")
+local match = require("sim.match")
+local match_snapshot = require("sim.match_snapshot")
+local network_conditions = require("sim.network_conditions")
+local rollback_input_history = require("sim.rollback_input_history")
+local rollback_session = require("sim.rollback_session")
+local rollback_snapshot_history = require("sim.rollback_snapshot_history")
+
+---@alias RollbackLabStatus
+---| "converged"
+---| "diverged"
+---| "late_input_unrecoverable"
+---| "unconfirmed_authority"
+---| "drain_incomplete"
+---| "incomplete_client"
+---| "comparison_history_missing"
+
+---@class RollbackLabCorruption
+---@field tick integer
+---@field slot integer
+
+---@class RollbackLabOptions
+---@field profile_name string?
+---@field profile NetworkProfile?
+---@field network_seed integer?
+---@field sources RollbackInputSource[]?
+---@field max_rollback_ticks integer?
+---@field drain_ticks integer?
+---@field corruption RollbackLabCorruption?
+---@field measure RollbackSessionMeasure? Optional runner-owned wall-time observer.
+
+---@class RollbackLabDepth
+---@field depth integer
+---@field count integer
+
+---@class RollbackLabDivergence
+---@field causal_tick integer
+---@field boundary integer
+---@field expected_hash string
+---@field actual_hash string
+---@field first_difference MatchSnapshotDifference?
+
+---@class RollbackLabPeaks
+---@field snapshot_count integer
+---@field snapshot_bytes integer
+---@field input_authoritative_samples integer
+---@field input_effective_ticks integer
+---@field input_record_ticks integer
+---@field network_pending_envelopes integer
+---@field network_pending_record_references integer
+---@field network_delivered_ledger_entries integer
+---@field network_authoritative_records integer
+
+---@class RollbackLabMetrics
+---@field predicted_slot_samples integer
+---@field predicted_ticks integer
+---@field correction_count integer
+---@field rollback_count integer
+---@field resimulated_ticks integer
+---@field latest_rollback_depth integer
+---@field max_rollback_depth integer
+---@field rollback_depths RollbackLabDepth[]
+---@field predicted_early_finish boolean
+---@field reactivation_count integer
+---@field confirmed_redundant_rows_skipped integer
+---@field compared_boundaries integer
+---@field expected_boundaries integer
+---@field current_snapshot_count integer
+---@field current_snapshot_bytes integer
+---@field peaks RollbackLabPeaks
+
+---@class RollbackLabDrainSummary
+---@field final_tick integer
+---@field complete boolean
+---@field pending integer
+---@field recovered integer
+---@field requested integer
+
+---@class RollbackLabResult
+---@field schema integer
+---@field success boolean
+---@field status RollbackLabStatus
+---@field fixture string
+---@field fixture_seed integer
+---@field profile string
+---@field profile_parameters string
+---@field network_seed integer
+---@field source_pattern string
+---@field input_ticks integer
+---@field tape_digest string
+---@field initial_hash string
+---@field reference_final_boundary integer
+---@field client_final_boundary integer
+---@field reference_final_hash string
+---@field client_final_hash string
+---@field confirmed_tick integer
+---@field confirmed_output_tick integer
+---@field late_input_tick integer?
+---@field unconfirmed_tick integer?
+---@field divergence RollbackLabDivergence?
+---@field metrics RollbackLabMetrics
+---@field input_diagnostics RollbackInputHistoryDiagnostics
+---@field snapshot_diagnostics RollbackSnapshotHistoryDiagnostics
+---@field network_counters NetworkConditionCounters
+---@field network_diagnostics NetworkConditionDiagnostics
+---@field drain RollbackLabDrainSummary
+
+---@class RollbackLabRunState
+---@field session RollbackSession
+---@field network NetworkConditions
+---@field reference MatchState
+---@field reference_history RollbackSnapshotHistory
+---@field sources RollbackInputSource[]
+---@field depth_counts table<integer, integer>
+---@field last_compared_output integer
+---@field compared_boundaries integer
+---@field divergence RollbackLabDivergence?
+---@field late_input_tick integer?
+---@field unconfirmed_tick integer?
+---@field comparison_history_missing boolean
+---@field predicted_early_finish boolean
+---@field reactivation_count integer
+---@field confirmed_redundant_rows_skipped integer
+---@field peaks RollbackLabPeaks
+
+---@class RollbackLabModule
+local rollback_lab = {}
+
+rollback_lab.SCHEMA = 1
+rollback_lab.DEFAULT_NETWORK_SEED = 7302
+rollback_lab.DEFAULT_DRAIN_TICKS = 256
+
+---@param value any
+---@return boolean
+local function is_integer(value)
+    return type(value) == "number"
+        and value == value
+        and value ~= math.huge
+        and value ~= -math.huge
+        and value == math.floor(value)
+end
+
+---@param value boolean
+---@return string
+local function bool_marker(value)
+    return value and "1" or "0"
+end
+
+---@param value any
+---@return string
+local function optional_marker(value)
+    return value == nil and "none" or tostring(value)
+end
+
+local HEX = "0123456789abcdef"
+
+---@param value string
+---@return string
+local function marker_string(value)
+    local encoded = {}
+    for index = 1, #value do
+        local byte = value:byte(index)
+        local high = math.floor(byte / 16)
+        local low = byte % 16
+        encoded[#encoded + 1] = HEX:sub(high + 1, high + 1)
+        encoded[#encoded + 1] = HEX:sub(low + 1, low + 1)
+    end
+    return #value .. ":" .. table.concat(encoded)
+end
+
+---@param value string?
+---@return string
+local function optional_marker_string(value)
+    if value == nil then
+        return "none"
+    end
+    return "some:" .. marker_string(value)
+end
+
+---@param state Fnv1a64State
+---@param value string
+local function digest_segment(state, value)
+    fnv1a64.update(state, tostring(#value) .. ":" .. value)
+end
+
+---@param tape InputTape
+---@return string
+local function tape_digest(tape)
+    local state = fnv1a64.new()
+    digest_segment(state, match_snapshot.number_bytes(tape.version))
+    local identity = tape.identity
+    for _, field in ipairs({
+        "tape_version",
+        "input_version",
+        "snapshot_version",
+        "seed",
+        "tick_rate",
+    }) do
+        digest_segment(state, match_snapshot.number_bytes(identity[field]))
+    end
+    for _, field in ipairs({
+        "build",
+        "source",
+        "content",
+        "tuning",
+        "config",
+        "fixture",
+    }) do
+        digest_segment(state, identity[field])
+    end
+    digest_segment(state, match_snapshot.encode(tape.initial))
+    for _, frame in ipairs(tape.frames) do
+        digest_segment(state, assert(input_frame.encode(frame)))
+    end
+    for _, hash in ipairs(tape.boundary_hashes) do
+        digest_segment(state, hash)
+    end
+    return fnv1a64.hex(state)
+end
+
+---@param measure RollbackSessionMeasure?
+---@param operation fun(): any
+---@return any
+local function capture(measure, operation)
+    if measure == nil then
+        return operation()
+    end
+    local calls = 0
+    local result = nil
+    local operation_succeeded = false
+    local operation_error = nil
+    measure("capture", function()
+        calls = calls + 1
+        assert(calls == 1, "rollback lab measurement operation must run exactly once")
+        local ok, value = pcall(operation)
+        operation_succeeded = ok
+        if not ok then
+            operation_error = value
+            error(value, 0)
+        end
+        result = value
+        return result
+    end)
+    assert(calls == 1, "rollback lab measurement observer must run its operation exactly once")
+    if not operation_succeeded then
+        error(operation_error, 0)
+    end
+    return result
+end
+
+---@param sample InputSample
+---@return InputSample
+local function copy_sample(sample)
+    return assert(input_frame.new_sample(sample))
+end
+
+---@return RollbackInputSource[]
+local function default_sources()
+    local sources = {}
+    for slot = 1, input_frame.SLOT_COUNT do
+        sources[slot] = slot <= input_frame.HOME_SLOT_COUNT and "local" or "remote"
+    end
+    return sources
+end
+
+---@param supplied RollbackInputSource[]?
+---@return RollbackInputSource[]
+local function copy_sources(supplied)
+    supplied = supplied or default_sources()
+    assert(type(supplied) == "table", "rollback lab sources must be an array")
+    assert(#supplied == input_frame.SLOT_COUNT, "rollback lab requires eight input sources")
+    local sources = {}
+    for slot = 1, input_frame.SLOT_COUNT do
+        local source = supplied[slot]
+        assert(
+            source == "local" or source == "remote",
+            "rollback lab sources must be local or remote"
+        )
+        sources[slot] = source
+    end
+    for key in pairs(supplied) do
+        assert(
+            type(key) == "number"
+                and key == math.floor(key)
+                and key >= 1
+                and key <= input_frame.SLOT_COUNT,
+            "rollback lab sources must be a canonical array"
+        )
+    end
+    return sources
+end
+
+---@param sources RollbackInputSource[]
+---@return string
+local function source_pattern(sources)
+    local parts = {}
+    for index, source in ipairs(sources) do
+        parts[index] = source == "local" and "L" or "R"
+    end
+    return table.concat(parts)
+end
+
+---@param profile NetworkProfile
+---@return string
+local function profile_parameters(profile)
+    return table.concat({
+        match_snapshot.number_bytes(profile.base_delay_ticks),
+        match_snapshot.number_bytes(profile.jitter_min_ticks),
+        match_snapshot.number_bytes(profile.jitter_max_ticks),
+        match_snapshot.number_bytes(profile.independent_loss_rate),
+        match_snapshot.number_bytes(profile.duplication_rate),
+        match_snapshot.number_bytes(profile.burst_start_rate),
+        match_snapshot.number_bytes(profile.burst_length_ticks),
+    }, ",")
+end
+
+---@param options RollbackLabOptions
+---@return NetworkProfile
+---@return string
+local function selected_profile(options)
+    if options.profile then
+        return options.profile, options.profile_name or "custom"
+    end
+    local name = options.profile_name or "clean"
+    local profile = network_profiles[name]
+    assert(profile ~= nil, "unknown rollback lab profile: " .. name)
+    return profile, name
+end
+
+---@param corruption RollbackLabCorruption?
+---@param tick integer
+---@param slot integer
+---@param sample InputSample
+---@return InputSample
+local function client_sample(corruption, tick, slot, sample)
+    local copied = copy_sample(sample)
+    if corruption == nil or corruption.tick ~= tick or corruption.slot ~= slot then
+        return copied
+    end
+    copied.move_x = copied.move_x == input_frame.MOVE_SCALE and -input_frame.MOVE_SCALE
+        or input_frame.MOVE_SCALE
+    copied.edges = copied.edges == input_frame.EDGE_BITS.dash and 0 or input_frame.EDGE_BITS.dash
+    return copied
+end
+
+---@param state RollbackLabRunState
+local function update_peaks(state)
+    local session = rollback_session.diagnostics(state.session)
+    local snapshots = session.snapshot_history
+    local inputs = session.input_history
+    local network = network_conditions.diagnostics(state.network)
+    local peaks = state.peaks
+    peaks.snapshot_count = math.max(peaks.snapshot_count, snapshots.peak_retained_boundary_count)
+    peaks.snapshot_bytes = math.max(peaks.snapshot_bytes, snapshots.peak_canonical_bytes)
+    peaks.input_authoritative_samples =
+        math.max(peaks.input_authoritative_samples, inputs.authoritative_sample_count)
+    peaks.input_effective_ticks = math.max(peaks.input_effective_ticks, inputs.effective_tick_count)
+    peaks.input_record_ticks = math.max(peaks.input_record_ticks, inputs.record_tick_count)
+    peaks.network_pending_envelopes =
+        math.max(peaks.network_pending_envelopes, network.peak_pending_envelopes)
+    peaks.network_pending_record_references =
+        math.max(peaks.network_pending_record_references, network.peak_pending_record_references)
+    peaks.network_delivered_ledger_entries =
+        math.max(peaks.network_delivered_ledger_entries, network.peak_delivered_ledger_entries)
+    peaks.network_authoritative_records =
+        math.max(peaks.network_authoritative_records, network.peak_retained_authoritative_records)
+end
+
+---@param state RollbackLabRunState
+local function detect_unconfirmed_floor(state)
+    local diagnostics = rollback_session.diagnostics(state.session)
+    local input = diagnostics.input_history
+    if input.oldest_retained_tick > diagnostics.confirmed_tick + 1 then
+        local missing = diagnostics.confirmed_tick + 1
+        if state.unconfirmed_tick == nil or missing < state.unconfirmed_tick then
+            state.unconfirmed_tick = missing
+        end
+    end
+end
+
+---@param state RollbackLabRunState
+---@param expected MatchSnapshot
+---@param actual MatchSnapshot
+---@param boundary integer
+local function compare_snapshots(state, expected, actual, boundary)
+    local expected_hash = match_snapshot.hash(expected)
+    local actual_hash = match_snapshot.hash(actual)
+    state.compared_boundaries = state.compared_boundaries + 1
+    if expected_hash ~= actual_hash and state.divergence == nil then
+        state.divergence = {
+            causal_tick = math.max(0, boundary - 1),
+            boundary = boundary,
+            expected_hash = expected_hash,
+            actual_hash = actual_hash,
+            first_difference = match_snapshot.first_difference(expected, actual),
+        }
+    end
+end
+
+---@param state RollbackLabRunState
+local function compare_newly_confirmed(state)
+    local diagnostics = rollback_session.diagnostics(state.session)
+    while state.last_compared_output < diagnostics.confirmed_output_tick do
+        local output_tick = state.last_compared_output + 1
+        local boundary = output_tick + 1
+        local expected = rollback_snapshot_history.lookup(state.reference_history, boundary)
+        local actual = rollback_session.snapshot(state.session, boundary)
+        if
+            (expected.status ~= "present" and expected.status ~= "retained")
+            or (actual.status ~= "present" and actual.status ~= "retained")
+        then
+            state.comparison_history_missing = true
+            return
+        end
+        compare_snapshots(
+            state,
+            assert(expected.snapshot, "reference comparison snapshot is missing"),
+            assert(actual.snapshot, "client comparison snapshot is missing"),
+            boundary
+        )
+        state.last_compared_output = output_tick
+    end
+end
+
+---@param state RollbackLabRunState
+---@param tick integer
+---@param slot integer
+---@param sample InputSample
+local function add_client_authority(state, tick, slot, sample)
+    local arrival, err, code = rollback_session.add_authoritative(state.session, tick, slot, sample)
+    if arrival then
+        return
+    end
+    if code == "outside_window" then
+        if state.late_input_tick == nil or tick < state.late_input_tick then
+            state.late_input_tick = tick
+        end
+        return
+    end
+    assert(false, err or ("rollback lab rejected authority with " .. tostring(code)))
+end
+
+---@param state RollbackLabRunState
+---@param deliveries NetworkDelivery[]
+local function process_delivery_batch(state, deliveries)
+    if #deliveries == 0 then
+        return
+    end
+    local before = rollback_session.diagnostics(state.session).status
+    for _, delivery in ipairs(deliveries) do
+        for _, record in ipairs(network_conditions.records(delivery)) do
+            local confirmed_tick = rollback_session.diagnostics(state.session).confirmed_tick
+            if record.tick <= confirmed_tick then
+                state.confirmed_redundant_rows_skipped = state.confirmed_redundant_rows_skipped + 1
+            else
+                add_client_authority(state, record.tick, delivery.source_slot, record.sample)
+            end
+        end
+    end
+    local reconciled = rollback_session.reconcile(state.session)
+    if reconciled.changed then
+        local depth = reconciled.old_present_boundary - assert(reconciled.causal_tick)
+        state.depth_counts[depth] = (state.depth_counts[depth] or 0) + 1
+    end
+    if before == "finished" and reconciled.status == "active" then
+        state.reactivation_count = state.reactivation_count + 1
+    end
+    update_peaks(state)
+    detect_unconfirmed_floor(state)
+end
+
+---@param state RollbackLabRunState
+---@param target_boundary integer
+local function catch_up_client(state, target_boundary)
+    while true do
+        local diagnostics = rollback_session.diagnostics(state.session)
+        if diagnostics.present_boundary >= target_boundary then
+            break
+        end
+        if diagnostics.status == "late_input_unrecoverable" then
+            break
+        end
+        if diagnostics.status == "finished" then
+            state.predicted_early_finish = true
+            break
+        end
+        local output, err, code = rollback_session.step(state.session)
+        if output == nil then
+            assert(
+                code == "match_finished" or code == "late_input_unrecoverable",
+                err or "rollback lab client step failed"
+            )
+            if code == "match_finished" then
+                state.predicted_early_finish = true
+            end
+            break
+        end
+        update_peaks(state)
+        detect_unconfirmed_floor(state)
+    end
+end
+
+---@param state RollbackLabRunState
+---@param deliveries NetworkDelivery[]
+local function process_drain_deliveries(state, deliveries)
+    local group = {}
+    local arrival_tick = nil
+    for _, delivery in ipairs(deliveries) do
+        if arrival_tick ~= nil and delivery.arrival_tick ~= arrival_tick then
+            process_delivery_batch(state, group)
+            catch_up_client(state, state.reference.input_tick)
+            compare_newly_confirmed(state)
+            group = {}
+        end
+        arrival_tick = delivery.arrival_tick
+        group[#group + 1] = delivery
+    end
+    if #group > 0 then
+        process_delivery_batch(state, group)
+        catch_up_client(state, state.reference.input_tick)
+        compare_newly_confirmed(state)
+    end
+end
+
+---@param counts table<integer, integer>
+---@return RollbackLabDepth[]
+local function sorted_depths(counts)
+    local depths = {}
+    for depth in pairs(counts) do
+        depths[#depths + 1] = depth
+    end
+    table.sort(depths)
+    local result = {}
+    for index, depth in ipairs(depths) do
+        result[index] = { depth = depth, count = assert(counts[depth]) }
+    end
+    return result
+end
+
+---@param sources RollbackInputSource[]
+---@param last_tick integer
+---@return NetworkResendRequest[]
+local function drain_requests(sources, last_tick)
+    local requests = {}
+    for slot, source in ipairs(sources) do
+        if source == "remote" then
+            requests[#requests + 1] = { source_slot = slot, input_tick = last_tick }
+        end
+    end
+    return requests
+end
+
+---@param state RollbackLabRunState
+---@param tape InputTape
+---@param profile_name string
+---@param profile NetworkProfile
+---@param network_seed integer
+---@param drain NetworkDrainResult
+---@return RollbackLabResult
+local function finish_result(state, tape, profile_name, profile, network_seed, drain)
+    local session = rollback_session.diagnostics(state.session)
+    local reference_snapshot = match_snapshot.capture(state.reference)
+    local client_snapshot = rollback_session.current_snapshot(state.session)
+    local final_comparison =
+        rollback_session.compare(state.session, reference_snapshot, state.late_input_tick)
+    local last_tick = #tape.frames - 1
+    if session.confirmed_tick < last_tick and state.unconfirmed_tick == nil then
+        state.unconfirmed_tick = session.confirmed_tick + 1
+    end
+
+    local status = "converged"
+    if state.late_input_tick ~= nil or session.status == "late_input_unrecoverable" then
+        status = "late_input_unrecoverable"
+    elseif state.unconfirmed_tick ~= nil then
+        status = "unconfirmed_authority"
+    elseif not drain.complete or drain.pending ~= 0 then
+        status = "drain_incomplete"
+    elseif state.comparison_history_missing then
+        status = "comparison_history_missing"
+    elseif state.divergence ~= nil or not final_comparison.matched then
+        status = "diverged"
+    elseif session.present_boundary ~= state.reference.input_tick then
+        status = "incomplete_client"
+    end
+    ---@cast status RollbackLabStatus
+
+    local expected_boundaries = #tape.frames + 1
+    local success = status == "converged"
+        and session.confirmed_tick == last_tick
+        and session.confirmed_output_tick == state.reference.input_tick - 1
+        and state.compared_boundaries == expected_boundaries
+        and network_conditions.pending(state.network) == 0
+    if not success and status == "converged" then
+        status = "incomplete_client"
+    end
+
+    return {
+        schema = rollback_lab.SCHEMA,
+        success = success,
+        status = status,
+        fixture = tape.identity.fixture,
+        fixture_seed = tape.identity.seed,
+        profile = profile_name,
+        profile_parameters = profile_parameters(profile),
+        network_seed = network_seed,
+        source_pattern = source_pattern(state.sources),
+        input_ticks = #tape.frames,
+        tape_digest = tape_digest(tape),
+        initial_hash = match_snapshot.hash(tape.initial),
+        reference_final_boundary = state.reference.input_tick,
+        client_final_boundary = session.present_boundary,
+        reference_final_hash = match_snapshot.hash(reference_snapshot),
+        client_final_hash = match_snapshot.hash(client_snapshot),
+        confirmed_tick = session.confirmed_tick,
+        confirmed_output_tick = session.confirmed_output_tick,
+        late_input_tick = state.late_input_tick,
+        unconfirmed_tick = state.unconfirmed_tick,
+        divergence = state.divergence,
+        metrics = {
+            predicted_slot_samples = session.predicted_slot_samples,
+            predicted_ticks = session.predicted_ticks,
+            correction_count = session.correction_count,
+            rollback_count = session.rollback_count,
+            resimulated_ticks = session.resimulated_ticks,
+            latest_rollback_depth = session.latest_rollback_depth,
+            max_rollback_depth = session.max_rollback_depth,
+            rollback_depths = sorted_depths(state.depth_counts),
+            predicted_early_finish = state.predicted_early_finish,
+            reactivation_count = state.reactivation_count,
+            confirmed_redundant_rows_skipped = state.confirmed_redundant_rows_skipped,
+            compared_boundaries = state.compared_boundaries,
+            expected_boundaries = expected_boundaries,
+            current_snapshot_count = session.snapshot_history.retained_boundary_count,
+            current_snapshot_bytes = session.snapshot_history.canonical_bytes,
+            peaks = state.peaks,
+        },
+        input_diagnostics = session.input_history,
+        snapshot_diagnostics = session.snapshot_history,
+        network_counters = network_conditions.counters(state.network),
+        network_diagnostics = network_conditions.diagnostics(state.network),
+        drain = {
+            final_tick = drain.final_tick,
+            complete = drain.complete,
+            pending = drain.pending,
+            recovered = drain.recovered,
+            requested = drain.requested,
+        },
+    }
+end
+
+-- Run a validated, already-materialized authoritative tape against an
+-- independent reference and one impaired rollback client. The optional
+-- measurement callback is observational: clock values are neither read nor
+-- retained here and cannot enter the logical result.
+---@param tape InputTape
+---@param options RollbackLabOptions?
+---@return RollbackLabResult
+function rollback_lab.run(tape, options)
+    options = options or {}
+    assert(input_tape.validate(tape))
+    assert(#tape.frames > 0, "rollback lab tape must contain at least one input frame")
+    local sources = copy_sources(options.sources)
+    local profile, profile_name = selected_profile(options)
+    local network_seed = options.network_seed or rollback_lab.DEFAULT_NETWORK_SEED
+    assert(is_integer(network_seed), "rollback lab network seed must be an integer")
+    local max_rollback_ticks = options.max_rollback_ticks
+        or rollback_input_history.ROLLBACK_WINDOW_TICKS
+    assert(
+        is_integer(max_rollback_ticks) and max_rollback_ticks >= 0,
+        "rollback lab rollback window must be a non-negative integer"
+    )
+    local drain_ticks = options.drain_ticks or rollback_lab.DEFAULT_DRAIN_TICKS
+    assert(is_integer(drain_ticks) and drain_ticks > 0, "rollback lab drain must be positive")
+    if options.corruption then
+        assert(
+            is_integer(options.corruption.tick)
+                and options.corruption.tick >= 0
+                and options.corruption.tick < #tape.frames,
+            "rollback lab corruption tick is outside the tape"
+        )
+        assert(
+            is_integer(options.corruption.slot)
+                and options.corruption.slot >= 1
+                and options.corruption.slot <= input_frame.SLOT_COUNT,
+            "rollback lab corruption slot is outside the input frame"
+        )
+    end
+
+    local reference = match_snapshot.restore(tape.initial)
+    local reference_history = rollback_snapshot_history.new(max_rollback_ticks)
+    assert(rollback_snapshot_history.store(reference_history, tape.initial))
+    local session = rollback_session.new(tape.initial, sources, max_rollback_ticks, options.measure)
+    local network = network_conditions.new(profile, network_seed)
+    ---@type RollbackLabRunState
+    local state = {
+        session = session,
+        network = network,
+        reference = reference,
+        reference_history = reference_history,
+        sources = sources,
+        depth_counts = {},
+        last_compared_output = -1,
+        compared_boundaries = 0,
+        divergence = nil,
+        late_input_tick = nil,
+        unconfirmed_tick = nil,
+        comparison_history_missing = false,
+        predicted_early_finish = false,
+        reactivation_count = 0,
+        confirmed_redundant_rows_skipped = 0,
+        peaks = {
+            snapshot_count = 0,
+            snapshot_bytes = 0,
+            input_authoritative_samples = 0,
+            input_effective_ticks = 0,
+            input_record_ticks = 0,
+            network_pending_envelopes = 0,
+            network_pending_record_references = 0,
+            network_delivered_ledger_entries = 0,
+            network_authoritative_records = 0,
+        },
+    }
+    compare_snapshots(state, tape.initial, rollback_session.current_snapshot(session), 0)
+    update_peaks(state)
+
+    for _, frame in ipairs(tape.frames) do
+        assert(
+            frame.tick == state.reference.input_tick,
+            "rollback lab tape and reference boundary disagree"
+        )
+        match.step(state.reference, 1 / tape.identity.tick_rate, frame)
+        local reference_boundary = capture(options.measure, function()
+            return match_snapshot.capture(state.reference)
+        end)
+        ---@cast reference_boundary MatchSnapshot
+        assert(rollback_snapshot_history.store(reference_history, reference_boundary))
+
+        for slot, source in ipairs(sources) do
+            local sample = client_sample(options.corruption, frame.tick, slot, frame.slots[slot])
+            if source == "local" then
+                add_client_authority(state, frame.tick, slot, sample)
+            else
+                assert(network_conditions.send(network, frame.tick, slot, frame.tick, sample))
+            end
+        end
+        update_peaks(state)
+
+        local deliveries = network_conditions.poll(network, frame.tick)
+        process_delivery_batch(state, deliveries)
+        catch_up_client(state, state.reference.input_tick)
+        compare_newly_confirmed(state)
+        update_peaks(state)
+        detect_unconfirmed_floor(state)
+    end
+
+    local last_tick = #tape.frames - 1
+    local drain = assert(
+        network_conditions.drain(
+            network,
+            last_tick + 1,
+            drain_ticks,
+            drain_requests(sources, last_tick)
+        )
+    )
+    update_peaks(state)
+    process_drain_deliveries(state, drain.deliveries)
+    catch_up_client(state, state.reference.input_tick)
+    compare_newly_confirmed(state)
+    update_peaks(state)
+    detect_unconfirmed_floor(state)
+
+    return finish_result(state, tape, profile_name, profile, network_seed, drain)
+end
+
+---@param depths RollbackLabDepth[]
+---@return string
+local function depth_marker(depths)
+    local parts = {}
+    for index, row in ipairs(depths) do
+        parts[index] = row.depth .. ":" .. row.count
+    end
+    return #parts > 0 and table.concat(parts, ",") or "none"
+end
+
+-- Stable fixed-order logical evidence. Wall-time observations are deliberately
+-- absent so repeated fresh processes can compare this line byte for byte.
+---@param result RollbackLabResult
+---@return string
+function rollback_lab.logical_marker(result)
+    local metrics = result.metrics
+    local peaks = metrics.peaks
+    local input = result.input_diagnostics
+    local network = result.network_counters
+    local network_diagnostics = result.network_diagnostics
+    local drain = result.drain
+    local difference = result.divergence and result.divergence.first_difference or nil
+    return table.concat({
+        "GC_ROLLBACK_LAB",
+        "result",
+        "schema=" .. result.schema,
+        "fixture=" .. marker_string(result.fixture),
+        "fixture_seed=" .. result.fixture_seed,
+        "profile=" .. marker_string(result.profile),
+        "profile_parameters=" .. marker_string(result.profile_parameters),
+        "network_seed=" .. result.network_seed,
+        "sources=" .. marker_string(result.source_pattern),
+        "success=" .. bool_marker(result.success),
+        "status=" .. marker_string(result.status),
+        "ticks=" .. result.input_ticks,
+        "tape_digest=" .. result.tape_digest,
+        "reference_boundary=" .. result.reference_final_boundary,
+        "client_boundary=" .. result.client_final_boundary,
+        "initial_hash=" .. result.initial_hash,
+        "reference_hash=" .. result.reference_final_hash,
+        "client_hash=" .. result.client_final_hash,
+        "confirmed_tick=" .. result.confirmed_tick,
+        "confirmed_output_tick=" .. result.confirmed_output_tick,
+        "late_tick=" .. optional_marker(result.late_input_tick),
+        "unconfirmed_tick=" .. optional_marker(result.unconfirmed_tick),
+        "divergence_tick="
+            .. optional_marker(result.divergence and result.divergence.causal_tick or nil),
+        "divergence_boundary="
+            .. optional_marker(result.divergence and result.divergence.boundary or nil),
+        "divergence_expected="
+            .. optional_marker(result.divergence and result.divergence.expected_hash or nil),
+        "divergence_actual="
+            .. optional_marker(result.divergence and result.divergence.actual_hash or nil),
+        "divergence_path=" .. optional_marker_string(difference and difference.path or nil),
+        "compared=" .. metrics.compared_boundaries,
+        "expected_compared=" .. metrics.expected_boundaries,
+        "predicted_samples=" .. metrics.predicted_slot_samples,
+        "predicted_ticks=" .. metrics.predicted_ticks,
+        "corrections=" .. metrics.correction_count,
+        "rollbacks=" .. metrics.rollback_count,
+        "resimulated=" .. metrics.resimulated_ticks,
+        "latest_depth=" .. metrics.latest_rollback_depth,
+        "max_depth=" .. metrics.max_rollback_depth,
+        "depths=" .. depth_marker(metrics.rollback_depths),
+        "predicted_early_finish=" .. bool_marker(metrics.predicted_early_finish),
+        "reactivations=" .. metrics.reactivation_count,
+        "confirmed_redundant_skipped=" .. metrics.confirmed_redundant_rows_skipped,
+        "snapshots=" .. metrics.current_snapshot_count,
+        "snapshot_bytes=" .. metrics.current_snapshot_bytes,
+        "peak_snapshots=" .. peaks.snapshot_count,
+        "peak_snapshot_bytes=" .. peaks.snapshot_bytes,
+        "input_floor=" .. input.oldest_retained_tick,
+        "input_authority=" .. input.authoritative_sample_count,
+        "input_effective=" .. input.effective_tick_count,
+        "input_records=" .. input.record_tick_count,
+        "input_anchors=" .. input.predecessor_anchor_count,
+        "peak_input_authority=" .. peaks.input_authoritative_samples,
+        "peak_input_effective=" .. peaks.input_effective_ticks,
+        "peak_input_records=" .. peaks.input_record_ticks,
+        "network_sent=" .. network.sent,
+        "network_delivered=" .. network.delivered,
+        "network_lost=" .. network.independent_lost,
+        "network_burst_lost=" .. network.burst_lost,
+        "network_duplicates=" .. network.duplicated,
+        "network_reordered=" .. network.reordered,
+        "network_history_recovered=" .. network.history_recovered,
+        "network_retained=" .. network_diagnostics.retained_authoritative_records,
+        "network_ledger=" .. network_diagnostics.delivered_ledger_entries,
+        "network_pending=" .. network_diagnostics.pending_envelopes,
+        "peak_network_pending=" .. peaks.network_pending_envelopes,
+        "peak_network_references=" .. peaks.network_pending_record_references,
+        "peak_network_ledger=" .. peaks.network_delivered_ledger_entries,
+        "peak_network_retained=" .. peaks.network_authoritative_records,
+        "drain_complete=" .. bool_marker(drain.complete),
+        "drain_pending=" .. drain.pending,
+        "drain_recovered=" .. drain.recovered,
+        "drain_requested=" .. drain.requested,
+        "drain_final_tick=" .. drain.final_tick,
+    }, "|")
+end
+
+---@param result RollbackLabResult
+---@return string
+function rollback_lab.summary(result)
+    local metrics = result.metrics
+    local network = result.network_counters
+    local lines = {
+        ("Rollback laboratory: %s (%s)"):format(result.status, result.success and "pass" or "fail"),
+        ("Fixture %s, profile %s, network seed %d, sources %s"):format(
+            result.fixture,
+            result.profile,
+            result.network_seed,
+            result.source_pattern
+        ),
+        ("Boundary %d/%d, confirmed input %d, confirmed output %d, compared %d/%d"):format(
+            result.client_final_boundary,
+            result.reference_final_boundary,
+            result.confirmed_tick,
+            result.confirmed_output_tick,
+            metrics.compared_boundaries,
+            metrics.expected_boundaries
+        ),
+        ("Hash reference=%s client=%s"):format(
+            result.reference_final_hash,
+            result.client_final_hash
+        ),
+        ("Prediction samples=%d ticks=%d; corrections=%d rollbacks=%d resimulated=%d max_depth=%d"):format(
+            metrics.predicted_slot_samples,
+            metrics.predicted_ticks,
+            metrics.correction_count,
+            metrics.rollback_count,
+            metrics.resimulated_ticks,
+            metrics.max_rollback_depth
+        ),
+        ("Network sent=%d delivered=%d loss=%d burst=%d duplicate=%d reordered=%d recovered=%d"):format(
+            network.sent,
+            network.delivered,
+            network.independent_lost,
+            network.burst_lost,
+            network.duplicated,
+            network.reordered,
+            network.history_recovered
+        ),
+        ("Snapshots current=%d/%dB peak=%d/%dB; drain complete=%s pending=%d"):format(
+            metrics.current_snapshot_count,
+            metrics.current_snapshot_bytes,
+            metrics.peaks.snapshot_count,
+            metrics.peaks.snapshot_bytes,
+            tostring(result.drain.complete),
+            result.drain.pending
+        ),
+    }
+    if result.divergence then
+        lines[#lines + 1] = ("Divergence causal_tick=%d boundary=%d expected=%s actual=%s path=%s"):format(
+            result.divergence.causal_tick,
+            result.divergence.boundary,
+            result.divergence.expected_hash,
+            result.divergence.actual_hash,
+            result.divergence.first_difference and result.divergence.first_difference.path or "none"
+        )
+    end
+    if result.late_input_tick ~= nil then
+        lines[#lines + 1] = "Late input tick: " .. result.late_input_tick
+    end
+    if result.unconfirmed_tick ~= nil then
+        lines[#lines + 1] = "Unconfirmed authority begins at tick: " .. result.unconfirmed_tick
+    end
+    return table.concat(lines, "\n")
+end
+
+return rollback_lab

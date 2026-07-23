@@ -150,10 +150,11 @@ to de-duplicate redundant and reordered history, detect an impossible
 conflict, and track a retained drain target without keeping match-lifetime
 sample tables.
 
-`diagnostics` returns retained-authority, delivered-ledger, pending-envelope,
-and pending-record-reference counts for memory evidence. `sample_key` exposes
-the exact packed identity for diagnostic boundary tests; it is not a production
-wire encoding.
+`diagnostics` returns current and mutation-time peak retained-authority,
+delivered-ledger, pending-envelope, and pending-record-reference counts for
+memory evidence. Peaks are captured before polling or ledger pruning can hide
+transient work. `sample_key` exposes the exact packed identity for diagnostic
+boundary tests; it is not a production wire encoding.
 
 ## Drain and resend
 

@@ -25,6 +25,7 @@ function love.conf(t)
         "--eval",
         "--tripwire",
         "--snapshot-measure",
+        "--rollback-lab",
         "--determinism-refresh",
     }
     if not has_flag("--browser-runtime") then

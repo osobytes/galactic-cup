@@ -82,6 +82,9 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field input_history RollbackInputHistoryDiagnostics
 ---@field snapshot_history RollbackSnapshotHistoryDiagnostics
 
+---@alias RollbackSessionMeasureLabel "capture"|"restore"|"resimulation"|"rollback"
+---@alias RollbackSessionMeasure fun(label: RollbackSessionMeasureLabel, operation: fun(): any): any
+
 ---@class RollbackSession
 ---@field _state MatchState
 ---@field _input_history RollbackInputHistory
@@ -99,9 +102,41 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field _late_input_tick integer?
 ---@field _last_rollback RollbackSessionLastRollback?
 ---@field _last_comparison RollbackComparison?
+---@field _measure RollbackSessionMeasure?
 
 ---@class RollbackSessionModule
 local rollback_session = {}
+
+---@param session RollbackSession
+---@param label RollbackSessionMeasureLabel
+---@param operation fun(): any
+---@return any
+local function measured(session, label, operation)
+    if session._measure == nil then
+        return operation()
+    end
+    local calls = 0
+    local result = nil
+    local operation_succeeded = false
+    local operation_error = nil
+    session._measure(label, function()
+        calls = calls + 1
+        assert(calls == 1, "rollback measurement operation must run exactly once")
+        local ok, value = pcall(operation)
+        operation_succeeded = ok
+        if not ok then
+            operation_error = value
+            error(value, 0)
+        end
+        result = value
+        return result
+    end)
+    assert(calls == 1, "rollback measurement observer must run its operation exactly once")
+    if not operation_succeeded then
+        error(operation_error, 0)
+    end
+    return result
+end
 
 ---@param value any
 ---@return any
@@ -280,7 +315,10 @@ local function execute_tick(session, tick)
     local frame, record = rollback_input_history.materialize(session._input_history, tick)
     count_predictions(session, record)
     match.step(session._state, fixed_clock.TICK_SECONDS, frame)
-    local boundary = match_snapshot.capture(session._state)
+    local boundary = measured(session, "capture", function()
+        return match_snapshot.capture(session._state)
+    end)
+    ---@cast boundary MatchSnapshot
     assert(
         boundary.state.input_tick == tick + 1,
         "rollback session step did not advance one boundary"
@@ -309,8 +347,9 @@ end
 ---@param initial_snapshot MatchSnapshot Canonical slot-mode boundary zero.
 ---@param sources RollbackInputSource[] Canonical eight-slot local/remote ownership.
 ---@param max_rollback_ticks integer?
+---@param measure RollbackSessionMeasure? Optional observer; it cannot change logical results.
 ---@return RollbackSession
-function rollback_session.new(initial_snapshot, sources, max_rollback_ticks)
+function rollback_session.new(initial_snapshot, sources, max_rollback_ticks, measure)
     local state = match_snapshot.restore(initial_snapshot)
     assert(state.slot_mode, "rollback session requires a slot-mode match snapshot")
     assert(state.input_tick == 0, "rollback session requires the tick-zero boundary")
@@ -335,6 +374,7 @@ function rollback_session.new(initial_snapshot, sources, max_rollback_ticks)
         _late_input_tick = nil,
         _last_rollback = nil,
         _last_comparison = nil,
+        _measure = measure,
     }
 end
 
@@ -416,21 +456,9 @@ local function unchanged_reconcile_result(session, causal_tick, restore_status)
 end
 
 ---@param session RollbackSession
+---@param causal_tick integer
 ---@return RollbackReconcileResult
-function rollback_session.reconcile(session)
-    assert_session(session)
-    if session._status == "late_input_unrecoverable" then
-        local late_tick = assert(
-            session._late_input_tick,
-            "unrecoverable rollback session is missing its causal late input tick"
-        )
-        return unchanged_reconcile_result(session, late_tick, "outside_window")
-    end
-    local causal_tick = rollback_input_history.earliest_divergence(session._input_history)
-    if causal_tick == nil then
-        return unchanged_reconcile_result(session, nil, nil)
-    end
-
+local function reconcile_changed(session, causal_tick)
     local old_present = session._state.input_tick
     local lookup = rollback_snapshot_history.lookup(session._snapshot_history, causal_tick)
     if lookup.status == "outside_window" then
@@ -447,22 +475,31 @@ function rollback_session.reconcile(session)
         )
     )
     local restored_snapshot = assert(lookup.snapshot, "rollback restore snapshot is missing")
-    local old_snapshot = match_snapshot.capture(session._state)
+    local old_snapshot = measured(session, "capture", function()
+        return match_snapshot.capture(session._state)
+    end)
+    ---@cast old_snapshot MatchSnapshot
     local old_hash = match_snapshot.hash(old_snapshot)
     assert(
         rollback_input_history.consume_earliest_divergence(session._input_history) == causal_tick,
         "rollback divergence changed before restore"
     )
-    session._state = match_snapshot.restore(restored_snapshot)
+    local restored = measured(session, "restore", function()
+        return match_snapshot.restore(restored_snapshot)
+    end)
+    ---@cast restored MatchState
+    session._state = restored
 
     local corrected_outputs = {}
-    local tick = causal_tick
-    while tick < old_present and not session._state.finished do
-        local output = execute_tick(session, tick)
-        corrected_outputs[#corrected_outputs + 1] = copy_output(output)
-        session._resimulated_ticks = session._resimulated_ticks + 1
-        tick = tick + 1
-    end
+    measured(session, "resimulation", function()
+        local tick = causal_tick
+        while tick < old_present and not session._state.finished do
+            local output = execute_tick(session, tick)
+            corrected_outputs[#corrected_outputs + 1] = copy_output(output)
+            session._resimulated_ticks = session._resimulated_ticks + 1
+            tick = tick + 1
+        end
+    end)
 
     local new_present = session._state.input_tick
     if new_present < old_present then
@@ -476,7 +513,10 @@ function rollback_session.reconcile(session)
     end
     prune_retained_outputs(session)
 
-    local new_snapshot = match_snapshot.capture(session._state)
+    local new_snapshot = measured(session, "capture", function()
+        return match_snapshot.capture(session._state)
+    end)
+    ---@cast new_snapshot MatchSnapshot
     local new_hash = match_snapshot.hash(new_snapshot)
     local first_difference = nil
     if old_hash ~= new_hash then
@@ -513,6 +553,28 @@ function rollback_session.reconcile(session)
         new_present_hash = new_hash,
         first_difference = copy_difference(first_difference),
     }
+end
+
+---@param session RollbackSession
+---@return RollbackReconcileResult
+function rollback_session.reconcile(session)
+    assert_session(session)
+    if session._status == "late_input_unrecoverable" then
+        local late_tick = assert(
+            session._late_input_tick,
+            "unrecoverable rollback session is missing its causal late input tick"
+        )
+        return unchanged_reconcile_result(session, late_tick, "outside_window")
+    end
+    local causal_tick = rollback_input_history.earliest_divergence(session._input_history)
+    if causal_tick == nil then
+        return unchanged_reconcile_result(session, nil, nil)
+    end
+    local result = measured(session, "rollback", function()
+        return reconcile_changed(session, causal_tick)
+    end)
+    ---@cast result RollbackReconcileResult
+    return result
 end
 
 ---@param session RollbackSession

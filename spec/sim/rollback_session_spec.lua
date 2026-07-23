@@ -143,6 +143,35 @@ local function preventable_goal_fixture()
 end
 
 t.describe("rollback session", function()
+    t.it("keeps measured operations under session ownership", function()
+        local fabricated = rollback_session.new(
+            initial_snapshot(),
+            sources(),
+            nil,
+            function(_, operation)
+                operation()
+                return "not a snapshot"
+            end
+        )
+        local output = assert(rollback_session.step(fabricated))
+        t.eq(output.tick, 0)
+        t.eq(rollback_session.diagnostics(fabricated).present_boundary, 1)
+
+        local skipped = rollback_session.new(initial_snapshot(), sources(), nil, function() end)
+        t.is_true(not pcall(rollback_session.step, skipped))
+
+        local doubled = rollback_session.new(
+            initial_snapshot(),
+            sources(),
+            nil,
+            function(_, operation)
+                operation()
+                pcall(operation)
+            end
+        )
+        t.is_true(not pcall(rollback_session.step, doubled))
+    end)
+
     t.it("owns boundary zero and exposes only copied state, history, and outputs", function()
         local supplied = initial_snapshot()
         local original_x = supplied.state.players[1].pos.x
@@ -481,6 +510,9 @@ t.describe("rollback session", function()
         t.is_true(
             rollback_session.compare(delayed, rollback_session.current_snapshot(reference), 0).matched
         )
+        local retained = rollback_session.diagnostics(delayed).snapshot_history
+        t.is_true(retained.peak_retained_boundary_count > retained.retained_boundary_count)
+        t.is_true(retained.peak_canonical_bytes > retained.canonical_bytes)
 
         local later = nil
         for tick = 0, final_boundary + 1 do

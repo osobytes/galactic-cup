@@ -23,6 +23,8 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field _oldest_supported_tick integer?
 ---@field _count integer
 ---@field _canonical_bytes integer
+---@field _peak_count integer
+---@field _peak_canonical_bytes integer
 
 ---@class RollbackSnapshotLookup
 ---@field status RollbackSnapshotLookupStatus
@@ -45,6 +47,8 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field capacity integer
 ---@field retained_boundary_count integer
 ---@field canonical_bytes integer
+---@field peak_retained_boundary_count integer
+---@field peak_canonical_bytes integer
 ---@field oldest_supported_tick integer?
 ---@field oldest_boundary_tick integer?
 ---@field latest_tick integer?
@@ -119,6 +123,8 @@ function rollback_snapshot_history.new(max_rollback_ticks)
         _oldest_supported_tick = nil,
         _count = 0,
         _canonical_bytes = 0,
+        _peak_count = 0,
+        _peak_canonical_bytes = 0,
     }
 end
 
@@ -177,6 +183,9 @@ function rollback_snapshot_history.store(history, snapshot)
     }
     history._count = history._count + 1
     history._canonical_bytes = history._canonical_bytes + canonical_bytes
+    history._peak_count = math.max(history._peak_count, history._count)
+    history._peak_canonical_bytes =
+        math.max(history._peak_canonical_bytes, history._canonical_bytes)
     return { tick = tick, replaced = replaced, evicted = evicted }
 end
 
@@ -303,6 +312,8 @@ function rollback_snapshot_history.diagnostics(history)
         capacity = history._capacity,
         retained_boundary_count = history._count,
         canonical_bytes = history._canonical_bytes,
+        peak_retained_boundary_count = history._peak_count,
+        peak_canonical_bytes = history._peak_canonical_bytes,
         oldest_supported_tick = oldest_supported_tick(history),
         oldest_boundary_tick = oldest,
         latest_tick = history._latest_tick,
