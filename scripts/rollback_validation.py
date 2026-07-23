@@ -62,7 +62,7 @@ SCENARIOS = (
 )
 SOAK_NETWORK_SEEDS = (2001, 2002, 2003, 2001, 2002)
 DEFAULT_TIMEOUT_SECONDS = 7200
-BROWSER_SOAK_TIMEOUT_MULTIPLIER = 3
+MIN_BROWSER_SOAK_TIMEOUT_SECONDS = 5400
 POLL_SECONDS = 0.2
 ERROR_MARKERS = (
     "GC_BROWSER|error|",
@@ -1701,7 +1701,7 @@ def browser_suite_timeout_seconds(suite: str, timeout_seconds: int) -> int:
     """Scale the browser timeout for the five-fixture persistent soak."""
 
     if suite == "soak":
-        return timeout_seconds * BROWSER_SOAK_TIMEOUT_MULTIPLIER
+        return max(timeout_seconds, MIN_BROWSER_SOAK_TIMEOUT_SECONDS)
     return timeout_seconds
 
 
@@ -1857,6 +1857,8 @@ def run_self_test() -> None:
         raise RuntimeError("single-fixture browser timeout scaling self-test failed")
     if browser_suite_timeout_seconds("soak", 1800) != 5400:
         raise RuntimeError("browser soak timeout scaling self-test failed")
+    if browser_suite_timeout_seconds("soak", 7200) != 7200:
+        raise RuntimeError("browser soak timeout upper-bound self-test failed")
     expected_counts = {
         ("native", ()): 39,
         ("browser-full", ("clean", "2001")): 1,
