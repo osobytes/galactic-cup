@@ -6,6 +6,7 @@ local match = require("sim.match")
 local match_snapshot = require("sim.match_snapshot")
 local rollback_input_history = require("sim.rollback_input_history")
 local rollback_lab = require("sim.rollback_lab")
+local rollback_session = require("sim.rollback_session")
 local teams = require("data.teams")
 local tuning = require("sim.tuning")
 local t = require("spec.support.runner")
@@ -294,6 +295,18 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
             at_limit.metrics.confirmed_redundant_rows_skipped > 0,
             "confirmed tick-zero history is skipped while supported current rows reconcile"
         )
+        local replay_boundaries = 0
+        local replay_truncations = 0
+        for _, row in ipairs(at_limit.event_trace) do
+            if row.kind == "replay_boundary" then
+                replay_boundaries = replay_boundaries + 1
+                t.eq(assert(row.replay_sample).boundary, row.boundary)
+            elseif row.kind == "replay_truncate" then
+                replay_truncations = replay_truncations + 1
+            end
+        end
+        t.is_true(replay_boundaries > at_limit.input_ticks)
+        t.eq(replay_truncations, at_limit.metrics.rollback_count)
 
         local over_limit = rollback_lab.run(tape, {
             profile_name = "delay-31-spec",
@@ -304,6 +317,34 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
         t.is_true(not over_limit.success)
         t.eq(over_limit.status, "late_input_unrecoverable")
         t.eq(over_limit.late_input_tick, 0)
+    end)
+
+    t.it("derives over-window terminal stability from the blocked session seam", function()
+        local tape = varying_tape(40)
+        local campaign = rollback_lab.new_campaign(tape, {
+            profile_name = "delay-31-spec",
+            profile = profile({ base_delay_ticks = 31 }),
+            network_seed = 31,
+            sources = one_remote(),
+        })
+        local result = nil
+        while result == nil do
+            result = rollback_lab.step_campaign(campaign, #tape.frames)
+        end
+        t.eq(result.status, "late_input_unrecoverable")
+        t.is_true(not rollback_lab.probe_terminal_stability(campaign))
+
+        ---@type any
+        local session_module = rollback_session
+        local original_step = rollback_session.step
+        session_module.step = function(session)
+            session._state.input_tick = session._state.input_tick + 1
+            return original_step(session)
+        end
+        local ok, hidden = pcall(rollback_lab.probe_terminal_stability, campaign)
+        session_module.step = original_step
+        assert(ok, hidden)
+        t.is_true(hidden)
     end)
 
     t.it("reports causal hashes and the first state path for intentional corruption", function()
@@ -322,6 +363,21 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
         t.is_true(divergence.first_difference ~= nil)
         t.is_true(assert(divergence.first_difference).path ~= "")
         t.is_true(rollback_lab.summary(result):match("causal_tick=2") ~= nil)
+    end)
+
+    t.it("verifies every frozen authoritative boundary incrementally", function()
+        local tape = varying_tape(4)
+        tape.boundary_hashes[3] = "0000000000000000"
+        local campaign = rollback_lab.new_campaign(tape, {
+            profile_name = "clean",
+            network_seed = 9,
+            sources = one_remote(),
+            prevalidated_tape = true,
+        })
+
+        local ok, err = pcall(rollback_lab.step_campaign, campaign, #tape.frames)
+        t.is_true(not ok)
+        t.is_true(tostring(err):match("frozen boundary 2 hash mismatch") ~= nil)
     end)
 
     t.it("keeps timing observers outside repeatable logical evidence", function()
@@ -448,6 +504,17 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
         t.eq(rollback_lab.logical_marker(incremental), rollback_lab.logical_marker(synchronous))
         t.eq(incremental.event_metrics.reference_digest, incremental.event_metrics.confirmed_digest)
         t.eq(incremental.event_metrics.speculative_residue, 0)
+        local accounting = incremental.history_accounting
+        t.eq(accounting.input.authoritative_bytes, 3421)
+        t.eq(accounting.input.predecessor_anchor_bytes, 0)
+        t.eq(accounting.input.effective_frame_bytes, 2315)
+        t.eq(accounting.input.input_record_bytes, 6131)
+        t.eq(accounting.input.total_bytes, 11867)
+        t.eq(accounting.output_bytes, 37008)
+        t.eq(accounting.event_bytes, 0)
+        t.eq(incremental.metrics.peaks.input_bytes, 11867)
+        t.eq(incremental.metrics.peaks.output_bytes, 37026)
+        t.eq(incremental.metrics.peaks.event_bytes, 833)
         t.is_true(incremental.history_accounting.total_bytes > 0)
         t.is_true(
             incremental.metrics.peaks.history_bytes >= incremental.history_accounting.total_bytes

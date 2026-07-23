@@ -1003,6 +1003,14 @@ function match_snapshot.hash(snapshot)
     return fnv1a64.hash(match_snapshot.encode(snapshot))
 end
 
+-- Hash a snapshot already returned by capture(), or an equally canonical
+-- owned copy, without repeating its restore/validation pass.
+---@param snapshot MatchSnapshot
+---@return string
+function match_snapshot.hash_canonical(snapshot)
+    return fnv1a64.hash(match_snapshot.encode_canonical(snapshot))
+end
+
 ---@param left any
 ---@param right any
 ---@return boolean
@@ -1087,12 +1095,17 @@ local function first_difference_canonical(a, b)
                         if (ac == nil) ~= (bc == nil) then
                             return difference(child_path, ac, bc)
                         elseif ac then
-                            local found = compare_vec(child_path .. ".dir", ac.dir, bc.dir)
-                            if found then
-                                return found
-                            end
-                            for _, shot_field in ipairs({ "speed", "vz", "spin" }) do
-                                if not same_scalar(ac[shot_field], bc[shot_field]) then
+                            for _, shot_field in ipairs(WINDUP_FIELDS) do
+                                if shot_field == "dir" then
+                                    local found = compare_vec(
+                                        child_path .. "." .. shot_field,
+                                        ac[shot_field],
+                                        bc[shot_field]
+                                    )
+                                    if found then
+                                        return found
+                                    end
+                                elseif not same_scalar(ac[shot_field], bc[shot_field]) then
                                     return difference(
                                         child_path .. "." .. shot_field,
                                         ac[shot_field],

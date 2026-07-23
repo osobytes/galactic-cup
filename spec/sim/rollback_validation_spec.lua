@@ -27,8 +27,7 @@ t.describe("OMP-2 rollback validation campaign", function()
         t.eq(config.budgets.snapshot_bytes, 600 * 1024)
         t.eq(config.budgets.history_bytes, 1024 * 1024)
         t.eq(config.budgets.memory_growth_ratio, 0.10)
-        t.is_true(rollback_validation.profile_digest():match("^[0-9a-f]+$") ~= nil)
-        t.eq(#rollback_validation.profile_digest(), 16)
+        t.eq(rollback_validation.profile_digest(), "5fbf1e0d51a6f4d5")
 
         local browser = rollback_validation.new_campaign("browser-stress", {
             profile_name = "stress",

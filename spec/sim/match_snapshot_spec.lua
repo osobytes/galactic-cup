@@ -313,6 +313,7 @@ t.describe("canonical match snapshots", function()
         t.eq(match_snapshot.encoded_size_canonical(snapshot), #match_snapshot.encode(snapshot))
         t.eq(match_snapshot.encoded_size_canonical(reordered), #match_snapshot.encode(reordered))
         t.eq(match_snapshot.hash(reordered), match_snapshot.hash(snapshot))
+        t.eq(match_snapshot.hash_canonical(snapshot), match_snapshot.hash(snapshot))
     end)
 
     t.it("compares owned canonical snapshots without normalizing them again", function()
@@ -341,6 +342,25 @@ t.describe("canonical match snapshots", function()
         t.eq(found.path, expected.path)
         t.eq(found.expected, expected.expected)
         t.eq(found.actual, expected.actual)
+    end)
+
+    t.it("compares every canonical windup-shot field", function()
+        local state = new_state()
+        state.players[2].windup_shot = {
+            dir = Vec2.new(0.25, -0.75),
+            speed = 456,
+            vz = 123,
+            spin = -8,
+            shot_type = "chip",
+        }
+        local left = match_snapshot.capture(state)
+        local right = match_snapshot.capture(state)
+        assert(right.state.players[2].windup_shot).shot_type = "ground"
+
+        local found = assert(match_snapshot.first_difference_canonical(left, right))
+        t.eq(found.path, "state.players.2.windup_shot.shot_type")
+        t.eq(found.expected, "chip")
+        t.eq(found.actual, "ground")
     end)
 
     t.it("rejects unhandled state and player fields", function()

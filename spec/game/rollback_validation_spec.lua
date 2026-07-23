@@ -222,6 +222,7 @@ t.describe("rollback validation", function()
                     score_away = 0,
                 },
             },
+            expected_replay_truncate_count = 1,
             required_scenarios = {
                 "possession",
                 "tackle",
@@ -251,6 +252,13 @@ t.describe("rollback validation", function()
         t.eq(report.consumers.replay_truncate_count, 1)
         t.eq(report.replay_boundaries[1], 0)
         t.eq(report.replay_boundaries[3], 2)
+    end)
+
+    t.it("builds the authoritative bounded replay timeline", function()
+        local boundaries = rollback_validation.expected_replay_boundaries(500)
+        t.eq(#boundaries, 480)
+        t.eq(boundaries[1], 21)
+        t.eq(boundaries[#boundaries], 500)
     end)
 
     t.it("reports missing confirmation and terminal speculative residue", function()

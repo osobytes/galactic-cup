@@ -70,7 +70,8 @@ ERROR_MARKERS = (
     "GC_ROLLBACK_VALIDATION|failure|",
 )
 SOAK_SAMPLES = ("warmup", "120", "360", "600", "final")
-EXTERNAL_MEMORY_SAMPLES = ("warmup", "120", "360", "600")
+EXTERNAL_MEMORY_SAMPLES = SOAK_SAMPLES
+EXPECTED_PROFILE_DIGEST = "5fbf1e0d51a6f4d5"
 MAX_MEMORY_GROWTH_RATIO = 0.10
 MAX_SNAPSHOT_COUNT = 31
 MAX_SNAPSHOT_BYTES = 600 * 1024
@@ -471,8 +472,10 @@ def validate_runtime_metrics(
     ]
     if mismatches:
         raise RuntimeError("runtime provenance mismatch: " + ", ".join(mismatches))
-    if not re.fullmatch(r"[0-9a-f]{16}", runtime.get("profile_digest", "")):
-        raise RuntimeError("runtime profile_digest is not canonical 16-hex")
+    if runtime.get("profile_digest") != EXPECTED_PROFILE_DIGEST:
+        raise RuntimeError(
+            "runtime profile_digest does not match the frozen playable envelope"
+        )
 
     metrics = [metric for metric in metrics if metric.kind == "case"]
     cases = [marker for marker in markers if marker.kind == "case"]
@@ -823,6 +826,39 @@ def validation_process_census() -> dict[ProcessIdentity, tuple[str, ...]]:
     return matches
 
 
+def browser_process_census(
+    browser_name: str,
+    binary: Path,
+    driver_path: Path,
+) -> dict[ProcessIdentity, str]:
+    """Find browser-family executables, including helpers that detached early."""
+
+    assert browser_name in {"chrome", "firefox"}
+    resolved_binary = binary.resolve()
+    resolved_driver = driver_path.resolve()
+    helper_names = (
+        {"chrome", "chrome_crashpad_handler", "chromium", "chromium-browser", "google-chrome"}
+        if browser_name == "chrome"
+        else {"crashreporter", "firefox", "firefox-bin"}
+    )
+    matches: dict[ProcessIdentity, str] = {}
+    for pid, info in read_process_table().items():
+        try:
+            executable = Path(os.readlink(f"/proc/{pid}/exe")).resolve()
+        except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+            continue
+        if (
+            executable == resolved_binary
+            or executable == resolved_driver
+            or (
+                executable.parent == resolved_binary.parent
+                and executable.name in helper_names
+            )
+        ):
+            matches[info.identity] = str(executable)
+    return matches
+
+
 class ProcessTreeSampler:
     """Track a process and every descendant seen during a bounded campaign."""
 
@@ -974,6 +1010,79 @@ def wait_validation_processes_gone(
             if identity not in baseline
         }
     return alive
+
+
+def wait_browser_processes_gone(
+    browser_name: str,
+    binary: Path,
+    driver_path: Path,
+    baseline: set[ProcessIdentity],
+    timeout_seconds: float,
+) -> dict[ProcessIdentity, str]:
+    deadline = time.monotonic() + timeout_seconds
+    alive = {
+        identity: executable
+        for identity, executable in browser_process_census(
+            browser_name,
+            binary,
+            driver_path,
+        ).items()
+        if identity not in baseline
+    }
+    while alive and time.monotonic() < deadline:
+        time.sleep(0.05)
+        alive = {
+            identity: executable
+            for identity, executable in browser_process_census(
+                browser_name,
+                binary,
+                driver_path,
+            ).items()
+            if identity not in baseline
+        }
+    return alive
+
+
+def finish_browser_census(
+    browser_name: str,
+    binary: Path,
+    driver_path: Path,
+    baseline: set[ProcessIdentity],
+) -> dict[str, Any]:
+    detached = wait_browser_processes_gone(
+        browser_name,
+        binary,
+        driver_path,
+        baseline,
+        2,
+    )
+    detected = len(detached)
+    signals: list[str] = []
+    if detached:
+        terminate_identities(detached, signal.SIGTERM)
+        signals.append("TERM")
+        detached = wait_browser_processes_gone(
+            browser_name,
+            binary,
+            driver_path,
+            baseline,
+            2,
+        )
+    if detached:
+        terminate_identities(detached, signal.SIGKILL)
+        signals.append("KILL")
+        detached = wait_browser_processes_gone(
+            browser_name,
+            binary,
+            driver_path,
+            baseline,
+            2,
+        )
+    return {
+        "detached_orphan_count": detected,
+        "detached_remaining_process_count": len(detached),
+        "detached_signals": signals,
+    }
 
 
 def finish_process_tree(
@@ -1329,6 +1438,10 @@ def browser_checkpoint(
 def browser_teardown(
     driver: Any,
     sampler: ProcessTreeSampler,
+    browser_name: str,
+    binary: Path,
+    driver_path: Path,
+    browser_baseline: set[ProcessIdentity],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     teardown_error = None
     try:
@@ -1351,8 +1464,20 @@ def browser_teardown(
         terminate_identities(alive, signal.SIGKILL)
         alive = wait_identities_gone(sampler, 2)
     sampler.checkpoint("teardown")
+    detached = finish_browser_census(
+        browser_name,
+        binary,
+        driver_path,
+        browser_baseline,
+    )
     teardown["detected_orphan_count"] = detected_orphans
-    teardown["orphan_free"] = not alive and detected_orphans == 0
+    teardown.update(detached)
+    teardown["orphan_free"] = (
+        not alive
+        and detected_orphans == 0
+        and detached["detached_orphan_count"] == 0
+        and detached["detached_remaining_process_count"] == 0
+    )
     teardown["remaining_process_count"] = len(alive)
     teardown["teardown_error"] = teardown_error
     resources = sampler.finish()
@@ -1371,11 +1496,19 @@ def run_browser_once(
 ) -> dict[str, Any]:
     driver_log = log_path.with_suffix(".webdriver.log")
     started = time.monotonic()
+    browser_baseline = set(browser_process_census(browser_name, binary, driver_path))
     try:
         driver = launch(browser_name, binary, driver_path, driver_log)
     except Exception as error:
+        detached = finish_browser_census(
+            browser_name,
+            binary,
+            driver_path,
+            browser_baseline,
+        )
         raise RuntimeError(
             f"{browser_name} {suite} launch failed: {error}\n"
+            f"detached process cleanup: {json.dumps(detached, sort_keys=True)}\n"
             f"{bounded_log_tail(driver_log)}"
         ) from error
     process = getattr(getattr(driver, "service", None), "process", None)
@@ -1383,17 +1516,27 @@ def run_browser_once(
         try:
             driver.quit()
         finally:
-            raise RuntimeError(f"{browser_name} {suite} WebDriver process is unavailable")
-    if browser_name == "chrome":
-        driver.execute_cdp_cmd("Performance.enable", {})
+            detached = finish_browser_census(
+                browser_name,
+                binary,
+                driver_path,
+                browser_baseline,
+            )
+            raise RuntimeError(
+                f"{browser_name} {suite} WebDriver process is unavailable; "
+                f"detached cleanup={json.dumps(detached, sort_keys=True)}"
+            )
     sampler = ProcessTreeSampler(process.pid)
-    resource_checkpoints = [browser_checkpoint(sampler, driver, browser_name, "started")]
+    resource_checkpoints: list[dict[str, Any]] = []
     messages: list[str] = []
     markers: list[ValidationMarker] = []
     result: ValidationMarker | None = None
     teardown: dict[str, Any]
     resources: dict[str, Any]
     try:
+        if browser_name == "chrome":
+            driver.execute_cdp_cmd("Performance.enable", {})
+        resource_checkpoints.append(browser_checkpoint(sampler, driver, browser_name, "started"))
         driver.set_page_load_timeout(min(timeout_seconds, 300))
         driver.set_script_timeout(timeout_seconds)
         query_arguments = [
@@ -1454,7 +1597,14 @@ def run_browser_once(
         if messages:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text("\n".join(messages) + "\n", encoding="utf-8")
-        teardown, resources = browser_teardown(driver, sampler)
+        teardown, resources = browser_teardown(
+            driver,
+            sampler,
+            browser_name,
+            binary,
+            driver_path,
+            browser_baseline,
+        )
     if teardown["teardown_error"] is not None:
         raise RuntimeError(
             f"{browser_name} {suite} teardown failed: {teardown['teardown_error']}"
@@ -1602,6 +1752,23 @@ def browser_matrix(
 
 
 def run_self_test() -> None:
+    if Path("/proc").is_dir():
+        current = read_process_table().get(os.getpid())
+        if current is None:
+            raise RuntimeError("browser process census self-test cannot identify itself")
+        executable = Path(sys.executable).resolve()
+        census = browser_process_census("firefox", executable, executable)
+        if current.identity not in census:
+            raise RuntimeError("browser process census self-test missed an exact executable")
+        if wait_browser_processes_gone(
+            "firefox",
+            executable,
+            executable,
+            set(census),
+            0,
+        ):
+            raise RuntimeError("browser process census baseline self-test reported a false orphan")
+
     case = f"{MARKER_PREFIX}|case|schema=1|id=fixture|success=1"
     result = (
         f"{MARKER_PREFIX}|result|schema=1|suite=native|success=1|"
@@ -1709,13 +1876,27 @@ def run_self_test() -> None:
     )
     runtime_provenance = parse_runtime_metric(
         f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
-        "profile_digest=0000000000000000|input_version=1|snapshot_version=5|tick_rate=60"
+        f"profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
+        "snapshot_version=5|tick_rate=60"
     )
     validate_runtime_metrics(
         [runtime_provenance, runtime_metric],
         [integrity_case],
         "native",
     )
+    stale_profile = parse_runtime_metric(
+        runtime_provenance.raw.replace(EXPECTED_PROFILE_DIGEST, "0000000000000000")
+    )
+    try:
+        validate_runtime_metrics(
+            [stale_profile, runtime_metric],
+            [integrity_case],
+            "native",
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("stale network-profile digest passed self-test")
     over_cpu = parse_runtime_metric(
         runtime_metric.raw.replace("p95_work_ms=1.25", "p95_work_ms=16.67")
     )
@@ -1750,12 +1931,21 @@ def run_self_test() -> None:
                 "rss_bytes": 3000 + index * 10,
                 "validation_marker": soak_cases[index].raw,
             }
-            for index in range(4)
+            for index in range(len(SOAK_SAMPLES))
         ]
     }
     soak_gate = soak_memory_evidence(soak_markers, soak_resources, "chrome")
     if not soak_gate["pass"]:
         raise RuntimeError("passing soak memory self-test failed")
+    missing_final_resources = {
+        "checkpoints": list(soak_resources["checkpoints"][:-1])
+    }
+    try:
+        soak_memory_evidence(soak_markers, missing_final_resources, "chrome")
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("missing final external memory checkpoint passed self-test")
     if not growth_gate({"warmup": 1000, "peak": 1100}, "inclusive-threshold")[
         "pass"
     ]:

@@ -104,9 +104,18 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field matched boolean
 
 ---@class RollbackLabEventTraceRow
----@field kind "reference_confirmed"|"impaired_diff"|"impaired_confirmed"
+---@field kind "reference_confirmed"|"impaired_diff"|"impaired_confirmed"|"replay_boundary"|"replay_truncate"
 ---@field step RollbackEventStep?
 ---@field diff RollbackEventDiff?
+---@field boundary integer?
+---@field replay_sample RollbackLabReplaySample?
+
+---@class RollbackLabReplaySample
+---@field boundary integer
+---@field ball_x number
+---@field ball_y number
+---@field score_home integer
+---@field score_away integer
 
 ---@class RollbackLabDrainSummary
 ---@field final_tick integer
@@ -456,6 +465,28 @@ local function event_step(state, output)
 end
 
 ---@param state RollbackLabRunState
+---@param boundary integer
+local function trace_replay_boundary(state, boundary)
+    local lookup = rollback_session.snapshot(state.session, boundary)
+    assert(
+        lookup.status == "present" or lookup.status == "retained",
+        "rollback lab replay boundary is not retained"
+    )
+    local snapshot = assert(lookup.snapshot, "rollback lab replay boundary snapshot is missing")
+    state.event_trace[#state.event_trace + 1] = {
+        kind = "replay_boundary",
+        boundary = boundary,
+        replay_sample = {
+            boundary = boundary,
+            ball_x = snapshot.state.ball.x,
+            ball_y = snapshot.state.ball.y,
+            score_home = snapshot.state.score.home,
+            score_away = snapshot.state.score.away,
+        },
+    }
+end
+
+---@param state RollbackLabRunState
 ---@param diff RollbackEventDiff
 local function trace_diff(state, diff)
     if #diff.added > 0 or #diff.revoked > 0 or #diff.replaced > 0 then
@@ -489,6 +520,9 @@ local function apply_client_outputs(state, from_tick, through_tick, outputs)
         return false
     end
     trace_diff(state, diff)
+    for _, output in ipairs(outputs) do
+        trace_replay_boundary(state, output.end_boundary)
+    end
     return true
 end
 
@@ -741,9 +775,15 @@ local function process_delivery_batch(state, deliveries)
     if reconciled.changed then
         local depth = reconciled.old_present_boundary - assert(reconciled.causal_tick)
         state.depth_counts[depth] = (state.depth_counts[depth] or 0) + 1
+        local replay_boundary = assert(reconciled.replaced_from_tick)
+        state.event_trace[#state.event_trace + 1] = {
+            kind = "replay_truncate",
+            boundary = replay_boundary,
+        }
+        trace_replay_boundary(state, replay_boundary)
         apply_client_outputs(
             state,
-            assert(reconciled.replaced_from_tick),
+            replay_boundary,
             assert(reconciled.replaced_through_tick),
             reconciled.corrected_outputs
         )
@@ -1045,6 +1085,7 @@ function rollback_lab.new_campaign(tape, options)
         },
     }
     compare_snapshots(state, tape.initial, rollback_session.current_snapshot(session), 0)
+    trace_replay_boundary(state, 0)
     update_peaks(state)
 
     return {
@@ -1075,6 +1116,19 @@ local function advance_frame(campaign, frame)
         return match_snapshot.capture_owned(state.reference)
     end)
     ---@cast reference_boundary MatchSnapshot
+    local reference_hash = match_snapshot.hash_canonical(reference_boundary)
+    local expected_hash = assert(
+        tape.boundary_hashes[frame.tick + 2],
+        "rollback lab frozen recording is missing an authoritative boundary hash"
+    )
+    assert(
+        reference_hash == expected_hash,
+        ("rollback lab frozen boundary %d hash mismatch: expected %s, got %s"):format(
+            frame.tick + 1,
+            expected_hash,
+            reference_hash
+        )
+    )
     assert(rollback_snapshot_history.store_owned(state.reference_history, reference_boundary))
     publish_reference(state, frame, reference_boundary)
 
@@ -1152,6 +1206,38 @@ function rollback_lab.step_campaign(campaign, max_ticks)
         campaign.result = finish_campaign(campaign)
     end
     return campaign.result
+end
+
+-- Exercise the terminal session seams and prove that an over-window failure
+-- cannot advance state or logical counters after it has been reported.
+---@param campaign RollbackLabCampaign
+---@return boolean hidden_progress
+function rollback_lab.probe_terminal_stability(campaign)
+    local result = assert(campaign.result, "rollback lab terminal probe requires a result")
+    assert(
+        result.status == "late_input_unrecoverable",
+        "rollback lab terminal probe requires an over-window result"
+    )
+    local session = campaign.state.session
+    local before = rollback_session.diagnostics(session)
+    local before_snapshot = rollback_session.current_snapshot(session)
+    local output, _, code = rollback_session.step(session)
+    assert(output == nil and code == "late_input_unrecoverable")
+    local reconciled = rollback_session.reconcile(session)
+    assert(not reconciled.changed and reconciled.status == "late_input_unrecoverable")
+    local after = rollback_session.diagnostics(session)
+    local after_snapshot = rollback_session.current_snapshot(session)
+    return match_snapshot.first_difference_canonical(before_snapshot, after_snapshot) ~= nil
+        or before.status ~= after.status
+        or before.present_boundary ~= after.present_boundary
+        or before.confirmed_tick ~= after.confirmed_tick
+        or before.confirmed_output_tick ~= after.confirmed_output_tick
+        or before.rollback_count ~= after.rollback_count
+        or before.correction_count ~= after.correction_count
+        or before.predicted_slot_samples ~= after.predicted_slot_samples
+        or before.predicted_ticks ~= after.predicted_ticks
+        or before.resimulated_ticks ~= after.resimulated_ticks
+        or before.late_window_failures ~= after.late_window_failures
 end
 
 -- Run a validated, already-materialized authoritative tape against an

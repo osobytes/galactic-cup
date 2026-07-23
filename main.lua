@@ -257,12 +257,27 @@ if has_flag("--rollback-validation") then
         local game_pass = completed.expected_failure
         if not completed.expected_failure then
             local initial = match_snapshot.restore(completed.initial_snapshot)
+            local reference_final_state = match_snapshot.restore(result.reference_final_snapshot)
+            local impaired_final_state = match_snapshot.restore(result.client_final_snapshot)
             local report = game_validation.run(initial, result.event_trace, {
                 home_team_id = "nebula",
                 away_team_id = "orion",
-                reference_final_state = match_snapshot.restore(result.reference_final_snapshot),
-                impaired_final_state = match_snapshot.restore(result.client_final_snapshot),
+                reference_final_state = reference_final_state,
+                impaired_final_state = impaired_final_state,
                 seed = result.fixture_seed,
+                expected_replay_boundaries = game_validation.expected_replay_boundaries(
+                    result.reference_final_boundary
+                ),
+                expected_replay_samples = {
+                    {
+                        boundary = result.reference_final_boundary,
+                        ball_x = reference_final_state.ball.x,
+                        ball_y = reference_final_state.ball.y,
+                        score_home = reference_final_state.score.home,
+                        score_away = reference_final_state.score.away,
+                    },
+                },
+                expected_replay_truncate_count = result.metrics.rollback_count,
                 required_scenarios = required_game_scenarios(completed.scenario),
             })
             game_pass = report.passed

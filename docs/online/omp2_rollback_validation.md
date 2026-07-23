@@ -45,8 +45,9 @@ event transcripts, and game-layer consumer audits.
 
 The complete tape is constructed from the already checked-in OMP-1 frame wires and boundary
 hashes. Its structure and initial hash are validated synchronously, while the independent
-authority re-verifies the actual simulation incrementally. This avoids replaying all 7,201 frames
-on the browser main thread before the first observable update.
+authority hashes and verifies every subsequent frozen boundary incrementally. This avoids
+replaying all 7,201 frames on the browser main thread before the first observable update without
+allowing reference and client to drift together beneath stale recording hashes.
 
 `sim.rollback_lab.new_campaign` and `step_campaign` are the shared logical state machine. Native
 execution advances it one tick at a time in a tight loop; browser execution advances one logical
@@ -79,6 +80,7 @@ through CDP, and Firefox process-tree RSS because Firefox exposes no equivalent 
 heap metric to this harness. Each checkpoint first finalizes the completed case's metrics,
 releases its result and timing buffers, installs the next empty timing accumulator, and forces a
 full Lua collection before emitting the marker that triggers the external process sample.
+Lua heap, process-tree RSS, and Chrome JS heap all include the final fifth-fixture checkpoint.
 
 ## Event and presentation integrity
 
@@ -95,6 +97,10 @@ the real audio, effects, replay, match-observer/statistics, and result contracts
 missing, unexpected, mismatched, or duplicate confirmed identities; invalid speculative
 replacement/revocation; terminal speculative residue; cue-count drift; observer/statistics
 drift; replay drift; and result drift.
+
+The lab trace carries the actual client replay-boundary replacements and one truncation for every
+rollback. The game audit replays those operations through the production boundary-keyed replay
+buffer, compares its bounded final timeline with authority, and checks the final ball/score sample.
 
 The 30-tick case must converge at the supported boundary. The 31-tick case is successful only
 when the underlying lab reports `late_input_unrecoverable` for input tick zero, stops making
@@ -125,10 +131,12 @@ The complete browser campaign uses a pinned love.js artifact and Selenium assets
     --output /tmp/omp2-rollback-browser.json
 ```
 
-CI runs native, Chrome, and Firefox as distinct required jobs and uploads normalized JSON plus
-raw logs. Evidence records source and artifact hashes, executable/browser/driver identity,
-profile/tape hashes, every logical marker, timing totals and percentiles, retained-byte
-breakdowns, memory checkpoints, and bounded teardown/orphan status.
+CI runs native, Chrome, and Firefox as distinct required jobs from the exact pull-request head and
+uploads normalized JSON plus raw logs. Evidence records source and artifact hashes,
+executable/browser/driver identity, profile/tape hashes, every logical marker, timing totals and
+percentiles, retained-byte breakdowns, memory checkpoints, and bounded teardown/orphan status.
+Browser teardown combines descendant tracking with a pre-launch/post-run executable census so an
+early-detached driver, browser, or crash helper cannot evade the orphan gate.
 
 ## OMP-3 transport inputs
 

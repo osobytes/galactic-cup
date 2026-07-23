@@ -388,15 +388,18 @@ local function scenario_covered(result, scenario)
 end
 
 ---@param spec RollbackValidationCaseSpec
+---@param active RollbackLabCampaign
 ---@param result RollbackLabResult
 ---@return RollbackValidationCompletedCase
-local function complete_case(spec, result)
+local function complete_case(spec, active, result)
     local expected_terminal = spec.expected_failure
         and not result.success
         and result.status == "late_input_unrecoverable"
         and result.late_input_tick == 0
     local scenario_pass = scenario_covered(result, spec.scenario)
-    local accepted = (result.success or expected_terminal) and scenario_pass
+    local hidden_progress = expected_terminal and rollback_lab.probe_terminal_stability(active)
+        or false
+    local accepted = (result.success or expected_terminal) and scenario_pass and not hidden_progress
     return {
         id = spec.id,
         scenario = spec.scenario,
@@ -404,7 +407,7 @@ local function complete_case(spec, result)
         result = result,
         expected_failure = spec.expected_failure,
         accepted = accepted,
-        hidden_progress = false,
+        hidden_progress = hidden_progress,
         scenario_pass = scenario_pass,
         sample = spec.sample,
     }
@@ -453,12 +456,13 @@ function rollback_validation.step_campaign(campaign, max_ticks)
         campaign.active_spec = spec
         campaign.active = rollback_lab.new_campaign(spec.tape, spec.options)
     end
-    local result = rollback_lab.step_campaign(assert(campaign.active), max_ticks)
+    local active = assert(campaign.active)
+    local result = rollback_lab.step_campaign(active, max_ticks)
     if result == nil then
         return nil, nil
     end
     local spec = assert(campaign.active_spec)
-    local completed = complete_case(spec, result)
+    local completed = complete_case(spec, active, result)
     campaign.completed = campaign.completed + 1
     campaign.failed = campaign.failed or not completed.accepted
     fnv1a64.update(

@@ -123,6 +123,27 @@ t.describe("bounded rollback snapshot history", function()
         t.eq(missing.actual_status, "missing")
     end)
 
+    t.it("rejects retained boundaries that differ only by windup shot type", function()
+        local expected = rollback_snapshot_history.new(2)
+        local actual = rollback_snapshot_history.new(2)
+        local state = new_state()
+        state.players[2].windup_shot = {
+            dir = state.players[2].facing,
+            speed = 456,
+            vz = 123,
+            spin = -8,
+            shot_type = "chip",
+        }
+        assert(rollback_snapshot_history.store(expected, boundary(state, 0)))
+        state.players[2].windup_shot.shot_type = "ground"
+        assert(rollback_snapshot_history.store(actual, boundary(state, 0)))
+
+        local comparison = rollback_snapshot_history.compare(expected, actual, 0)
+        t.is_true(not comparison.matched)
+        t.eq(assert(comparison.first_difference).path, "state.players.2.windup_shot.shot_type")
+        t.is_true(assert(comparison.expected_hash) ~= assert(comparison.actual_hash))
+    end)
+
     t.it("updates byte accounting and invalidates a replaced boundary's lazy hash", function()
         local history = rollback_snapshot_history.new(1)
         local state = new_state()

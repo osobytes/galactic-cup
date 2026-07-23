@@ -1,3 +1,4 @@
+local Vec2 = require("core.vec2")
 local match_contract = require("game.match_contract")
 local match_observer = require("game.match_observer")
 local audio = require("game.audio")
@@ -23,6 +24,7 @@ local rollback_events = require("sim.rollback_events")
 ---@field boundary integer?
 ---@field state MatchState?
 ---@field snapshot MatchSnapshot?
+---@field replay_sample RollbackValidationReplaySample?
 
 ---@class RollbackValidationFinishOptions
 ---@field home_team_id string
@@ -34,6 +36,7 @@ local rollback_events = require("sim.rollback_events")
 ---@field seed integer?
 ---@field expected_replay_boundaries integer[]?
 ---@field expected_replay_samples RollbackValidationReplaySample[]?
+---@field expected_replay_truncate_count integer?
 ---@field required_scenarios RollbackValidationScenario[]?
 
 ---@class RollbackValidationReplaySample
@@ -105,6 +108,7 @@ local rollback_events = require("sim.rollback_events")
 ---@field impaired_observer_steps integer
 ---@field replay_record_count integer
 ---@field replay_truncate_count integer
+---@field replay_state MatchState
 
 ---@class RollbackValidationModule
 local rollback_validation = {}
@@ -309,6 +313,7 @@ function rollback_validation.new(initial_state)
         impaired_observer_steps = 0,
         replay_record_count = 0,
         replay_truncate_count = 0,
+        replay_state = match_snapshot.restore(match_snapshot.capture(initial_state)),
     }
 end
 
@@ -425,6 +430,19 @@ function rollback_validation.record_replay_boundary(audit, boundary, state)
     audit.replay_record_count = audit.replay_record_count + 1
 end
 
+---@param audit RollbackValidationAudit
+---@param boundary integer
+---@param sample RollbackValidationReplaySample
+function rollback_validation.record_replay_sample(audit, boundary, sample)
+    assert(sample.boundary == boundary, "replay sample boundary does not match its trace row")
+    local state = audit.replay_state
+    state.input_tick = boundary
+    state.ball = Vec2.new(sample.ball_x, sample.ball_y)
+    state.score.home = sample.score_home
+    state.score.away = sample.score_away
+    rollback_validation.record_replay_boundary(audit, boundary, state)
+end
+
 ---@param left integer[]
 ---@param right integer[]
 ---@return boolean
@@ -438,6 +456,23 @@ local function equal_boundaries(left, right)
         end
     end
     return true
+end
+
+---@param final_boundary integer
+---@return integer[]
+function rollback_validation.expected_replay_boundaries(final_boundary)
+    assert(
+        type(final_boundary) == "number"
+            and final_boundary == math.floor(final_boundary)
+            and final_boundary >= 0,
+        "expected replay final boundary must be a non-negative integer"
+    )
+    local first = math.max(0, final_boundary - replay.capacity() + 1)
+    local boundaries = {}
+    for boundary = first, final_boundary do
+        boundaries[#boundaries + 1] = boundary
+    end
+    return boundaries
 end
 
 ---@param expected RollbackValidationReplaySample[]?
@@ -585,7 +620,12 @@ function rollback_validation.finish(audit, options)
     local replay_matched = (
         options.expected_replay_boundaries == nil
         or equal_boundaries(replay_diagnostics.boundaries, options.expected_replay_boundaries)
-    ) and replay_samples_match(options.expected_replay_samples)
+    )
+        and replay_samples_match(options.expected_replay_samples)
+        and (
+            options.expected_replay_truncate_count == nil
+            or audit.replay_truncate_count == options.expected_replay_truncate_count
+        )
     local actual_audio_cues = audio.confirmed_cue_counts()
     local expected_cues = expected_audio_cues(audit)
 
@@ -702,11 +742,16 @@ function rollback_validation.run(initial_state, trace, finish_options)
         elseif row.kind == "replay_truncate" then
             rollback_validation.truncate_replay(audit, assert(row.boundary))
         elseif row.kind == "replay_boundary" then
-            local state = row.state
-                or match_snapshot.restore(
-                    assert(row.snapshot, "replay validation boundary is missing its snapshot")
-                )
-            rollback_validation.record_replay_boundary(audit, assert(row.boundary), state)
+            local boundary = assert(row.boundary)
+            if row.replay_sample then
+                rollback_validation.record_replay_sample(audit, boundary, row.replay_sample)
+            else
+                local state = row.state
+                    or match_snapshot.restore(
+                        assert(row.snapshot, "replay validation boundary is missing its snapshot")
+                    )
+                rollback_validation.record_replay_boundary(audit, boundary, state)
+            end
         else
             assert(false, "unknown rollback validation trace row: " .. tostring(row.kind))
         end
