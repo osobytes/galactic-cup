@@ -200,3 +200,64 @@ measurable, not a production internet latency promise.
   makes it present, and removes only later snapshots.
 - `diagnostics(history)` for capacity, retained count/range, and canonical byte
   totals.
+
+## Session restore and resimulation
+
+`sim.rollback_session` is the pure coordinator that owns the mutable slot-mode
+`MatchState`; callers receive only canonical snapshot and output copies. Its
+constructor accepts a tick-zero `MatchSnapshot`, the eight input sources, and
+an optional rollback-window override. It creates both bounded histories and
+stores boundary zero before simulation begins.
+
+Callers insert every authoritative row available for an update with
+`add_authoritative`, then call `reconcile` once. The session observes whether
+each accepted row differs from the already-consumed effective row before the
+history changes, so a batch can count every correction while still restoring
+only once from its earliest causal input tick. Equal predictions and
+authoritative input for an unconsumed tick are not corrections.
+
+`step` materializes exactly the current input tick, calls `sim.match.step` with
+`fixed_clock.TICK_SECONDS`, stores the resulting start-of-next-tick boundary,
+and records one immutable output. Each output names its input tick and start/end
+boundaries, the copied `RollbackInputTickRecord`, copied match events, final
+score/time/finished view, and whether that step reached full time. The output
+and input histories are pruned to the snapshot floor after every advance.
+
+`reconcile` first checks terminal status and whether a divergence exists. A
+no-op/equal batch and repeated terminal call therefore do not capture or hash
+the present; their optional old/new hash fields are absent. A changed rollback
+hashes the old present before replacing anything, consumes the earliest
+divergence once, restores its exact `present` or `retained` boundary, and
+rematerializes corrected frames toward the old present. All later authority in
+the same batch is therefore applied during that one replay. Corrected outputs
+are returned in causal tick order and also replace the session's per-tick
+output index for confirmed-event publication. A missing boundary inside the
+supported range is an invariant failure. An outside-window arrival enters
+terminal `late_input_unrecoverable` status without consuming another retained
+divergence or changing the live match; diagnostics always attribute a mixed
+batch to that actual late input tick. `step` cannot make hidden progress from
+the terminal state.
+
+If corrected play finishes before the old present at boundary `N`, the session
+stores the final output/boundary, truncates snapshots strictly after `N`, then
+truncates effective input records and outputs at ticks `>= N`. Authoritative
+tail rows remain upstream facts. Later authority for a discarded tick cannot
+be mistaken for a correction until that tick is simulated on a future active
+timeline. The snapshot and input floors remain monotonic across this rewind.
+
+`current_snapshot`, `snapshot`, and `output` return independent copies.
+`compare` reports actual/expected boundary numbers and hashes, an optional
+causal tick, and `match_snapshot.first_difference`. Diagnostics expose both the
+monotonic all-input `confirmed_tick` and `confirmed_output_tick`, which caps
+confirmation to the logical simulated-output ceiling when corrected full time
+drops an authoritative tail. Older confirmed outputs can still be absent from
+the queryable output index after ordinary bounded-history pruning.
+
+Prediction counters are cumulative execution costs: replaying a predicted tick
+increments them again. `predicted_slot_samples` counts individual predicted
+rows, `predicted_ticks` counts executions with at least one predicted row, and
+`resimulated_ticks` counts replayed match steps. `rollback_count` counts
+successful restores, while `correction_count` counts accepted authoritative
+rows that differed from consumed effective rows. Latest/maximum rollback depth
+is `old_present_boundary - causal_tick`; late-window failures are counted
+separately.
