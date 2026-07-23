@@ -317,6 +317,13 @@ end
 
 ---@param dt number
 function Match:update(dt)
+    -- These are one-render handoff deltas. Clear them even when this update is
+    -- paused or terminal so presentation reconciliation can never consume a
+    -- prior render's batch twice.
+    self._rollback_outputs = {}
+    self._rollback_event_diffs = {}
+    self._rollback_confirmed_steps = {}
+    self._rollback_corrections = {}
     if self._profile == "playtest" and tuning_panel.open then
         return -- paused for tuning: tweak, close, resume
     end
@@ -389,10 +396,6 @@ function Match:update(dt)
     -- zero simulation progress.
     self._input_adapter = match_input_adapter.sample(self._input_adapter, frame_input)
     self._frame_events = {}
-    self._rollback_outputs = {}
-    self._rollback_event_diffs = {}
-    self._rollback_confirmed_steps = {}
-    self._rollback_corrections = {}
     if self._rollback_lab then
         local lab = assert(self._rollback_lab)
         fixed_clock.advance(self._clock, dt, function(_)
@@ -435,9 +438,9 @@ function Match:update(dt)
 
     -- Presentation is never a second simulation authority. It follows normal
     -- render dt even on frames that consume zero or several simulation ticks.
-    if self._rollback_lab == nil then
-        view_state.update(self.state.players, dt)
-    end
+    -- In laboratory mode this follows the corrected displayed client directly;
+    -- correction smoothing remains a later presentation concern.
+    view_state.update(self.state.players, dt)
     effects.tick(dt)
     audio.tick(dt)
     local controlled = self.state.players[self.state.controlled]
@@ -469,6 +472,27 @@ function Match:update(dt)
     end
 end
 
+---@return BroadcastPhase?
+function Match:broadcast_phase()
+    if self._rollback_debug then
+        if self._rollback_debug.status == "converged" and self.state.finished then
+            return "full_time"
+        end
+    elseif self.state.finished then
+        return "full_time"
+    end
+    if replay.celebrating() then
+        return "goal"
+    end
+    if replay.active() then
+        return "replay"
+    end
+    if self._kickoff_banner > 0 then
+        return "kickoff"
+    end
+    return nil
+end
+
 ---@param s MatchState
 ---@param vp { w: number, h: number }
 function Match:draw_frame(s, vp)
@@ -480,17 +504,7 @@ function Match:draw_frame(s, vp)
         arena_pulse = math.min(1, self._kickoff_banner),
     })
 
-    ---@type BroadcastPhase?
-    local phase = nil
-    if match_is_over(self) then
-        phase = "full_time"
-    elseif replay.celebrating() then
-        phase = "goal"
-    elseif replay.active() then
-        phase = "replay"
-    elseif self._kickoff_banner > 0 then
-        phase = "kickoff"
-    end
+    local phase = self:broadcast_phase()
     local tactic = self._opts.tactic and tactics[self._opts.tactic] or nil
     local model = match_hud.model(self.state, {
         home_name = self.home_name,
@@ -541,6 +555,15 @@ function Match:draw_rollback_overlay(vp)
             model.retained_snapshot_count,
             model.retained_snapshot_bytes,
             model.network_pending
+        ),
+        ("net sent/delivered/lost  %d / %d / %d"):format(
+            model.network_counters.sent,
+            model.network_counters.delivered,
+            model.network_counters.independent_lost + model.network_counters.burst_lost
+        ),
+        ("net peak queue/refs  %d / %d"):format(
+            model.network_high_water.peak_pending_envelopes,
+            model.network_high_water.peak_pending_record_references
         ),
         ("convergence %s @ %d"):format(model.convergence.status, model.convergence.boundary),
     }

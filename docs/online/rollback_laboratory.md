@@ -23,6 +23,11 @@ selected network profile, reconciles one delivery batch, and catches the
 displayed client up to the reference boundary. The screen restores only the
 controller's copied current snapshot.
 
+Renderer-owned gait state follows that displayed snapshot every render update,
+so raw corrections remain observable; this mode does not interpolate or smooth
+simulation positions. A synchronization terminal stops input and stays visible
+in the lab overlay, but it is not presented as the match's `full_time` phase.
+
 Corrected outputs replace the complete speculative stable-event tail before
 new outputs are appended. Confirmation runs after corrections and again after
 catch-up, which frees the oldest event slot at the exact 30-tick supported

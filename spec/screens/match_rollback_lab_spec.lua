@@ -8,6 +8,7 @@ local ScreenStack = require("game.screen_stack")
 local bloom = require("game.render.bloom")
 local replay = require("game.render.replay")
 local view_state = require("game.render.view_state")
+local tuning_panel = require("game.ui.tuning_panel")
 
 ---@param delay integer
 ---@return NetworkProfile
@@ -121,6 +122,101 @@ t.describe("match screen rollback laboratory (tier 2)", function()
             t.is_true(#screen._rollback_event_diffs >= #screen._rollback_outputs)
             t.eq(#screen._frame_events, 0, "legacy speculative consumers receive no events")
             t.is_true(not replay.active(), "rollback mode never starts the legacy goal replay")
+        end)
+    end)
+
+    t.it("updates live player view state from the displayed rollback client", function()
+        with_keyboard(function(down)
+            local screen = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    profile_name = "clean",
+                },
+            })
+            down.right = true
+            down.lshift = true
+            screen:update(fixed_clock.TICK_SECONDS)
+            screen:update(fixed_clock.TICK_SECONDS)
+            local player = screen.state.players[screen.state.slot_players[1]]
+            local view = assert(view_state.get(player.id))
+            t.is_true(view.speed > 0, "a moving lab player must produce live gait speed")
+            t.is_true(view.phase > 0, "a moving lab player must advance gait phase")
+        end)
+    end)
+
+    t.it("clears rollback handoff batches before paused and terminal early returns", function()
+        with_keyboard(function()
+            local paused = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    network_profile = fixed_profile(2),
+                    profile_name = "pause",
+                },
+            })
+            paused:update(3 * fixed_clock.TICK_SECONDS)
+            t.is_true(#paused._rollback_outputs > 0)
+            t.is_true(#paused._rollback_event_diffs > 0)
+            tuning_panel.open = true
+            paused:update(0)
+            tuning_panel.open = false
+            t.eq(#paused._rollback_outputs, 0)
+            t.eq(#paused._rollback_event_diffs, 0)
+            t.eq(#paused._rollback_confirmed_steps, 0)
+            t.eq(#paused._rollback_corrections, 0)
+
+            local terminal = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    network_profile = fixed_profile(2),
+                    profile_name = "terminal",
+                    max_rollback_ticks = 1,
+                },
+            })
+            terminal:update(2 * fixed_clock.TICK_SECONDS)
+            t.eq(assert(terminal._rollback_debug).status, "unconfirmed_window_exceeded")
+            t.is_true(#terminal._rollback_outputs > 0)
+            terminal._kickoff_banner = 0
+            t.is_true(
+                terminal:broadcast_phase() == nil,
+                "synchronization failure must not masquerade as full time"
+            )
+            terminal:update(0)
+            t.eq(#terminal._rollback_outputs, 0)
+            t.eq(#terminal._rollback_event_diffs, 0)
+            t.eq(#terminal._rollback_confirmed_steps, 0)
+            t.eq(#terminal._rollback_corrections, 0)
+        end)
+    end)
+
+    t.it("preserves fixed-clock overload dropping and contiguous transport ticks", function()
+        with_keyboard(function()
+            local screen = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    profile_name = "clean",
+                },
+            })
+            screen:update((fixed_clock.MAX_TICKS_PER_UPDATE + 3.5) * fixed_clock.TICK_SECONDS)
+            t.eq(#screen._rollback_outputs, fixed_clock.MAX_TICKS_PER_UPDATE)
+            t.eq(screen._clock.tick, fixed_clock.MAX_TICKS_PER_UPDATE)
+            t.eq(screen._clock.dropped_ticks, 3)
+            t.eq(screen._clock.overloads, 1)
+            t.eq(assert(screen._rollback_debug).transport_tick, fixed_clock.MAX_TICKS_PER_UPDATE)
+            t.eq(assert(screen._rollback_debug).reference_tick, fixed_clock.MAX_TICKS_PER_UPDATE)
+            t.near(screen._clock.accumulator, fixed_clock.TICK_SECONDS / 2, 1e-9)
+
+            screen:update(fixed_clock.TICK_SECONDS / 2)
+            t.eq(#screen._rollback_outputs, 1)
+            t.eq(screen._rollback_outputs[1].tick, fixed_clock.MAX_TICKS_PER_UPDATE)
+            t.eq(screen._clock.tick, fixed_clock.MAX_TICKS_PER_UPDATE + 1)
+            t.eq(
+                assert(screen._rollback_debug).transport_tick,
+                fixed_clock.MAX_TICKS_PER_UPDATE + 1
+            )
+            t.eq(
+                assert(screen._rollback_debug).reference_tick,
+                fixed_clock.MAX_TICKS_PER_UPDATE + 1
+            )
         end)
     end)
 
@@ -248,21 +344,22 @@ t.describe("match screen rollback laboratory (tier 2)", function()
 end)
 
 t.describe("playable rollback ScreenStack flow (tier 3)", function()
-    t.it("routes a scripted impaired match through correction to convergence", function()
+    t.it("converges under the checked-in playable profile with pinned seeds", function()
         with_keyboard(function()
             local stack = ScreenStack.new()
             local screen = Match.new({
                 rollback_lab = {
                     local_slot = 1,
-                    network_profile = fixed_profile(2),
-                    profile_name = "flow",
-                    duration = 8 * fixed_clock.TICK_SECONDS,
-                    settlement_ticks = 64,
+                    profile_name = "playable",
+                    network_seed = 7302,
+                    bot_seed = 7400,
+                    duration = 12 * fixed_clock.TICK_SECONDS,
+                    settlement_ticks = 128,
                 },
             })
             stack:push(screen)
             local saw_correction = false
-            for _ = 1, 80 do
+            for _ = 1, 160 do
                 stack:update(fixed_clock.TICK_SECONDS)
                 saw_correction = saw_correction or #screen._rollback_corrections > 0
                 local status = assert(screen._rollback_debug).status
@@ -272,10 +369,19 @@ t.describe("playable rollback ScreenStack flow (tier 3)", function()
             end
             local debug = assert(screen._rollback_debug)
             t.is_true(saw_correction)
+            t.is_true(debug.rollback_count > 0)
+            t.is_true(debug.resimulated_ticks > 0)
             t.eq(debug.status, "converged")
             t.eq(debug.convergence.status, "matched")
             t.eq(debug.reference_tick, debug.current_tick)
+            local current = rollback_playable_lab.current_snapshot(assert(screen._rollback_lab))
+            local reference = rollback_playable_lab.reference_snapshot(assert(screen._rollback_lab))
+            t.eq(current.state.input_tick, reference.state.input_tick)
+            t.eq(match_snapshot.hash(current), match_snapshot.hash(reference))
+            t.eq(debug.convergence.actual_hash, debug.convergence.expected_hash)
+            t.eq(debug.confirmed_input_tick, debug.reference_tick - 1)
             t.eq(debug.confirmed_output_tick, debug.reference_tick - 1)
+            t.eq(debug.network_pending, 0)
         end)
     end)
 end)
