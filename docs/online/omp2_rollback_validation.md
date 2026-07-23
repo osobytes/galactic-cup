@@ -83,6 +83,10 @@ full Lua collection before emitting the marker that triggers the external proces
 Lua heap, process-tree RSS, and Chrome JS heap all include the final fifth-fixture checkpoint.
 Native holds at that terminal marker until the evidence process acknowledges its RSS sample, so
 the runtime cannot exit between marker delivery and measurement.
+Browser evidence waits inside the page for newly appended console entries and returns only the
+delta at each marker. It does not poll and reserialize the cumulative console array through
+WebDriver every frame interval, because those protocol allocations would contaminate Chrome's
+forced-GC JS-heap samples instead of measuring the game runtime.
 
 ## Event and presentation integrity
 

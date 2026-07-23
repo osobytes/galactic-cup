@@ -26,7 +26,6 @@ from typing import Any, Iterable
 
 from browser_determinism import (
     bounded_log_tail,
-    console_state,
     launch,
     quit_browser_bounded,
     validate_provenance,
@@ -79,6 +78,53 @@ MAX_SNAPSHOT_BYTES = 600 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 MAX_P95_WORK_MS = 16.67
 MAX_ROLLBACK_JOB_MS = 33.3
+
+BROWSER_CONSOLE_WAIT_SCRIPT = """
+const cursor = arguments[0];
+const timeoutMs = arguments[1];
+const done = arguments[arguments.length - 1];
+const state = window.__GALACTIC_CUP__ || {};
+const entries = state.console_entries || [];
+
+function result(timedOut) {
+  const current = window.__GALACTIC_CUP__ || {};
+  const currentEntries = current.console_entries || entries;
+  return {
+    cursor: currentEntries.length,
+    entries: currentEntries.slice(cursor).map((entry) => String(entry.message || "")),
+    status: current.status || null,
+    timed_out: timedOut
+  };
+}
+
+if (entries.length > cursor) {
+  done(result(false));
+} else {
+  const originalPush = entries.push;
+  let finished = false;
+  let timer = null;
+  function finish(timedOut) {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    if (entries.push === observedPush) {
+      entries.push = originalPush;
+    }
+    if (timer !== null) {
+      window.clearTimeout(timer);
+    }
+    done(result(timedOut));
+  }
+  function observedPush() {
+    const pushed = originalPush.apply(entries, arguments);
+    finish(false);
+    return pushed;
+  }
+  entries.push = observedPush;
+  timer = window.setTimeout(() => finish(true), timeoutMs);
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -1500,6 +1546,43 @@ def browser_teardown(
     return teardown, resources
 
 
+def wait_for_browser_console_entries(
+    driver: Any,
+    cursor: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Wait in-page for new console entries without repeated WebDriver polling."""
+
+    assert cursor >= 0
+    assert timeout_seconds > 0
+    wait_ms = max(1, math.ceil(timeout_seconds * 1000))
+    value = driver.execute_async_script(
+        BROWSER_CONSOLE_WAIT_SCRIPT,
+        cursor,
+        wait_ms,
+    )
+    if not isinstance(value, dict):
+        raise RuntimeError("browser returned malformed console wait state")
+    entries = value.get("entries")
+    next_cursor = value.get("cursor")
+    timed_out = value.get("timed_out")
+    if (
+        not isinstance(entries, list)
+        or not isinstance(next_cursor, int)
+        or isinstance(next_cursor, bool)
+        or next_cursor < cursor
+        or next_cursor - cursor != len(entries)
+        or not isinstance(timed_out, bool)
+    ):
+        raise RuntimeError("browser returned malformed console wait fields")
+    return {
+        "cursor": next_cursor,
+        "entries": [str(entry) for entry in entries],
+        "status": value.get("status"),
+        "timed_out": timed_out,
+    }
+
+
 def run_browser_once(
     browser_name: str,
     binary: Path,
@@ -1554,7 +1637,7 @@ def run_browser_once(
             driver.execute_cdp_cmd("Performance.enable", {})
         resource_checkpoints.append(browser_checkpoint(sampler, driver, browser_name, "started"))
         driver.set_page_load_timeout(min(timeout_seconds, 300))
-        driver.set_script_timeout(timeout_seconds)
+        driver.set_script_timeout(timeout_seconds + 10)
         query_arguments = [
             "--rollback-validation",
             suite,
@@ -1566,16 +1649,23 @@ def run_browser_once(
         )
         driver.get(f"{base_url}?{query}")
         deadline = time.monotonic() + timeout_seconds
+        console_cursor = 0
         observed_marker_count = 0
         while time.monotonic() < deadline:
-            state = console_state(driver)
-            entries = state.get("entries")
-            if not isinstance(entries, list):
-                raise RuntimeError(f"{browser_name} {suite} returned malformed console entries")
-            messages = [str(entry) for entry in entries]
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                break
+            state = wait_for_browser_console_entries(
+                driver,
+                console_cursor,
+                remaining_seconds,
+            )
+            console_cursor = state["cursor"]
+            entries = state["entries"]
+            messages.extend(entries)
             failures = [
                 message
-                for message in messages
+                for message in entries
                 if any(error_marker in message for error_marker in ERROR_MARKERS)
             ]
             if failures:
@@ -1599,7 +1689,8 @@ def run_browser_once(
             if results:
                 result = validate_marker_set(markers, suite)
                 break
-            time.sleep(0.5)
+            if state["timed_out"]:
+                break
         if result is None:
             raise RuntimeError(
                 f"{browser_name} {suite} timed out after {timeout_seconds}s without a result"
@@ -1859,6 +1950,26 @@ def run_self_test() -> None:
         raise RuntimeError("browser soak timeout scaling self-test failed")
     if browser_suite_timeout_seconds("soak", 7200) != 7200:
         raise RuntimeError("browser soak timeout upper-bound self-test failed")
+
+    class FakeConsoleWaitDriver:
+        def execute_async_script(self, script: str, cursor: int, timeout_ms: int) -> Any:
+            if script != BROWSER_CONSOLE_WAIT_SCRIPT or timeout_ms != 1250:
+                raise RuntimeError("browser console wait invocation self-test failed")
+            return {
+                "cursor": cursor + 2,
+                "entries": ["one", "two"],
+                "status": "running",
+                "timed_out": False,
+            }
+
+    console_wait = wait_for_browser_console_entries(FakeConsoleWaitDriver(), 3, 1.25)
+    if console_wait != {
+        "cursor": 5,
+        "entries": ["one", "two"],
+        "status": "running",
+        "timed_out": False,
+    }:
+        raise RuntimeError("browser console wait result self-test failed")
     expected_counts = {
         ("native", ()): 39,
         ("browser-full", ("clean", "2001")): 1,
