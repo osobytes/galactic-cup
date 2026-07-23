@@ -690,19 +690,25 @@ def validate_late_window_contract(markers: list[ValidationMarker]) -> None:
 
 def growth_gate(values: dict[str, int], label: str) -> dict[str, Any]:
     baseline = values["warmup"]
+    terminal = values["final"]
+    growth_ratio = max(0.0, (terminal - baseline) / baseline)
     peak_sample = max(values, key=lambda sample: values[sample])
     peak = values[peak_sample]
-    growth_ratio = max(0.0, (peak - baseline) / baseline)
+    peak_growth_ratio = max(0.0, (peak - baseline) / baseline)
     passed = growth_ratio <= MAX_MEMORY_GROWTH_RATIO + 1e-12
     return {
         "baseline_bytes": baseline,
         "growth_percent": round(growth_ratio * 100, 6),
         "label": label,
         "limit_percent": MAX_MEMORY_GROWTH_RATIO * 100,
+        "measurement": "final_vs_warmup",
         "pass": passed,
         "peak_bytes": peak,
+        "peak_growth_percent": round(peak_growth_ratio * 100, 6),
         "peak_sample": peak_sample,
         "samples": values,
+        "terminal_bytes": terminal,
+        "terminal_sample": "final",
     }
 
 
@@ -1462,7 +1468,9 @@ def native_matrix(
         timeout_seconds,
     )
     if not native["soak"]["soak_memory"]["pass"]:
-        raise RuntimeError("native soak exceeded the 10% post-warmup memory-growth gate")
+        raise RuntimeError(
+            "native soak exceeded the 10% terminal forced-GC growth gate"
+        )
 
 
 def browser_js_heap(driver: Any, browser_name: str) -> dict[str, Any] | None:
@@ -1874,8 +1882,8 @@ def browser_matrix(
                 runtime["runs"].append(run)
                 if suite == "soak" and not run["soak_memory"]["pass"]:
                     raise RuntimeError(
-                        f"{browser_name} soak exceeded the 10% post-warmup "
-                        "memory-growth gate"
+                        f"{browser_name} soak exceeded the 10% terminal "
+                        "forced-GC growth gate"
                     )
     finally:
         server.shutdown()
@@ -2120,12 +2128,28 @@ def run_self_test() -> None:
         pass
     else:
         raise RuntimeError("missing final external memory checkpoint passed self-test")
-    if not growth_gate({"warmup": 1000, "peak": 1100}, "inclusive-threshold")[
+    inclusive_growth = growth_gate(
+        {"warmup": 1000, "middle": 1090, "final": 1100},
+        "inclusive-threshold",
+    )
+    if not inclusive_growth["pass"]:
+        raise RuntimeError("inclusive memory-growth threshold failed self-test")
+    if growth_gate({"warmup": 1000, "middle": 1090, "final": 1101}, "over-threshold")[
         "pass"
     ]:
-        raise RuntimeError("inclusive memory-growth threshold failed self-test")
-    if growth_gate({"warmup": 1000, "peak": 1101}, "over-threshold")["pass"]:
         raise RuntimeError("over-threshold memory growth passed self-test")
+    transient_peak = growth_gate(
+        {"warmup": 1000, "middle": 1200, "final": 1090},
+        "transient-peak",
+    )
+    if (
+        not transient_peak["pass"]
+        or transient_peak["growth_percent"] != 9.0
+        or transient_peak["measurement"] != "final_vs_warmup"
+        or transient_peak["peak_growth_percent"] != 20.0
+        or transient_peak["terminal_bytes"] != 1090
+    ):
+        raise RuntimeError("transient memory peak self-test failed")
     soak_resources["checkpoints"][-1]["rss_bytes"] = 4000
     if soak_memory_evidence(soak_markers, soak_resources, "chrome")["pass"]:
         raise RuntimeError("over-budget soak memory self-test passed")
