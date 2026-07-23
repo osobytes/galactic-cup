@@ -84,6 +84,43 @@ t.describe("bounded rollback snapshot history", function()
         first.state.players[1].pos.x = original_x - 100
         local second = assert(rollback_snapshot_history.lookup(history, 0).snapshot)
         t.eq(second.state.players[1].pos.x, original_x)
+
+        local restored, status = rollback_snapshot_history.restore(history, 0)
+        t.eq(status, "present")
+        assert(restored).players[1].pos.x = original_x + 50
+        local unchanged = assert(rollback_snapshot_history.restore(history, 0))
+        t.eq(unchanged.players[1].pos.x, original_x)
+        t.eq(rollback_snapshot_history.status(history, 0), "present")
+        t.eq(rollback_snapshot_history.status(history, 1), "missing")
+    end)
+
+    t.it("compares retained boundaries and materializes hashes only for divergence", function()
+        local expected = rollback_snapshot_history.new(2)
+        local actual = rollback_snapshot_history.new(2)
+        local state = new_state()
+        assert(rollback_snapshot_history.store(expected, boundary(state, 0)))
+        assert(rollback_snapshot_history.store(actual, boundary(state, 0)))
+
+        local matched = rollback_snapshot_history.compare(expected, actual, 0)
+        t.is_true(matched.matched)
+        t.eq(matched.expected_status, "present")
+        t.eq(matched.actual_status, "present")
+        t.eq(matched.expected_hash, nil)
+        t.eq(matched.actual_hash, nil)
+        t.eq(matched.first_difference, nil)
+
+        state.score.home = 1
+        assert(rollback_snapshot_history.store(actual, boundary(state, 0)))
+        local diverged = rollback_snapshot_history.compare(expected, actual, 0)
+        t.eq(diverged.matched, false)
+        t.eq(assert(diverged.first_difference).path, "state.score.home")
+        t.is_true(assert(diverged.expected_hash) ~= assert(diverged.actual_hash))
+
+        assert(rollback_snapshot_history.store(expected, boundary(state, 3)))
+        local missing = rollback_snapshot_history.compare(expected, actual, 3)
+        t.eq(missing.matched, false)
+        t.eq(missing.expected_status, "present")
+        t.eq(missing.actual_status, "missing")
     end)
 
     t.it("updates byte accounting and invalidates a replaced boundary's lazy hash", function()

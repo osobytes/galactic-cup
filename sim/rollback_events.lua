@@ -88,6 +88,10 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field oldest_tick integer?
 ---@field latest_tick integer?
 
+---@class RollbackEventsAccounting
+---@field retained_step_bytes integer
+---@field total_bytes integer
+
 ---@class RollbackEventsModule
 local rollback_events = {}
 
@@ -128,6 +132,38 @@ local function equal_value(left, right)
         end
     end
     return true
+end
+
+---@param value any
+---@return string
+local function canonical_payload(value)
+    local kind = type(value)
+    if kind == "nil" then
+        return "n"
+    elseif kind == "boolean" then
+        return value and "b1" or "b0"
+    elseif kind == "number" then
+        local payload = match_snapshot.number_bytes(value)
+        return "d" .. #payload .. ":" .. payload
+    elseif kind == "string" then
+        return "s" .. #value .. ":" .. value
+    elseif kind == "table" then
+        local keys = {}
+        for key in pairs(value) do
+            keys[#keys + 1] = key
+        end
+        table.sort(keys, function(left, right)
+            return type(left) .. ":" .. tostring(left) < type(right) .. ":" .. tostring(right)
+        end)
+        local parts = { "t", tostring(#keys), ":" }
+        for _, key in ipairs(keys) do
+            parts[#parts + 1] = canonical_payload(key)
+            parts[#parts + 1] = canonical_payload(value[key])
+        end
+        return table.concat(parts)
+    end
+    assert(false, "rollback event accounting cannot encode " .. kind)
+    return ""
 end
 
 ---@param timeline RollbackEventTimeline
@@ -717,6 +753,23 @@ function rollback_events.diagnostics(timeline)
         retained_event_count = event_count,
         oldest_tick = oldest,
         latest_tick = latest,
+    }
+end
+
+-- Exact logical bytes retained in the speculative event window. Confirmed
+-- presentation history lives in game-layer consumers and is not rollback
+-- history.
+---@param timeline RollbackEventTimeline
+---@return RollbackEventsAccounting
+function rollback_events.accounting(timeline)
+    assert_timeline(timeline)
+    local retained_step_bytes = 0
+    for _, step in pairs(timeline._steps) do
+        retained_step_bytes = retained_step_bytes + #canonical_payload(step)
+    end
+    return {
+        retained_step_bytes = retained_step_bytes,
+        total_bytes = retained_step_bytes,
     }
 end
 

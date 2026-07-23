@@ -2,6 +2,7 @@
 -- indexed by the InputFrame tick they will consume; the ring owns independent
 -- canonical snapshots and has no simulation, transport, or presentation role.
 
+local fnv1a64 = require("core.fnv1a64")
 local input_frame = require("sim.input_frame")
 local match_snapshot = require("sim.match_snapshot")
 local rollback_input_history = require("sim.rollback_input_history")
@@ -13,6 +14,7 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field tick integer
 ---@field snapshot MatchSnapshot
 ---@field canonical_bytes integer
+---@field canonical_wire string
 ---@field hash string?
 
 ---@class RollbackSnapshotHistory
@@ -31,6 +33,14 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field tick integer
 ---@field snapshot MatchSnapshot?
 ---@field canonical_bytes integer?
+
+---@class RollbackSnapshotHistoryComparison
+---@field matched boolean
+---@field expected_status RollbackSnapshotLookupStatus
+---@field actual_status RollbackSnapshotLookupStatus
+---@field expected_hash string?
+---@field actual_hash string?
+---@field first_difference MatchSnapshotDifference?
 
 ---@class RollbackSnapshotStoreResult
 ---@field tick integer
@@ -131,11 +141,10 @@ end
 -- Store or replace one canonical start-of-tick boundary. Advancing the latest
 -- boundary evicts every entry older than the supported correction window.
 ---@param history RollbackSnapshotHistory
----@param snapshot MatchSnapshot
+---@param retained MatchSnapshot
 ---@return RollbackSnapshotStoreResult?, string?, RollbackSnapshotHistoryErrorCode?
-function rollback_snapshot_history.store(history, snapshot)
+local function store_retained(history, retained)
     assert_history(history)
-    local retained = copy_snapshot(snapshot)
     local tick = retained.state.input_tick
     assert(
         is_integer(tick) and tick >= 0 and tick <= input_frame.MAX_TICK,
@@ -174,11 +183,13 @@ function rollback_snapshot_history.store(history, snapshot)
     if existing then
         remove_entry(history, existing)
     end
-    local canonical_bytes = #match_snapshot.encode(retained)
+    local canonical_wire = match_snapshot.encode(retained)
+    local canonical_bytes = #canonical_wire
     history._entries[index] = {
         tick = tick,
         snapshot = retained,
         canonical_bytes = canonical_bytes,
+        canonical_wire = canonical_wire,
         hash = nil,
     }
     history._count = history._count + 1
@@ -187,6 +198,24 @@ function rollback_snapshot_history.store(history, snapshot)
     history._peak_canonical_bytes =
         math.max(history._peak_canonical_bytes, history._canonical_bytes)
     return { tick = tick, replaced = replaced, evicted = evicted }
+end
+
+---@param history RollbackSnapshotHistory
+---@param snapshot MatchSnapshot
+---@return RollbackSnapshotStoreResult?, string?, RollbackSnapshotHistoryErrorCode?
+function rollback_snapshot_history.store(history, snapshot)
+    return store_retained(history, copy_snapshot(snapshot))
+end
+
+-- Transfer a freshly captured canonical snapshot into the ring. The caller
+-- must not retain and mutate the supplied table after this call. This avoids a
+-- redundant restore/capture copy on the simulation hot path while `store`
+-- remains the ownership-safe public boundary for arbitrary callers.
+---@param history RollbackSnapshotHistory
+---@param snapshot MatchSnapshot
+---@return RollbackSnapshotStoreResult?, string?, RollbackSnapshotHistoryErrorCode?
+function rollback_snapshot_history.store_owned(history, snapshot)
+    return store_retained(history, snapshot)
 end
 
 ---@param history RollbackSnapshotHistory
@@ -202,6 +231,18 @@ local function lookup_status(history, tick)
         return "missing"
     end
     return tick == history._latest_tick and "present" or "retained"
+end
+
+---@param history RollbackSnapshotHistory
+---@param tick integer
+---@return RollbackSnapshotLookupStatus
+function rollback_snapshot_history.status(history, tick)
+    assert_history(history)
+    assert(
+        is_integer(tick) and tick >= 0 and tick <= input_frame.MAX_TICK,
+        "rollback snapshot status tick must be a bounded non-negative integer"
+    )
+    return lookup_status(history, tick)
 end
 
 -- Keep the named start-of-tick boundary and discard only later snapshots from
@@ -275,8 +316,31 @@ function rollback_snapshot_history.lookup(history, tick)
     }
 end
 
--- Hashing is diagnostic and deliberately lazy: ordinary retention does not
--- pay a second canonical encoding. Replacement creates a fresh unhashed entry.
+-- Restore an independent MatchState directly from a retained entry. Callers
+-- that need a state, rather than a snapshot copy, avoid a restore/capture
+-- round-trip through `lookup`.
+---@param history RollbackSnapshotHistory
+---@param tick integer
+---@return MatchState?, RollbackSnapshotLookupStatus
+function rollback_snapshot_history.restore(history, tick)
+    assert_history(history)
+    assert(
+        is_integer(tick) and tick >= 0 and tick <= input_frame.MAX_TICK,
+        "rollback snapshot restore tick must be a bounded non-negative integer"
+    )
+    local status = lookup_status(history, tick)
+    if status == "missing" or status == "outside_window" then
+        return nil, status
+    end
+    local entry = assert(history._entries[ring_index(history, tick)])
+    assert(entry.tick == tick, "rollback snapshot ring restore is inconsistent")
+    return match_snapshot.restore(entry.snapshot), status
+end
+
+-- Hashing is diagnostic and deliberately lazy. Retention keeps the canonical
+-- wire already required for exact byte accounting, so requesting a hash never
+-- repeats snapshot normalization or encoding. Replacement creates a fresh
+-- unhashed entry.
 ---@param history RollbackSnapshotHistory
 ---@param tick integer
 ---@return string?, RollbackSnapshotLookupStatus
@@ -292,9 +356,84 @@ function rollback_snapshot_history.boundary_hash(history, tick)
     end
     local entry = assert(history._entries[ring_index(history, tick)])
     if entry.hash == nil then
-        entry.hash = match_snapshot.hash(entry.snapshot)
+        entry.hash = fnv1a64.hash(entry.canonical_wire)
     end
     return entry.hash, status
+end
+
+-- Compare an owned diagnostic snapshot with a retained boundary without
+-- copying the retained entry. The caller's snapshot remains independent.
+---@param history RollbackSnapshotHistory
+---@param tick integer
+---@param expected MatchSnapshot
+---@return MatchSnapshotDifference?, RollbackSnapshotLookupStatus
+function rollback_snapshot_history.first_difference(history, tick, expected)
+    assert_history(history)
+    assert(
+        is_integer(tick) and tick >= 0 and tick <= input_frame.MAX_TICK,
+        "rollback snapshot difference tick must be a bounded non-negative integer"
+    )
+    local status = lookup_status(history, tick)
+    if status == "missing" or status == "outside_window" then
+        return nil, status
+    end
+    local entry = assert(history._entries[ring_index(history, tick)])
+    return match_snapshot.first_difference(expected, entry.snapshot), status
+end
+
+-- Compare retained canonical boundaries without copying them through a
+-- restore/capture cycle. Hashes are materialized only for a mismatch, where
+-- they become part of the diagnostic contract.
+---@param expected RollbackSnapshotHistory
+---@param actual RollbackSnapshotHistory
+---@param tick integer
+---@return RollbackSnapshotHistoryComparison
+function rollback_snapshot_history.compare(expected, actual, tick)
+    assert_history(expected)
+    assert_history(actual)
+    assert(
+        is_integer(tick) and tick >= 0 and tick <= input_frame.MAX_TICK,
+        "rollback snapshot comparison tick must be a bounded non-negative integer"
+    )
+    local expected_status = lookup_status(expected, tick)
+    local actual_status = lookup_status(actual, tick)
+    if
+        (expected_status ~= "present" and expected_status ~= "retained")
+        or (actual_status ~= "present" and actual_status ~= "retained")
+    then
+        return {
+            matched = false,
+            expected_status = expected_status,
+            actual_status = actual_status,
+            expected_hash = nil,
+            actual_hash = nil,
+            first_difference = nil,
+        }
+    end
+    local expected_entry = assert(expected._entries[ring_index(expected, tick)])
+    local actual_entry = assert(actual._entries[ring_index(actual, tick)])
+    local first_difference =
+        match_snapshot.first_difference(expected_entry.snapshot, actual_entry.snapshot)
+    if first_difference == nil then
+        return {
+            matched = true,
+            expected_status = expected_status,
+            actual_status = actual_status,
+            expected_hash = nil,
+            actual_hash = nil,
+            first_difference = nil,
+        }
+    end
+    local expected_hash = assert(rollback_snapshot_history.boundary_hash(expected, tick))
+    local actual_hash = assert(rollback_snapshot_history.boundary_hash(actual, tick))
+    return {
+        matched = false,
+        expected_status = expected_status,
+        actual_status = actual_status,
+        expected_hash = expected_hash,
+        actual_hash = actual_hash,
+        first_difference = first_difference,
+    }
 end
 
 ---@param history RollbackSnapshotHistory

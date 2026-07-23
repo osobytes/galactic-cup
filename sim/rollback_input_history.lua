@@ -38,6 +38,13 @@ local input_frame = require("sim.input_frame")
 ---@field confirmed_tick integer
 ---@field earliest_divergence integer?
 
+---@class RollbackInputHistoryAccounting
+---@field authoritative_bytes integer
+---@field predecessor_anchor_bytes integer
+---@field effective_frame_bytes integer
+---@field input_record_bytes integer
+---@field total_bytes integer
+
 ---@class RollbackInputTruncateResult
 ---@field boundary_tick integer
 ---@field effective_removed integer
@@ -109,6 +116,17 @@ local function samples_equal(left, right)
         and left.move_y == right.move_y
         and left.held == right.held
         and left.edges == right.edges
+end
+
+---@param sample InputSample
+---@return string
+local function sample_wire(sample)
+    return table.concat({
+        tostring(sample.move_x),
+        tostring(sample.move_y),
+        tostring(sample.held),
+        tostring(sample.edges),
+    }, ",")
 end
 
 ---@param frame InputFrame
@@ -487,6 +505,53 @@ function rollback_input_history.diagnostics(history)
         predecessor_anchor_count = anchor_count,
         confirmed_tick = history._confirmed_tick,
         earliest_divergence = history._earliest_divergence,
+    }
+end
+
+-- Exact byte count for the documented canonical retained-history encoding.
+-- This accounts logical rollback payload only; it is deliberately not an
+-- estimate of Lua allocator overhead.
+---@param history RollbackInputHistory
+---@return RollbackInputHistoryAccounting
+function rollback_input_history.accounting(history)
+    assert_history(history)
+    local authoritative_bytes = 0
+    for tick, slots in pairs(history._authoritative) do
+        for slot, sample in pairs(slots) do
+            authoritative_bytes = authoritative_bytes
+                + #("A|%d|%d|%s\n"):format(tick, slot, sample_wire(sample))
+        end
+    end
+    local predecessor_anchor_bytes = 0
+    for slot, anchor in pairs(history._anchors) do
+        predecessor_anchor_bytes = predecessor_anchor_bytes
+            + #("P|%d|%d|%s\n"):format(slot, anchor.tick, sample_wire(anchor.sample))
+    end
+    local effective_frame_bytes = 0
+    for _, frame in pairs(history._effective) do
+        effective_frame_bytes = effective_frame_bytes
+            + #("E|" .. assert(input_frame.encode(frame)) .. "\n")
+    end
+    local input_record_bytes = 0
+    for tick, record in pairs(history._records) do
+        local parts = { "R", tostring(tick) }
+        for slot = 1, input_frame.SLOT_COUNT do
+            local row = record.slots[slot]
+            parts[#parts + 1] = row.source
+            parts[#parts + 1] = row.status
+            parts[#parts + 1] = sample_wire(row.sample)
+        end
+        input_record_bytes = input_record_bytes + #(table.concat(parts, "|") .. "\n")
+    end
+    return {
+        authoritative_bytes = authoritative_bytes,
+        predecessor_anchor_bytes = predecessor_anchor_bytes,
+        effective_frame_bytes = effective_frame_bytes,
+        input_record_bytes = input_record_bytes,
+        total_bytes = authoritative_bytes
+            + predecessor_anchor_bytes
+            + effective_frame_bytes
+            + input_record_bytes,
     }
 end
 

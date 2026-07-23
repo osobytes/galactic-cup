@@ -79,6 +79,9 @@ jobs:
                   ./scripts/check_determinism.sh --self-test
                   ./scripts/check_determinism.sh
 
+            - name: Check OMP-2 rollback orchestration
+              run: ./scripts/check_rollback.sh --self-test
+
     browser_artifact:
         name: Browser artifact smoke
         runs-on: ubuntu-24.04
@@ -125,3 +128,100 @@ jobs:
                           --browser firefox \
                           --browser chrome \
                           --output "$RUNNER_TEMP/omp1-browser-determinism.json"
+
+    rollback_native:
+        name: OMP-2 rollback native
+        runs-on: ubuntu-24.04
+        timeout-minutes: 180
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+            - name: Install pinned LÖVE 11.5
+              env:
+                  LOVE_VERSION: 11.5
+                  LOVE_SHA256: 65a673406431eff7167a15a032bf7a2e4ba50108e091eb7b176465831f9b5e00
+              run: |
+                  tool_dir="$RUNNER_TEMP/galactic-cup-love"
+                  mkdir -p "$tool_dir/bin" "$tool_dir/love"
+                  curl --fail --location --retry 3 --silent --show-error \
+                      --output "$tool_dir/love.AppImage" \
+                      "https://github.com/love2d/love/releases/download/${LOVE_VERSION}/love-${LOVE_VERSION}-x86_64.AppImage"
+                  echo "${LOVE_SHA256}  $tool_dir/love.AppImage" | sha256sum --check --status
+                  chmod +x "$tool_dir/love.AppImage"
+                  (
+                      cd "$tool_dir/love"
+                      "$tool_dir/love.AppImage" --appimage-extract >/dev/null
+                  )
+                  ln -s "$tool_dir/love/squashfs-root/AppRun" "$tool_dir/bin/love"
+                  "$tool_dir/bin/love" --version
+                  printf '%s\n' "$tool_dir/bin" >> "$GITHUB_PATH"
+
+            - name: Run isolated native matrix, late-window, and persistent soak
+              run: |
+                  ./scripts/check_rollback.sh \
+                      --native \
+                      --output "$RUNNER_TEMP/omp2-rollback-native.json" \
+                      --timeout-seconds 2700
+
+            - name: Upload native rollback evidence
+              if: always()
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+              with:
+                  name: omp2-rollback-native
+                  path: |
+                      ${{ runner.temp }}/omp2-rollback-native.json
+                      ${{ runner.temp }}/omp2-rollback-native-raw
+                  if-no-files-found: error
+                  retention-days: 14
+
+    rollback_browser:
+        name: OMP-2 rollback browser (${{ matrix.browser }})
+        runs-on: ubuntu-24.04
+        timeout-minutes: 180
+        strategy:
+            fail-fast: false
+            matrix:
+                browser: [chrome, firefox]
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+            - name: Install pinned browser evidence dependencies
+              run: |
+                  python3 -m venv "$RUNNER_TEMP/browser-evidence"
+                  "$RUNNER_TEMP/browser-evidence/bin/pip" install \
+                      --require-hashes \
+                      --requirement scripts/browser_matrix-requirements.txt
+                  printf '%s\n' "$RUNNER_TEMP/browser-evidence/bin" >> "$GITHUB_PATH"
+
+            - name: Build the pinned love.js artifact
+              run: ./scripts/web_build.sh "$RUNNER_TEMP/omp2-web"
+
+            - name: Run complete, stress, and soak browser validation
+              env:
+                  GALLIUM_DRIVER: llvmpipe
+                  LIBGL_ALWAYS_SOFTWARE: "1"
+                  SE_CACHE_PATH: ${{ runner.temp }}/selenium
+              run: |
+                  xvfb-run -a \
+                      -s "-screen 0 1280x720x24 -nolisten tcp +extension GLX +render -noreset" \
+                      ./scripts/check_rollback.sh \
+                          --browser \
+                          --runtime-browser "${{ matrix.browser }}" \
+                          --artifact "$RUNNER_TEMP/omp2-web" \
+                          --output "$RUNNER_TEMP/omp2-rollback-${{ matrix.browser }}.json" \
+                          --timeout-seconds 1800
+
+            - name: Upload browser rollback evidence
+              if: always()
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+              with:
+                  name: omp2-rollback-${{ matrix.browser }}
+                  path: |
+                      ${{ runner.temp }}/omp2-rollback-${{ matrix.browser }}.json
+                      ${{ runner.temp }}/omp2-rollback-${{ matrix.browser }}-raw
+                  if-no-files-found: error
+                  retention-days: 14

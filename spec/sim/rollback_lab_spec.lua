@@ -430,4 +430,27 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
         t.eq(unconfirmed.unconfirmed_tick, 0)
         t.is_true(not unconfirmed.drain.complete)
     end)
+
+    t.it("uses one logical result for incremental and synchronous execution", function()
+        local tape = varying_tape(24, "incremental-equivalence")
+        local options = {
+            profile_name = "incremental-spec",
+            profile = profile({ base_delay_ticks = 3 }),
+            network_seed = 2001,
+            sources = one_remote(),
+        }
+        local synchronous = rollback_lab.run(tape, options)
+        local campaign = rollback_lab.new_campaign(tape, options)
+        local incremental = nil
+        while incremental == nil do
+            incremental = rollback_lab.step_campaign(campaign, 1)
+        end
+        t.eq(rollback_lab.logical_marker(incremental), rollback_lab.logical_marker(synchronous))
+        t.eq(incremental.event_metrics.reference_digest, incremental.event_metrics.confirmed_digest)
+        t.eq(incremental.event_metrics.speculative_residue, 0)
+        t.is_true(incremental.history_accounting.total_bytes > 0)
+        t.is_true(
+            incremental.metrics.peaks.history_bytes >= incremental.history_accounting.total_bytes
+        )
+    end)
 end)
