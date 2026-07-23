@@ -348,7 +348,7 @@ t.describe("match screen rollback laboratory (tier 2)", function()
         end)
     end)
 
-    t.it("clears smoothing at kickoff, full time, restart, and stack teardown", function()
+    t.it("clears smoothing at kickoff, full time, and stack teardown", function()
         with_keyboard(function()
             local kickoff = Match.new()
             prepare_forced_home_goal(kickoff)
