@@ -38,6 +38,13 @@ local input_frame = require("sim.input_frame")
 ---@field confirmed_tick integer
 ---@field earliest_divergence integer?
 
+---@class RollbackInputTruncateResult
+---@field boundary_tick integer
+---@field effective_removed integer
+---@field records_removed integer
+---@field cleared_divergence boolean
+---@field diagnostics RollbackInputHistoryDiagnostics
+
 ---@class RollbackInputHistory
 ---@field _sources RollbackInputSource[]
 ---@field _authoritative table<integer, table<integer, InputSample>>
@@ -480,6 +487,62 @@ function rollback_input_history.diagnostics(history)
         predecessor_anchor_count = anchor_count,
         confirmed_tick = history._confirmed_tick,
         earliest_divergence = history._earliest_divergence,
+    }
+end
+
+-- Boundary N is the state before InputFrame N. Discarding from N removes only
+-- effective frames and source/status diagnostics from an obsolete simulated
+-- tail; authoritative arrivals and confirmation remain valid upstream facts.
+---@param history RollbackInputHistory
+---@param boundary_tick integer
+---@return RollbackInputTruncateResult?, string?, RollbackInputHistoryErrorCode?
+function rollback_input_history.truncate_from(history, boundary_tick)
+    assert_history(history)
+    if
+        not is_integer(boundary_tick)
+        or boundary_tick < 0
+        or boundary_tick > input_frame.MAX_TICK
+    then
+        return nil,
+            "rollback input truncate tick must be a bounded non-negative integer",
+            "malformed"
+    end
+    if boundary_tick < history._oldest_retained_tick then
+        return nil,
+            ("rollback input boundary %d is older than retained tick %d"):format(
+                boundary_tick,
+                history._oldest_retained_tick
+            ),
+            "outside_window"
+    end
+
+    local effective_removed = 0
+    for tick in pairs(history._effective) do
+        if tick >= boundary_tick then
+            history._effective[tick] = nil
+            history._effective_tick_count = history._effective_tick_count - 1
+            effective_removed = effective_removed + 1
+        end
+    end
+    local records_removed = 0
+    for tick in pairs(history._records) do
+        if tick >= boundary_tick then
+            history._records[tick] = nil
+            history._record_tick_count = history._record_tick_count - 1
+            records_removed = records_removed + 1
+        end
+    end
+    local cleared_divergence = history._earliest_divergence ~= nil
+        and history._earliest_divergence >= boundary_tick
+    if cleared_divergence then
+        history._earliest_divergence = nil
+    end
+    return {
+        boundary_tick = boundary_tick,
+        effective_removed = effective_removed,
+        records_removed = records_removed,
+        cleared_divergence = cleared_divergence,
+        diagnostics = rollback_input_history.diagnostics(history),
     }
 end
 

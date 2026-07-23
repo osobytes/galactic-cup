@@ -277,6 +277,35 @@ t.describe("OMP-2 rollback input history", function()
         t.eq(rollback_input_history.confirmed_tick(history), 3)
     end)
 
+    t.it("truncates only the obsolete effective tail and preserves earlier divergence", function()
+        local history = rollback_input_history.new(sources())
+        rollback_input_history.materialize(history, 1)
+        rollback_input_history.materialize(history, 4)
+        assert(rollback_input_history.add_authoritative(history, 1, 1, sample(10, 0, 0, 0)))
+        assert(rollback_input_history.add_authoritative(history, 4, 1, sample(40, 0, 0, 0)))
+        t.eq(rollback_input_history.earliest_divergence(history), 1)
+
+        local truncated = assert(rollback_input_history.truncate_from(history, 4))
+        t.eq(truncated.effective_removed, 1)
+        t.eq(truncated.records_removed, 1)
+        t.eq(truncated.cleared_divergence, false)
+        t.eq(truncated.diagnostics.earliest_divergence, 1)
+        t.eq(rollback_input_history.record(history, 4), nil)
+        t.is_true(rollback_input_history.authoritative_record(history, 4, 1) ~= nil)
+
+        local bounded = rollback_input_history.new(sources())
+        assert(rollback_input_history.prune_before(bounded, 3))
+        local rejected, _, code = rollback_input_history.truncate_from(bounded, 2)
+        t.eq(rejected, nil)
+        t.eq(code, "outside_window")
+        ---@type any
+        local malformed_tick = 3.5
+        rejected, _, code = rollback_input_history.truncate_from(bounded, malformed_tick)
+        t.eq(rejected, nil)
+        t.eq(code, "malformed")
+        t.eq(rollback_input_history.diagnostics(bounded).oldest_retained_tick, 3)
+    end)
+
     t.it(
         "fails malformed source configuration loudly and malformed arrivals recoverably",
         function()

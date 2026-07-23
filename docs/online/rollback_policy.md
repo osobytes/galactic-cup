@@ -136,6 +136,33 @@ recoverable `outside_window` result without mutation. Pruning refuses with
 must first transfer that divergence to the rollback session. Confirmation
 never moves backward, including when already-confirmed records are pruned.
 
+Resimulation can finish before the former predicted present, including by
+reaching full time earlier. If corrected simulation ends at boundary `N`, that
+boundary is retained but `InputFrame N` was not consumed. The session must
+discard snapshot boundaries strictly after `N` with
+`snapshot_history.truncate_after(..., N)` and discard effective input/record
+ticks greater than or equal to `N` with `input_history.truncate_from(..., N)`.
+The input operation preserves authoritative arrivals, prediction indexes,
+anchors, and monotonic confirmation. It clears a pending earliest divergence
+only when that divergence starts inside the wholly discarded tail. Authority
+for a discarded effective tick therefore remains ordinary upstream data and
+cannot create a false correction until some later timeline materializes that
+tick again.
+
+The snapshot retention floor is also monotonic. Tail truncation moves the
+present boundary backward but never makes already-evicted history restorable.
+It rejects malformed, missing, or outside-window final boundaries without
+mutation. A normal #70 correction follows this storage order:
+
+1. Consume the earliest divergence and restore its retained snapshot.
+2. Resimulate, replacing snapshots and effective frames along the corrected
+   timeline.
+3. Store the corrected final/present boundary `N`.
+4. Call snapshot `truncate_after(N)`, then input `truncate_from(N)` if the
+   corrected timeline did not return to the former present.
+5. Advance input pruning from the snapshot diagnostics
+   `oldest_supported_tick`.
+
 A correction whose earliest divergence requires a boundary more than 30 ticks
 behind the current simulation tick is unrecoverable in this first policy. It
 must produce the explicit late-input failure/desynchronized state defined by
@@ -158,6 +185,8 @@ measurable, not a production internet latency promise.
   session before resimulation.
 - `prune_before(...)` advances the retained floor after snapshot eviction;
   `diagnostics(...)` reports the bounded range and record/sample counts.
+- `truncate_from(history, boundary_tick)` removes effective frames and records
+  at or after a corrected final boundary without discarding authority.
 
 `sim.rollback_snapshot_history` provides:
 
@@ -167,5 +196,7 @@ measurable, not a production internet latency promise.
 - `lookup(history, tick)` with `present`, `retained`, `missing`, and
   `outside_window` results.
 - `boundary_hash(history, tick)` for lazy cached diagnostics.
+- `truncate_after(history, boundary_tick)` keeps the named corrected boundary,
+  makes it present, and removes only later snapshots.
 - `diagnostics(history)` for capacity, retained count/range, and canonical byte
   totals.

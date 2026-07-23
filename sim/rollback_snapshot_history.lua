@@ -7,7 +7,7 @@ local match_snapshot = require("sim.match_snapshot")
 local rollback_input_history = require("sim.rollback_input_history")
 
 ---@alias RollbackSnapshotLookupStatus "present"|"retained"|"missing"|"outside_window"
----@alias RollbackSnapshotStoreErrorCode "outside_window"
+---@alias RollbackSnapshotHistoryErrorCode "malformed"|"outside_window"|"missing"
 
 ---@class RollbackSnapshotEntry
 ---@field tick integer
@@ -20,6 +20,7 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field _capacity integer
 ---@field _entries table<integer, RollbackSnapshotEntry>
 ---@field _latest_tick integer?
+---@field _oldest_supported_tick integer?
 ---@field _count integer
 ---@field _canonical_bytes integer
 
@@ -33,6 +34,11 @@ local rollback_input_history = require("sim.rollback_input_history")
 ---@field tick integer
 ---@field replaced boolean
 ---@field evicted integer
+
+---@class RollbackSnapshotTruncateResult
+---@field boundary_tick integer
+---@field removed integer
+---@field diagnostics RollbackSnapshotHistoryDiagnostics
 
 ---@class RollbackSnapshotHistoryDiagnostics
 ---@field max_rollback_ticks integer
@@ -84,10 +90,7 @@ end
 ---@param history RollbackSnapshotHistory
 ---@return integer?
 local function oldest_supported_tick(history)
-    if history._latest_tick == nil then
-        return nil
-    end
-    return math.max(0, history._latest_tick - history._max_rollback_ticks)
+    return history._oldest_supported_tick
 end
 
 ---@param history RollbackSnapshotHistory
@@ -113,6 +116,7 @@ function rollback_snapshot_history.new(max_rollback_ticks)
         _capacity = max_rollback_ticks + 1,
         _entries = {},
         _latest_tick = nil,
+        _oldest_supported_tick = nil,
         _count = 0,
         _canonical_bytes = 0,
     }
@@ -122,7 +126,7 @@ end
 -- boundary evicts every entry older than the supported correction window.
 ---@param history RollbackSnapshotHistory
 ---@param snapshot MatchSnapshot
----@return RollbackSnapshotStoreResult?, string?, RollbackSnapshotStoreErrorCode?
+---@return RollbackSnapshotStoreResult?, string?, RollbackSnapshotHistoryErrorCode?
 function rollback_snapshot_history.store(history, snapshot)
     assert_history(history)
     local retained = copy_snapshot(snapshot)
@@ -141,11 +145,17 @@ function rollback_snapshot_history.store(history, snapshot)
 
     if history._latest_tick == nil or tick > history._latest_tick then
         history._latest_tick = tick
+        local next_supported = math.max(0, tick - history._max_rollback_ticks)
+        if
+            history._oldest_supported_tick == nil
+            or next_supported > history._oldest_supported_tick
+        then
+            history._oldest_supported_tick = next_supported
+        end
     end
     supported = assert(oldest_supported_tick(history))
     local evicted = 0
-    for index = 1, history._capacity do
-        local entry = history._entries[index]
+    for _, entry in pairs(history._entries) do
         if entry and entry.tick < supported then
             remove_entry(history, entry)
             evicted = evicted + 1
@@ -183,6 +193,54 @@ local function lookup_status(history, tick)
         return "missing"
     end
     return tick == history._latest_tick and "present" or "retained"
+end
+
+-- Keep the named start-of-tick boundary and discard only later snapshots from
+-- an obsolete predicted timeline. The historical floor never moves backward:
+-- already-evicted boundaries cannot become supported merely because the
+-- corrected timeline finished earlier.
+---@param history RollbackSnapshotHistory
+---@param boundary_tick integer
+---@return RollbackSnapshotTruncateResult?, string?, RollbackSnapshotHistoryErrorCode?
+function rollback_snapshot_history.truncate_after(history, boundary_tick)
+    assert_history(history)
+    if
+        not is_integer(boundary_tick)
+        or boundary_tick < 0
+        or boundary_tick > input_frame.MAX_TICK
+    then
+        return nil,
+            "rollback snapshot truncate tick must be a bounded non-negative integer",
+            "malformed"
+    end
+    local status = lookup_status(history, boundary_tick)
+    if status == "outside_window" then
+        return nil,
+            ("snapshot boundary %d is older than retained boundary %d"):format(
+                boundary_tick,
+                assert(oldest_supported_tick(history))
+            ),
+            "outside_window"
+    end
+    if status == "missing" then
+        return nil,
+            ("snapshot boundary %d is missing from retained history"):format(boundary_tick),
+            "missing"
+    end
+
+    local removed = 0
+    for _, entry in pairs(history._entries) do
+        if entry.tick > boundary_tick then
+            remove_entry(history, entry)
+            removed = removed + 1
+        end
+    end
+    history._latest_tick = boundary_tick
+    return {
+        boundary_tick = boundary_tick,
+        removed = removed,
+        diagnostics = rollback_snapshot_history.diagnostics(history),
+    }
 end
 
 ---@param history RollbackSnapshotHistory
@@ -235,8 +293,7 @@ end
 function rollback_snapshot_history.diagnostics(history)
     assert_history(history)
     local oldest = nil
-    for index = 1, history._capacity do
-        local entry = history._entries[index]
+    for _, entry in pairs(history._entries) do
         if entry and (oldest == nil or entry.tick < oldest) then
             oldest = entry.tick
         end
