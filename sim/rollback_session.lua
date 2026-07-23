@@ -51,8 +51,8 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field replaced_from_tick integer?
 ---@field replaced_through_tick integer?
 ---@field corrected_outputs RollbackTickOutput[]
----@field old_present_hash string
----@field new_present_hash string
+---@field old_present_hash string? -- Present only when a rollback changed simulation state.
+---@field new_present_hash string? -- Present only when a rollback changed simulation state.
 ---@field first_difference MatchSnapshotDifference?
 
 ---@class RollbackSessionLastRollback
@@ -102,6 +102,32 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 
 ---@class RollbackSessionModule
 local rollback_session = {}
+
+---@param value any
+---@return any
+local function copy_diagnostic_value(value)
+    if type(value) ~= "table" then
+        return value
+    end
+    local result = {}
+    for key, child in pairs(value) do
+        result[copy_diagnostic_value(key)] = copy_diagnostic_value(child)
+    end
+    return result
+end
+
+---@param difference MatchSnapshotDifference?
+---@return MatchSnapshotDifference?
+local function copy_difference(difference)
+    if difference == nil then
+        return nil
+    end
+    return {
+        path = difference.path,
+        expected = copy_diagnostic_value(difference.expected),
+        actual = copy_diagnostic_value(difference.actual),
+    }
+end
 
 ---@param session RollbackSession
 local function assert_session(session)
@@ -183,7 +209,6 @@ end
 ---@param comparison RollbackComparison
 ---@return RollbackComparison
 local function copy_comparison(comparison)
-    local first = comparison.first_difference
     return {
         matched = comparison.matched,
         boundary_mismatch = comparison.boundary_mismatch,
@@ -192,18 +217,13 @@ local function copy_comparison(comparison)
         actual_hash = comparison.actual_hash,
         expected_hash = comparison.expected_hash,
         causal_tick = comparison.causal_tick,
-        first_difference = first and {
-            path = first.path,
-            expected = first.expected,
-            actual = first.actual,
-        } or nil,
+        first_difference = copy_difference(comparison.first_difference),
     }
 end
 
 ---@param rollback RollbackSessionLastRollback
 ---@return RollbackSessionLastRollback
 local function copy_last_rollback(rollback)
-    local first = rollback.first_difference
     return {
         causal_tick = rollback.causal_tick,
         restored_boundary = rollback.restored_boundary,
@@ -211,11 +231,7 @@ local function copy_last_rollback(rollback)
         new_present_boundary = rollback.new_present_boundary,
         old_present_hash = rollback.old_present_hash,
         new_present_hash = rollback.new_present_hash,
-        first_difference = first and {
-            path = first.path,
-            expected = first.expected,
-            actual = first.actual,
-        } or nil,
+        first_difference = copy_difference(rollback.first_difference),
     }
 end
 
@@ -375,75 +391,53 @@ function rollback_session.step(session)
 end
 
 ---@param session RollbackSession
+---@param causal_tick integer?
+---@param restore_status RollbackSnapshotLookupStatus?
+---@return RollbackReconcileResult
+local function unchanged_reconcile_result(session, causal_tick, restore_status)
+    local present = session._state.input_tick
+    return {
+        changed = false,
+        status = session._status,
+        causal_tick = causal_tick,
+        restored_boundary = nil,
+        restore_status = restore_status,
+        old_present_boundary = present,
+        new_present_boundary = present,
+        corrected_from_tick = nil,
+        corrected_through_tick = nil,
+        replaced_from_tick = nil,
+        replaced_through_tick = nil,
+        corrected_outputs = {},
+        old_present_hash = nil,
+        new_present_hash = nil,
+        first_difference = nil,
+    }
+end
+
+---@param session RollbackSession
 ---@return RollbackReconcileResult
 function rollback_session.reconcile(session)
     assert_session(session)
-    local old_present = session._state.input_tick
-    local old_snapshot = match_snapshot.capture(session._state)
-    local old_hash = match_snapshot.hash(old_snapshot)
+    if session._status == "late_input_unrecoverable" then
+        local late_tick = assert(
+            session._late_input_tick,
+            "unrecoverable rollback session is missing its causal late input tick"
+        )
+        return unchanged_reconcile_result(session, late_tick, "outside_window")
+    end
     local causal_tick = rollback_input_history.earliest_divergence(session._input_history)
     if causal_tick == nil then
-        local late_tick = session._late_input_tick
-        return {
-            changed = false,
-            status = session._status,
-            causal_tick = late_tick,
-            restored_boundary = nil,
-            restore_status = late_tick and "outside_window" or nil,
-            old_present_boundary = old_present,
-            new_present_boundary = old_present,
-            corrected_from_tick = nil,
-            corrected_through_tick = nil,
-            replaced_from_tick = nil,
-            replaced_through_tick = nil,
-            corrected_outputs = {},
-            old_present_hash = old_hash,
-            new_present_hash = old_hash,
-            first_difference = nil,
-        }
-    end
-    if session._status == "late_input_unrecoverable" then
-        return {
-            changed = false,
-            status = session._status,
-            causal_tick = causal_tick,
-            restored_boundary = nil,
-            restore_status = "outside_window",
-            old_present_boundary = old_present,
-            new_present_boundary = old_present,
-            corrected_from_tick = nil,
-            corrected_through_tick = nil,
-            replaced_from_tick = nil,
-            replaced_through_tick = nil,
-            corrected_outputs = {},
-            old_present_hash = old_hash,
-            new_present_hash = old_hash,
-            first_difference = nil,
-        }
+        return unchanged_reconcile_result(session, nil, nil)
     end
 
+    local old_present = session._state.input_tick
     local lookup = rollback_snapshot_history.lookup(session._snapshot_history, causal_tick)
     if lookup.status == "outside_window" then
         session._status = "late_input_unrecoverable"
         session._late_window_failures = session._late_window_failures + 1
         session._late_input_tick = causal_tick
-        return {
-            changed = false,
-            status = session._status,
-            causal_tick = causal_tick,
-            restored_boundary = nil,
-            restore_status = lookup.status,
-            old_present_boundary = old_present,
-            new_present_boundary = old_present,
-            corrected_from_tick = nil,
-            corrected_through_tick = nil,
-            replaced_from_tick = nil,
-            replaced_through_tick = nil,
-            corrected_outputs = {},
-            old_present_hash = old_hash,
-            new_present_hash = old_hash,
-            first_difference = nil,
-        }
+        return unchanged_reconcile_result(session, causal_tick, lookup.status)
     end
     assert(
         lookup.status ~= "missing",
@@ -453,6 +447,8 @@ function rollback_session.reconcile(session)
         )
     )
     local restored_snapshot = assert(lookup.snapshot, "rollback restore snapshot is missing")
+    local old_snapshot = match_snapshot.capture(session._state)
+    local old_hash = match_snapshot.hash(old_snapshot)
     assert(
         rollback_input_history.consume_earliest_divergence(session._input_history) == causal_tick,
         "rollback divergence changed before restore"
@@ -482,7 +478,10 @@ function rollback_session.reconcile(session)
 
     local new_snapshot = match_snapshot.capture(session._state)
     local new_hash = match_snapshot.hash(new_snapshot)
-    local first_difference = match_snapshot.first_difference(old_snapshot, new_snapshot)
+    local first_difference = nil
+    if old_hash ~= new_hash then
+        first_difference = match_snapshot.first_difference(old_snapshot, new_snapshot)
+    end
     local depth = old_present - causal_tick
     session._rollback_count = session._rollback_count + 1
     session._latest_rollback_depth = depth
@@ -495,7 +494,7 @@ function rollback_session.reconcile(session)
         new_present_boundary = new_present,
         old_present_hash = old_hash,
         new_present_hash = new_hash,
-        first_difference = first_difference,
+        first_difference = copy_difference(first_difference),
     }
     return {
         changed = true,
@@ -512,7 +511,7 @@ function rollback_session.reconcile(session)
         corrected_outputs = corrected_outputs,
         old_present_hash = old_hash,
         new_present_hash = new_hash,
-        first_difference = first_difference,
+        first_difference = copy_difference(first_difference),
     }
 end
 
@@ -549,15 +548,20 @@ function rollback_session.compare(session, expected, causal_tick)
     local actual = match_snapshot.capture(session._state)
     local actual_hash = match_snapshot.hash(actual)
     local expected_hash = match_snapshot.hash(expected)
+    local matched = actual_hash == expected_hash
+    local first_difference = nil
+    if not matched then
+        first_difference = match_snapshot.first_difference(expected, actual)
+    end
     local comparison = {
-        matched = actual_hash == expected_hash,
+        matched = matched,
         boundary_mismatch = actual.state.input_tick ~= expected.state.input_tick,
         actual_boundary = actual.state.input_tick,
         expected_boundary = expected.state.input_tick,
         actual_hash = actual_hash,
         expected_hash = expected_hash,
         causal_tick = causal_tick,
-        first_difference = match_snapshot.first_difference(expected, actual),
+        first_difference = first_difference,
     }
     session._last_comparison = copy_comparison(comparison)
     return copy_comparison(comparison)

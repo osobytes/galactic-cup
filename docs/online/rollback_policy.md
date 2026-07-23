@@ -223,16 +223,20 @@ boundaries, the copied `RollbackInputTickRecord`, copied match events, final
 score/time/finished view, and whether that step reached full time. The output
 and input histories are pruned to the snapshot floor after every advance.
 
-`reconcile` hashes the old present before replacing anything, consumes the
-earliest divergence once, restores its exact `present` or `retained` boundary,
-and rematerializes corrected frames toward the old present. All later authority
-in the same batch is therefore applied during that one replay. Corrected
-outputs are returned in causal tick order and also replace the session's
-per-tick output index for confirmed-event publication. A missing boundary
-inside the supported range is an invariant failure. An outside-window arrival
-enters terminal `late_input_unrecoverable` status without consuming the
-divergence or changing the live match; `step` cannot make hidden progress from
-that state.
+`reconcile` first checks terminal status and whether a divergence exists. A
+no-op/equal batch and repeated terminal call therefore do not capture or hash
+the present; their optional old/new hash fields are absent. A changed rollback
+hashes the old present before replacing anything, consumes the earliest
+divergence once, restores its exact `present` or `retained` boundary, and
+rematerializes corrected frames toward the old present. All later authority in
+the same batch is therefore applied during that one replay. Corrected outputs
+are returned in causal tick order and also replace the session's per-tick
+output index for confirmed-event publication. A missing boundary inside the
+supported range is an invariant failure. An outside-window arrival enters
+terminal `late_input_unrecoverable` status without consuming another retained
+divergence or changing the live match; diagnostics always attribute a mixed
+batch to that actual late input tick. `step` cannot make hidden progress from
+the terminal state.
 
 If corrected play finishes before the old present at boundary `N`, the session
 stores the final output/boundary, truncates snapshots strictly after `N`, then
@@ -245,8 +249,9 @@ timeline. The snapshot and input floors remain monotonic across this rewind.
 `compare` reports actual/expected boundary numbers and hashes, an optional
 causal tick, and `match_snapshot.first_difference`. Diagnostics expose both the
 monotonic all-input `confirmed_tick` and `confirmed_output_tick`, which caps
-confirmation to an output that actually exists when corrected full time drops
-an authoritative tail.
+confirmation to the logical simulated-output ceiling when corrected full time
+drops an authoritative tail. Older confirmed outputs can still be absent from
+the queryable output index after ordinary bounded-history pruning.
 
 Prediction counters are cumulative execution costs: replaying a predicted tick
 increments them again. `predicted_slot_samples` counts individual predicted
