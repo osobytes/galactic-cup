@@ -1583,6 +1583,17 @@ def wait_for_browser_console_entries(
     }
 
 
+def set_webdriver_command_timeout(driver: Any, timeout_seconds: float) -> None:
+    """Set Selenium's HTTP read timeout beyond the in-page async-script bound."""
+
+    assert timeout_seconds > 0
+    command_executor = getattr(driver, "command_executor", None)
+    client_config = getattr(command_executor, "client_config", None)
+    if client_config is None or not hasattr(client_config, "timeout"):
+        raise RuntimeError("WebDriver command timeout configuration is unavailable")
+    client_config.timeout = timeout_seconds
+
+
 def run_browser_once(
     browser_name: str,
     binary: Path,
@@ -1637,7 +1648,9 @@ def run_browser_once(
             driver.execute_cdp_cmd("Performance.enable", {})
         resource_checkpoints.append(browser_checkpoint(sampler, driver, browser_name, "started"))
         driver.set_page_load_timeout(min(timeout_seconds, 300))
-        driver.set_script_timeout(timeout_seconds + 10)
+        webdriver_command_timeout_seconds = timeout_seconds + 10
+        driver.set_script_timeout(webdriver_command_timeout_seconds)
+        set_webdriver_command_timeout(driver, webdriver_command_timeout_seconds)
         query_arguments = [
             "--rollback-validation",
             suite,
@@ -1749,6 +1762,7 @@ def run_browser_once(
         "runtime_metrics": runtime_metric_record(runtime_metrics),
         "suite": suite,
         "teardown": teardown,
+        "webdriver_command_timeout_seconds": webdriver_command_timeout_seconds,
         "webdriver_log": {
             "path": str(driver_log.resolve()),
             "sha256": sha256_file(driver_log),
@@ -1970,6 +1984,20 @@ def run_self_test() -> None:
         "timed_out": False,
     }:
         raise RuntimeError("browser console wait result self-test failed")
+
+    class FakeClientConfig:
+        timeout = 120.0
+
+    class FakeCommandExecutor:
+        client_config = FakeClientConfig()
+
+    class FakeCommandDriver:
+        command_executor = FakeCommandExecutor()
+
+    fake_command_driver = FakeCommandDriver()
+    set_webdriver_command_timeout(fake_command_driver, 1810.0)
+    if fake_command_driver.command_executor.client_config.timeout != 1810.0:
+        raise RuntimeError("WebDriver command timeout self-test failed")
     expected_counts = {
         ("native", ()): 39,
         ("browser-full", ("clean", "2001")): 1,

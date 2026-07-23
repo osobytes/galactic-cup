@@ -86,7 +86,9 @@ the runtime cannot exit between marker delivery and measurement.
 Browser evidence waits inside the page for newly appended console entries and returns only the
 delta at each marker. It does not poll and reserialize the cumulative console array through
 WebDriver every frame interval, because those protocol allocations would contaminate Chrome's
-forced-GC JS-heap samples instead of measuring the game runtime.
+forced-GC JS-heap samples instead of measuring the game runtime. The in-page async deadline,
+WebDriver script timeout, and Selenium command-channel read timeout share the same bounded suite
+budget, with a ten-second transport cushion on the latter two.
 
 ## Event and presentation integrity
 
