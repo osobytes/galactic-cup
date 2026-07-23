@@ -114,6 +114,17 @@ local function fixture_frames()
     return frames, wires
 end
 
+-- Return the checked-in OMP-1 fixture as a validated, already-materialized
+-- tape. Rollback laboratories consume this seam instead of private campaign
+-- state or the bots that originally produced the frozen frame wires.
+---@return InputTape
+function determinism_evidence.fixture_tape()
+    local identity = input_tape.copy_identity(fixture.identity)
+    local frames = fixture_frames()
+    local initial = match_snapshot.capture(new_state(identity))
+    return input_tape.new(identity, initial, frames)
+end
+
 ---@param state MatchState
 ---@return string
 local function state_hash(state)

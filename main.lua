@@ -3,6 +3,7 @@
 --   love . --test             -> run the headless test suite and exit with status code
 --   love . --sim [n]          -> play n unattended matches, print fun-proxy metrics, exit
 --   love . --snapshot-measure [n] -> measure canonical snapshot operations n times
+--   love . --rollback-lab [profile] [seed] [corrupt] -> run the OMP-2 lab
 --   love . --determinism      -> verify the frozen OMP-1 complete-match evidence
 --   love . --determinism-refresh -> deliberately replace the frozen OMP-1 recording
 --   love . --rate-validate [n] -> validate frozen squad ratings over n paired seeds, exit
@@ -131,6 +132,61 @@ if has_flag("--snapshot-measure") then
             )
         )
         os.exit(0)
+    end
+    return
+end
+
+if has_flag("--rollback-lab") then
+    function love.load()
+        local profile_arg, seed_arg, corruption_arg = args_after("--rollback-lab")
+        local profile = profile_arg or "omp0_parity"
+        local seed = tonumber(seed_arg) and math.floor(tonumber(seed_arg) --[[@as number]]) or 7302
+        local evidence = require("sim.determinism_evidence")
+        local rollback_lab = require("sim.rollback_lab")
+        local timing = {
+            capture = { seconds = 0, calls = 0 },
+            restore = { seconds = 0, calls = 0 },
+            resimulation = { seconds = 0, calls = 0 },
+            rollback = { seconds = 0, calls = 0 },
+        }
+        ---@param label RollbackSessionMeasureLabel
+        ---@param operation fun(): any
+        ---@return any
+        local function measure(label, operation)
+            local started = os.clock()
+            local value = operation()
+            local row = timing[label]
+            row.seconds = row.seconds + os.clock() - started
+            row.calls = row.calls + 1
+            return value
+        end
+
+        local tape = evidence.fixture_tape()
+        local started = os.clock()
+        local result = rollback_lab.run(tape, {
+            profile_name = profile,
+            network_seed = seed,
+            corruption = corruption_arg == "corrupt" and { tick = 24, slot = 5 } or nil,
+            measure = measure,
+        })
+        local total_seconds = os.clock() - started
+        print(rollback_lab.logical_marker(result))
+        print(rollback_lab.summary(result))
+        print(table.concat({
+            "GC_ROLLBACK_LAB",
+            "timing",
+            "schema=1",
+            ("capture_ms=%.3f"):format(timing.capture.seconds * 1000),
+            "capture_calls=" .. timing.capture.calls,
+            ("restore_ms=%.3f"):format(timing.restore.seconds * 1000),
+            "restore_calls=" .. timing.restore.calls,
+            ("resimulation_ms=%.3f"):format(timing.resimulation.seconds * 1000),
+            "resimulation_calls=" .. timing.resimulation.calls,
+            ("rollback_ms=%.3f"):format(timing.rollback.seconds * 1000),
+            "rollback_calls=" .. timing.rollback.calls,
+            ("total_ms=%.3f"):format(total_seconds * 1000),
+        }, "|"))
+        os.exit(result.success and 0 or 1)
     end
     return
 end
