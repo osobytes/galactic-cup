@@ -51,7 +51,11 @@ local function next_snapshot(before, options)
     end
     state.score.home = options.home_score or state.score.home
     state.score.away = options.away_score or state.score.away
-    state.time_left = options.time_left or math.max(0, state.time_left - 1 / 60)
+    if options.time_left ~= nil then
+        state.time_left = options.time_left
+    else
+        state.time_left = math.max(0, state.time_left - 1 / 60)
+    end
     if options.finished ~= nil then
         state.finished = options.finished
     end
@@ -165,9 +169,9 @@ local function run_real_match(initial, stop)
     for _ = 1, 40 do
         local output = assert(rollback_session.step(session))
         local post = assert(rollback_session.snapshot(session, output.end_boundary).snapshot)
-        diffs[#diffs + 1] = rollback_events.apply(timeline, output.tick, output.tick, {
+        diffs[#diffs + 1] = assert(rollback_events.apply(timeline, output.tick, output.tick, {
             { output = output, snapshot = post },
-        })
+        }))
         if stop(post) then
             return timeline, diffs
         end
@@ -202,7 +206,7 @@ t.describe("rollback events", function()
                 { kind = "shot", x = 50, y = 60, player = "c" },
             },
         })
-        local first = rollback_events.apply(timeline, 0, 0, { supplied(post) })
+        local first = assert(rollback_events.apply(timeline, 0, 0, { supplied(post) }))
         t.eq(#first.added, 3)
         t.eq(first.added[1].ordinal, 1)
         t.eq(first.added[2].ordinal, 1)
@@ -210,7 +214,7 @@ t.describe("rollback events", function()
         t.eq(first.added[1].id, "0000000000|010:match/shot|0001")
         t.eq(first.added[3].id, "0000000000|010:match/shot|0002")
 
-        local again = rollback_events.apply(timeline, 0, 0, { supplied(post) })
+        local again = assert(rollback_events.apply(timeline, 0, 0, { supplied(post) }))
         t.eq(#again.added, 0)
         t.eq(#again.revoked, 0)
         t.eq(#again.replaced, 0)
@@ -232,7 +236,7 @@ t.describe("rollback events", function()
                     },
                 },
             })
-            rollback_events.apply(timeline, 0, 0, { supplied(shot) })
+            assert(rollback_events.apply(timeline, 0, 0, { supplied(shot) }))
             local changed = next_snapshot(initial, {
                 events = {
                     {
@@ -244,7 +248,7 @@ t.describe("rollback events", function()
                     },
                 },
             })
-            local replaced = rollback_events.apply(timeline, 0, 0, { supplied(changed) })
+            local replaced = assert(rollback_events.apply(timeline, 0, 0, { supplied(changed) }))
             t.eq(#replaced.replaced, 1)
             t.eq(#replaced.added, 0)
             t.eq(#replaced.revoked, 0)
@@ -255,27 +259,43 @@ t.describe("rollback events", function()
             local pass = next_snapshot(initial, {
                 events = { { kind = "pass", x = 12, y = 22, player = "a" } },
             })
-            local changed_kind = rollback_events.apply(timeline, 0, 0, { supplied(pass) })
+            local changed_kind = assert(rollback_events.apply(timeline, 0, 0, { supplied(pass) }))
             t.eq(#changed_kind.replaced, 0)
             t.eq(changed_kind.revoked[1].domain, "match/shot")
             t.eq(changed_kind.added[1].domain, "match/pass")
         end
     )
 
+    t.it("uses canonical signed-zero equality for payload replacement", function()
+        local initial = initial_snapshot()
+        local timeline = rollback_events.new(initial)
+        local positive = next_snapshot(initial, {
+            events = { { kind = "shot", x = 0, y = 1, player = "a" } },
+        })
+        assert(rollback_events.apply(timeline, 0, 0, { supplied(positive) }))
+        local negative = next_snapshot(initial, {
+            events = { { kind = "shot", x = -0.0, y = 1, player = "a" } },
+        })
+        local diff = assert(rollback_events.apply(timeline, 0, 0, { supplied(negative) }))
+        t.eq(#diff.replaced, 1)
+        t.eq(1 / diff.replaced[1].before.payload.x, math.huge)
+        t.eq(1 / diff.replaced[1].after.payload.x, -math.huge)
+    end)
+
     t.it("revokes a predicted goal and kickoff once and never confirms them", function()
         local initial = initial_snapshot()
         local timeline = rollback_events.new(initial)
         local goal = next_snapshot(initial, { home_score = 1 })
-        local predicted = rollback_events.apply(timeline, 0, 0, { supplied(goal) })
+        local predicted = assert(rollback_events.apply(timeline, 0, 0, { supplied(goal) }))
         t.eq(predicted.added[1].domain, "lifecycle/goal")
         t.eq(predicted.added[2].domain, "lifecycle/kickoff")
 
         local corrected = next_snapshot(initial)
-        local revoked = rollback_events.apply(timeline, 0, 0, { supplied(corrected) })
+        local revoked = assert(rollback_events.apply(timeline, 0, 0, { supplied(corrected) }))
         t.eq(#revoked.revoked, 2)
         t.eq(revoked.revoked[1].domain, "lifecycle/goal")
         t.eq(revoked.revoked[2].domain, "lifecycle/kickoff")
-        local repeated = rollback_events.apply(timeline, 0, 0, { supplied(corrected) })
+        local repeated = assert(rollback_events.apply(timeline, 0, 0, { supplied(corrected) }))
         t.eq(#repeated.revoked, 0)
         local confirmed = rollback_events.confirm(timeline, 0)
         t.eq(#confirmed[1].lifecycle_events, 0)
@@ -287,17 +307,17 @@ t.describe("rollback events", function()
         local tackle = next_snapshot(initial, {
             events = { { kind = "tackle", x = 1, y = 2, player = "defender" } },
         })
-        rollback_events.apply(timeline, 0, 0, { supplied(tackle) })
+        assert(rollback_events.apply(timeline, 0, 0, { supplied(tackle) }))
         local empty = next_snapshot(initial)
-        local removed = rollback_events.apply(timeline, 0, 0, { supplied(empty) })
+        local removed = assert(rollback_events.apply(timeline, 0, 0, { supplied(empty) }))
         t.eq(#removed.revoked, 1)
-        local repeated = rollback_events.apply(timeline, 0, 0, { supplied(empty) })
+        local repeated = assert(rollback_events.apply(timeline, 0, 0, { supplied(empty) }))
         t.eq(#repeated.revoked, 0)
 
         local pass = next_snapshot(initial, {
             events = { { kind = "pass", x = 3, y = 4, player = "attacker" } },
         })
-        local added = rollback_events.apply(timeline, 0, 0, { supplied(pass) })
+        local added = assert(rollback_events.apply(timeline, 0, 0, { supplied(pass) }))
         t.eq(added.added[1].domain, "match/pass")
         local confirmed = rollback_events.confirm(timeline, 0)
         t.eq(#confirmed[1].match_events, 1)
@@ -327,7 +347,7 @@ t.describe("rollback events", function()
                 { kind = "claim", x = 7, y = 8, player = "keeper" },
             },
         })
-        rollback_events.apply(timeline, 0, 0, { supplied(post) })
+        assert(rollback_events.apply(timeline, 0, 0, { supplied(post) }))
         local confirmed = rollback_events.confirm(timeline, 0)
         t.eq(#confirmed[1].match_events, 4)
         for index, kind in ipairs({ "catch", "parry", "tip", "claim" }) do
@@ -339,7 +359,7 @@ t.describe("rollback events", function()
     end)
 
     t.it("derives real goal plus kickoff once from match snapshots", function()
-        local _, diffs = run_real_match(shot_fixture(3), function(snapshot)
+        local timeline, diffs = run_real_match(shot_fixture(3), function(snapshot)
             return snapshot.state.score.home == 1
         end)
         local lifecycle = lifecycle_additions(diffs)
@@ -349,16 +369,30 @@ t.describe("rollback events", function()
         t.eq(lifecycle[1].payload.score.home, 1)
         t.eq(lifecycle[2].domain, "lifecycle/kickoff")
         t.eq(lifecycle[2].payload.team, "away")
+        local confirmed = rollback_events.confirm(timeline, lifecycle[1].tick)
+        local confirmed_lifecycle = confirmed[#confirmed].lifecycle_events
+        t.eq(confirmed_lifecycle[1].domain, "lifecycle/goal")
+        t.eq(confirmed_lifecycle[1].payload.team, "home")
+        t.eq(confirmed_lifecycle[2].domain, "lifecycle/kickoff")
+        t.eq(confirmed_lifecycle[2].payload.team, "away")
+        t.eq(#rollback_events.confirm(timeline, lifecycle[1].tick), 0)
     end)
 
     t.it("derives real max-goal full time without kickoff", function()
-        local _, diffs = run_real_match(shot_fixture(1), function(snapshot)
+        local timeline, diffs = run_real_match(shot_fixture(1), function(snapshot)
             return snapshot.state.finished
         end)
         local lifecycle = lifecycle_additions(diffs)
         t.eq(#lifecycle, 2)
         t.eq(lifecycle[1].domain, "lifecycle/goal")
         t.eq(lifecycle[2].domain, "lifecycle/full_time")
+        local confirmed = rollback_events.confirm(timeline, lifecycle[1].tick)
+        local confirmed_lifecycle = confirmed[#confirmed].lifecycle_events
+        t.eq(confirmed_lifecycle[1].domain, "lifecycle/goal")
+        t.eq(confirmed_lifecycle[1].payload.score.home, 1)
+        t.eq(confirmed_lifecycle[2].domain, "lifecycle/full_time")
+        t.eq(confirmed_lifecycle[2].payload.score.home, 1)
+        t.eq(#rollback_events.confirm(timeline, lifecycle[1].tick), 0)
     end)
 
     t.it("derives timer full time alone and no opening kickoff", function()
@@ -368,11 +402,15 @@ t.describe("rollback events", function()
         local output = assert(rollback_session.step(session))
         local post = assert(rollback_session.snapshot(session, 1).snapshot)
         local timeline = rollback_events.new(initial)
-        local diff = rollback_events.apply(timeline, 0, 0, {
+        local diff = assert(rollback_events.apply(timeline, 0, 0, {
             { output = output, snapshot = post },
-        })
+        }))
         t.eq(#diff.added, 1)
         t.eq(diff.added[1].domain, "lifecycle/full_time")
+        local confirmed = rollback_events.confirm(timeline, 0)
+        t.eq(confirmed[1].lifecycle_events[1].domain, "lifecycle/full_time")
+        t.eq(confirmed[1].lifecycle_events[1].payload.score.home, 0)
+        t.eq(#rollback_events.confirm(timeline, 0), 0)
     end)
 
     t.it("lets earlier corrected full time remove every stale later-tick event", function()
@@ -387,16 +425,89 @@ t.describe("rollback events", function()
         local two = next_snapshot(one, {
             events = { { kind = "pass", x = 3, y = 3, player = "c" } },
         })
-        rollback_events.apply(timeline, 0, 0, { supplied(zero) })
-        rollback_events.apply(timeline, 1, 1, { supplied(one) })
-        rollback_events.apply(timeline, 2, 2, { supplied(two) })
+        assert(rollback_events.apply(timeline, 0, 0, { supplied(zero) }))
+        assert(rollback_events.apply(timeline, 1, 1, { supplied(one) }))
+        assert(rollback_events.apply(timeline, 2, 2, { supplied(two) }))
 
         local earlier_finish = next_snapshot(initial, { finished = true, time_left = 0 })
-        local corrected = rollback_events.apply(timeline, 0, 2, { supplied(earlier_finish) })
+        local corrected =
+            assert(rollback_events.apply(timeline, 0, 2, { supplied(earlier_finish) }))
         t.eq(#corrected.revoked, 3)
         t.eq(corrected.added[1].domain, "lifecycle/full_time")
         t.eq(#rollback_events.confirm(timeline, 0), 1)
     end)
+
+    t.it("rejects empty or active short corrections before mutating the stale tail", function()
+        local initial = initial_snapshot()
+        local timeline = rollback_events.new(initial)
+        local zero = next_snapshot(initial, {
+            events = { { kind = "shot", x = 1, y = 1, player = "a" } },
+        })
+        local one = next_snapshot(zero, {
+            events = { { kind = "tackle", x = 2, y = 2, player = "b" } },
+        })
+        local two = next_snapshot(one, {
+            events = { { kind = "pass", x = 3, y = 3, player = "c" } },
+        })
+        assert(rollback_events.apply(timeline, 0, 0, { supplied(zero) }))
+        assert(rollback_events.apply(timeline, 1, 1, { supplied(one) }))
+        assert(rollback_events.apply(timeline, 2, 2, { supplied(two) }))
+
+        local active_short = next_snapshot(initial)
+        t.is_true(fails(pcall(rollback_events.apply, timeline, 0, 2, { supplied(active_short) })))
+        t.is_true(fails(pcall(rollback_events.apply, timeline, 0, 2, {})))
+        local diagnostics = rollback_events.diagnostics(timeline)
+        t.eq(diagnostics.status, "active")
+        t.eq(diagnostics.confirmed_tick, -1)
+        t.eq(diagnostics.retained_step_count, 3)
+        t.eq(diagnostics.retained_event_count, 3)
+        local confirmed = rollback_events.confirm(timeline, 2)
+        t.eq(confirmed[1].match_events[1].domain, "match/shot")
+        t.eq(confirmed[2].match_events[1].domain, "match/tackle")
+        t.eq(confirmed[3].match_events[1].domain, "match/pass")
+    end)
+
+    t.it(
+        "bounds stalled confirmation to thirty compact step records and fails explicitly",
+        function()
+            local state = new_state()
+            state.owner = state.slot_players[1]
+            local initial = match_snapshot.capture(state)
+            local timeline = rollback_events.new(initial)
+            local post = initial
+            for tick = 0, 29 do
+                post = next_snapshot(post, {
+                    events = { { kind = "touch", x = tick, y = tick, player = "a" } },
+                })
+                assert(rollback_events.apply(timeline, tick, tick, { supplied(post) }))
+            end
+
+            local healthy = rollback_events.diagnostics(timeline)
+            t.eq(healthy.status, "active")
+            t.eq(healthy.max_unconfirmed_ticks, 30)
+            t.eq(healthy.retained_step_count, 30)
+            t.eq(healthy.retained_event_count, 30)
+            t.eq(healthy.oldest_tick, 0)
+            t.eq(healthy.latest_tick, 29)
+            ---@type any
+            local retained = timeline._steps[0]
+            t.eq(retained.snapshot, nil)
+            local owner_index = assert(initial.state.owner)
+            t.eq(retained.state.owner_id, initial.state.players[owner_index].id)
+            t.eq(retained.state.owner_team, initial.state.players[owner_index].team)
+
+            local over = next_snapshot(post)
+            local diff, err, code = rollback_events.apply(timeline, 30, 30, { supplied(over) })
+            t.eq(diff, nil)
+            t.is_true(type(err) == "string")
+            t.eq(code, "unconfirmed_window_exceeded")
+            local terminal = rollback_events.diagnostics(timeline)
+            t.eq(terminal.status, "unconfirmed_window_exceeded")
+            t.eq(terminal.retained_step_count, 30)
+            t.eq(terminal.oldest_tick, 0)
+            t.eq(terminal.latest_tick, 29)
+        end
+    )
 
     t.it("confirms monotonically across calls and rejects gaps or confirmed correction", function()
         local initial = initial_snapshot()
@@ -404,9 +515,9 @@ t.describe("rollback events", function()
         local zero = next_snapshot(initial)
         local one = next_snapshot(zero)
         local two = next_snapshot(one)
-        rollback_events.apply(timeline, 0, 0, { supplied(zero) })
-        rollback_events.apply(timeline, 1, 1, { supplied(one) })
-        rollback_events.apply(timeline, 2, 2, { supplied(two) })
+        assert(rollback_events.apply(timeline, 0, 0, { supplied(zero) }))
+        assert(rollback_events.apply(timeline, 1, 1, { supplied(one) }))
+        assert(rollback_events.apply(timeline, 2, 2, { supplied(two) }))
         t.eq(#rollback_events.confirm(timeline, 0), 1)
         t.eq(#rollback_events.confirm(timeline, 2), 2)
         t.eq(#rollback_events.confirm(timeline, 2), 0)
@@ -414,15 +525,20 @@ t.describe("rollback events", function()
         t.is_true(fails(pcall(rollback_events.apply, timeline, 0, 0, { supplied(zero) })))
 
         local missing = rollback_events.new(initial)
-        rollback_events.apply(missing, 0, 0, { supplied(zero) })
+        assert(rollback_events.apply(missing, 0, 0, { supplied(zero) }))
         t.is_true(fails(pcall(rollback_events.confirm, missing, 1)))
+        local after_failed_confirm = rollback_events.diagnostics(missing)
+        t.eq(after_failed_confirm.confirmed_tick, -1)
+        t.eq(after_failed_confirm.confirmed_boundary, 0)
+        t.eq(after_failed_confirm.retained_step_count, 1)
+        t.eq(#rollback_events.confirm(missing, 0), 1)
 
         local noncontiguous = rollback_events.new(initial)
         local bad = supplied(one)
         t.is_true(fails(pcall(rollback_events.apply, noncontiguous, 0, 0, { bad })))
     end)
 
-    t.it("defensively copies inputs, diffs, confirmed records, and snapshots", function()
+    t.it("defensively copies inputs, diffs, confirmed records, and compact state views", function()
         local initial = initial_snapshot()
         local initial_hash = match_snapshot.hash(initial)
         local timeline = rollback_events.new(initial)
@@ -430,19 +546,19 @@ t.describe("rollback events", function()
             events = { { kind = "shot", x = 10, y = 20, player = "a" } },
         })
         local input = supplied(post)
-        local diff = rollback_events.apply(timeline, 0, 0, { input })
+        local diff = assert(rollback_events.apply(timeline, 0, 0, { input }))
         input.output.events[1].x = 999
         input.snapshot.state.events[1].x = 999
         diff.added[1].payload.x = 888
 
         local confirmed = rollback_events.confirm(timeline, 0)
         t.eq(confirmed[1].match_events[1].payload.x, 10)
-        t.eq(confirmed[1].snapshot.state.events[1].x, 10)
+        t.eq(confirmed[1].state.score.home, 0)
         confirmed[1].match_events[1].payload.x = 777
-        confirmed[1].snapshot.state.score.home = 99
+        confirmed[1].state.score.home = 99
 
         local next = next_snapshot(post)
-        local next_diff = rollback_events.apply(timeline, 1, 1, { supplied(next) })
+        local next_diff = assert(rollback_events.apply(timeline, 1, 1, { supplied(next) }))
         t.eq(#next_diff.added, 0)
         t.eq(match_snapshot.hash(initial), initial_hash)
         t.eq(match_snapshot.VERSION, 5)

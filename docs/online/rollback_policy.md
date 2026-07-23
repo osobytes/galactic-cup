@@ -277,8 +277,10 @@ When corrected play retains an identity but changes its payload, the event
 timeline reports one explicit replacement. A changed kind/domain reports a
 revocation plus an addition. Additions and replacements follow corrected
 tick/event order; revocations follow the stale order. Reapplying an identical
-timeline produces no diff. All supplied snapshots/events and all returned
-diffs/confirmed steps are defensive copies.
+timeline produces no diff. Numeric payload equality uses the canonical
+snapshot number encoding, so signed zero and every other finite-number edge
+follow state-hash semantics rather than Lua's `==`. All retained event/state
+views and all returned diffs/confirmed steps are defensive copies.
 
 Goal, kickoff, and full-time events are derived from canonical pre-step and
 post-step snapshots:
@@ -296,6 +298,24 @@ effects wait for confirmation. Consumers may render immediate speculative
 feedback only when they can reverse additions, revocations, and replacements.
 Confirmed wrappers keep the same IDs that they had speculatively.
 
+The event timeline does not duplicate the session's full snapshot ring.
+Supplied post-step snapshots are validated and inspected during `apply`, then
+discarded. Each unconfirmed or returned confirmed step retains only the score,
+time remaining, finished flag, owner player ID/team, and wrapped events needed
+by downstream observers. The stable player-index-to-ID/team mapping is copied
+once from boundary zero. At the 30-tick default rollback depth, this keeps the
+event seam to at most 30 compact step records rather than another set of
+18-KiB match snapshots.
+
+Confirmation is also the event-retention bound. If an unconfirmed oldest step
+would grow the timeline beyond its configured window, `apply` changes the
+timeline to terminal `unconfirmed_window_exceeded`, returns that typed error,
+and retains the bounded existing steps without accepting part of the new
+update. Diagnostics expose status, configured window, confirmed cursor and
+boundary, retained step/event counts, and oldest/latest ticks. Callers must
+treat this as a laboratory synchronization failure, not silently discard
+unconfirmed presentation history.
+
 The call order is part of the contract. A normal update calls
 `rollback_events.apply` with the new output and its canonical post-step
 snapshot, then calls `confirm` with
@@ -303,5 +323,19 @@ snapshot, then calls `confirm` with
 call `rollback_session.reconcile`, apply its corrected outputs and snapshot
 lookups as one replacement of the complete stale output range, and only then
 advance confirmation. A corrected list may end before the stale range when
-full time moves earlier. Correction or confirmation of an already-confirmed
-tick, and missing/noncontiguous steps, fail loudly.
+full time moves earlier; corrected lists are never empty, and an active shorter
+timeline is rejected. Apply and confirmation validate their complete requested
+ranges before replacing/deleting any retained step, so a caught invariant
+failure leaves the cursor and speculative tail unchanged. Correction or
+confirmation of an already-confirmed tick, and missing/noncontiguous steps,
+fail loudly.
+
+Public operations are:
+
+- `new(initial_snapshot, max_unconfirmed_ticks?)`, defaulting to the session's
+  30-tick rollback window;
+- `apply(timeline, replaced_from_tick, replaced_through_tick, steps)`, returning
+  a diff or typed `unconfirmed_window_exceeded`;
+- `confirm(timeline, confirmed_output_tick)`, returning newly confirmed compact
+  steps exactly once;
+- `diagnostics(timeline)`, returning the bounded status and retention counters.

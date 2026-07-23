@@ -3,6 +3,7 @@
 
 local input_frame = require("sim.input_frame")
 local match_snapshot = require("sim.match_snapshot")
+local rollback_input_history = require("sim.rollback_input_history")
 
 ---@alias RollbackEventDomain
 ---| "lifecycle/goal"
@@ -42,6 +43,20 @@ local match_snapshot = require("sim.match_snapshot")
 ---@field revoked RollbackWrappedEvent[]
 ---@field replaced RollbackEventReplacement[]
 
+---@alias RollbackEventsStatus "active"|"unconfirmed_window_exceeded"
+---@alias RollbackEventsErrorCode "unconfirmed_window_exceeded"
+
+---@class RollbackConfirmedStateView
+---@field score { home: integer, away: integer }
+---@field time_left number
+---@field finished boolean
+---@field owner_id string?
+---@field owner_team InputTeam?
+
+---@class RollbackEventPlayerIdentity
+---@field id string
+---@field team InputTeam
+
 ---@class RollbackEventStepInput
 ---@field output RollbackTickOutput
 ---@field snapshot MatchSnapshot -- Canonical post-step boundary.
@@ -50,15 +65,28 @@ local match_snapshot = require("sim.match_snapshot")
 ---@field tick integer
 ---@field start_boundary integer
 ---@field end_boundary integer
----@field snapshot MatchSnapshot
+---@field state RollbackConfirmedStateView
 ---@field match_events RollbackWrappedMatchEvent[]
 ---@field lifecycle_events RollbackWrappedLifecycleEvent[]
 
 ---@class RollbackEventTimeline
+---@field _status RollbackEventsStatus
+---@field _max_unconfirmed_ticks integer
 ---@field _confirmed_tick integer
 ---@field _confirmed_boundary integer
----@field _confirmed_snapshot MatchSnapshot
+---@field _confirmed_state RollbackConfirmedStateView
+---@field _players table<integer, RollbackEventPlayerIdentity>
 ---@field _steps table<integer, RollbackEventStep>
+
+---@class RollbackEventsDiagnostics
+---@field status RollbackEventsStatus
+---@field confirmed_tick integer
+---@field confirmed_boundary integer
+---@field max_unconfirmed_ticks integer
+---@field retained_step_count integer
+---@field retained_event_count integer
+---@field oldest_tick integer?
+---@field latest_tick integer?
 
 ---@class RollbackEventsModule
 local rollback_events = {}
@@ -76,18 +104,15 @@ local function copy_value(value)
     return result
 end
 
----@param snapshot MatchSnapshot
----@return MatchSnapshot
-local function copy_snapshot(snapshot)
-    return match_snapshot.capture(match_snapshot.restore(snapshot))
-end
-
 ---@param left any
 ---@param right any
 ---@return boolean
 local function equal_value(left, right)
     if type(left) ~= type(right) then
         return false
+    end
+    if type(left) == "number" then
+        return match_snapshot.number_bytes(left) == match_snapshot.number_bytes(right)
     end
     if type(left) ~= "table" then
         return left == right
@@ -108,15 +133,21 @@ end
 ---@param timeline RollbackEventTimeline
 local function assert_timeline(timeline)
     assert(type(timeline) == "table", "rollback event timeline is required")
+    assert(
+        timeline._status == "active" or timeline._status == "unconfirmed_window_exceeded",
+        "rollback event timeline status is invalid"
+    )
+    assert(
+        type(timeline._max_unconfirmed_ticks) == "number",
+        "rollback event unconfirmed window is missing"
+    )
     assert(type(timeline._confirmed_tick) == "number", "rollback event confirmed cursor is missing")
     assert(
         type(timeline._confirmed_boundary) == "number",
         "rollback event confirmed boundary is missing"
     )
-    assert(
-        type(timeline._confirmed_snapshot) == "table",
-        "rollback event confirmed snapshot is missing"
-    )
+    assert(type(timeline._confirmed_state) == "table", "rollback event confirmed state is missing")
+    assert(type(timeline._players) == "table", "rollback event player identities are missing")
     assert(type(timeline._steps) == "table", "rollback event speculative steps are missing")
 end
 
@@ -180,6 +211,18 @@ local function copy_lifecycle_wrappers(events)
     return result
 end
 
+---@param state RollbackConfirmedStateView
+---@return RollbackConfirmedStateView
+local function copy_state_view(state)
+    return {
+        score = { home = state.score.home, away = state.score.away },
+        time_left = state.time_left,
+        finished = state.finished,
+        owner_id = state.owner_id,
+        owner_team = state.owner_team,
+    }
+end
+
 ---@param step RollbackEventStep
 ---@return RollbackEventStep
 local function copy_step(step)
@@ -187,7 +230,7 @@ local function copy_step(step)
         tick = step.tick,
         start_boundary = step.start_boundary,
         end_boundary = step.end_boundary,
-        snapshot = copy_snapshot(step.snapshot),
+        state = copy_state_view(step.state),
         match_events = copy_match_wrappers(step.match_events),
         lifecycle_events = copy_lifecycle_wrappers(step.lifecycle_events),
     }
@@ -229,12 +272,10 @@ local function lifecycle_event(tick, domain, payload)
 end
 
 ---@param tick integer
----@param before MatchSnapshot
----@param after MatchSnapshot
+---@param pre RollbackConfirmedStateView
+---@param post RollbackConfirmedStateView
 ---@return RollbackWrappedLifecycleEvent[]
-local function derive_lifecycle_events(tick, before, after)
-    local pre = before.state
-    local post = after.state
+local function derive_lifecycle_events(tick, pre, post)
     local score = { home = post.score.home, away = post.score.away }
     local events = {}
     local scoring_team = nil
@@ -275,31 +316,60 @@ local function derive_lifecycle_events(tick, before, after)
 end
 
 ---@param output RollbackTickOutput
----@param snapshot MatchSnapshot
-local function assert_step_coherent(output, snapshot)
+---@param state MatchState
+local function assert_step_coherent(output, state)
     assert(type(output) == "table", "rollback event output is required")
-    assert(type(snapshot) == "table", "rollback event post-step snapshot is required")
     assert(output.tick == output.start_boundary, "rollback event output start boundary is invalid")
     assert(output.end_boundary == output.tick + 1, "rollback event output must advance one tick")
     assert(
-        snapshot.state.input_tick == output.end_boundary,
+        state.input_tick == output.end_boundary,
         "rollback event snapshot boundary does not match output"
     )
+    assert(output.state.score.home == state.score.home, "rollback output home score differs")
+    assert(output.state.score.away == state.score.away, "rollback output away score differs")
+    assert(output.state.time_left == state.time_left, "rollback output time differs")
+    assert(output.state.finished == state.finished, "rollback output finish differs")
+    assert(output.finished == state.finished, "rollback output finish flag differs")
     assert(
-        output.state.score.home == snapshot.state.score.home,
-        "rollback output home score differs"
-    )
-    assert(
-        output.state.score.away == snapshot.state.score.away,
-        "rollback output away score differs"
-    )
-    assert(output.state.time_left == snapshot.state.time_left, "rollback output time differs")
-    assert(output.state.finished == snapshot.state.finished, "rollback output finish differs")
-    assert(output.finished == snapshot.state.finished, "rollback output finish flag differs")
-    assert(
-        equal_value(output.events, snapshot.state.events),
+        equal_value(output.events, state.events),
         "rollback output events differ from post-step snapshot"
     )
+end
+
+---@param state MatchState
+---@return table<integer, RollbackEventPlayerIdentity>
+local function player_identities(state)
+    local result = {}
+    for index, player in ipairs(state.players) do
+        assert(
+            player.team == "home" or player.team == "away",
+            "rollback event player team is invalid"
+        )
+        result[index] = { id = player.id, team = player.team }
+    end
+    return result
+end
+
+---@param state MatchState
+---@param players table<integer, RollbackEventPlayerIdentity>
+---@return RollbackConfirmedStateView
+local function state_view(state, players)
+    local owner = nil
+    if state.owner ~= nil then
+        owner = assert(players[state.owner], "rollback event owner is outside the initial roster")
+        local current = assert(state.players[state.owner], "rollback event owner player is missing")
+        assert(
+            current.id == owner.id and current.team == owner.team,
+            "rollback event owner identity differs from the initial roster"
+        )
+    end
+    return {
+        score = { home = state.score.home, away = state.score.away },
+        time_left = state.time_left,
+        finished = state.finished,
+        owner_id = owner and owner.id or nil,
+        owner_team = owner and owner.team or nil,
+    }
 end
 
 ---@param timeline RollbackEventTimeline
@@ -314,10 +384,10 @@ end
 
 ---@param timeline RollbackEventTimeline
 ---@param tick integer
----@return MatchSnapshot
-local function snapshot_before(timeline, tick)
+---@return RollbackConfirmedStateView
+local function state_before(timeline, tick)
     if tick == timeline._confirmed_boundary then
-        return timeline._confirmed_snapshot
+        return timeline._confirmed_state
     end
     local previous = assert(
         timeline._steps[tick - 1],
@@ -327,23 +397,25 @@ local function snapshot_before(timeline, tick)
         previous.end_boundary == tick,
         ("rollback event step %d has a noncontiguous previous boundary"):format(tick)
     )
-    return previous.snapshot
+    return previous.state
 end
 
 ---@param output RollbackTickOutput
 ---@param snapshot MatchSnapshot
----@param before MatchSnapshot
+---@param before RollbackConfirmedStateView
+---@param players table<integer, RollbackEventPlayerIdentity>
 ---@return RollbackEventStep
-local function make_step(output, snapshot, before)
-    assert_step_coherent(output, snapshot)
-    local canonical = copy_snapshot(snapshot)
+local function make_step(output, snapshot, before, players)
+    local canonical_state = match_snapshot.restore(snapshot)
+    assert_step_coherent(output, canonical_state)
+    local post = state_view(canonical_state, players)
     return {
         tick = output.tick,
         start_boundary = output.start_boundary,
         end_boundary = output.end_boundary,
-        snapshot = canonical,
+        state = post,
         match_events = wrap_match_events(output.tick, output.events),
-        lifecycle_events = derive_lifecycle_events(output.tick, before, canonical),
+        lifecycle_events = derive_lifecycle_events(output.tick, before, post),
     }
 end
 
@@ -405,15 +477,54 @@ local function diff_events(old_events, new_events)
     return diff
 end
 
+---@param timeline RollbackEventTimeline
+---@return integer
+local function retained_step_count(timeline)
+    local count = 0
+    for _ in pairs(timeline._steps) do
+        count = count + 1
+    end
+    return count
+end
+
+---@param steps RollbackEventStepInput[]
+local function assert_dense_steps(steps)
+    local count = 0
+    for index in pairs(steps) do
+        assert(
+            type(index) == "number"
+                and index == math.floor(index)
+                and index >= 1
+                and index <= #steps,
+            "rollback event corrected steps must be a dense array"
+        )
+        count = count + 1
+    end
+    assert(count == #steps, "rollback event corrected steps must be a dense array")
+end
+
 ---@param initial_snapshot MatchSnapshot Canonical boundary zero.
+---@param max_unconfirmed_ticks integer?
 ---@return RollbackEventTimeline
-function rollback_events.new(initial_snapshot)
-    local canonical = copy_snapshot(initial_snapshot)
-    assert(canonical.state.input_tick == 0, "rollback event timeline requires boundary zero")
+function rollback_events.new(initial_snapshot, max_unconfirmed_ticks)
+    max_unconfirmed_ticks = max_unconfirmed_ticks or rollback_input_history.ROLLBACK_WINDOW_TICKS
+    assert(
+        type(max_unconfirmed_ticks) == "number"
+            and max_unconfirmed_ticks == math.floor(max_unconfirmed_ticks)
+            and max_unconfirmed_ticks >= 1
+            and max_unconfirmed_ticks <= rollback_input_history.ROLLBACK_WINDOW_TICKS,
+        "rollback event unconfirmed window must be a positive bounded integer"
+    )
+    local initial_state = match_snapshot.restore(initial_snapshot)
+    assert(initial_state.input_tick == 0, "rollback event timeline requires boundary zero")
+    local players = player_identities(initial_state)
     return {
+        _status = "active",
+        _max_unconfirmed_ticks = max_unconfirmed_ticks,
         _confirmed_tick = -1,
         _confirmed_boundary = 0,
-        _confirmed_snapshot = canonical,
+        _confirmed_state = state_view(initial_state, players),
+        _players = players,
         _steps = {},
     }
 end
@@ -422,9 +533,14 @@ end
 ---@param replaced_from_tick integer
 ---@param replaced_through_tick integer
 ---@param steps RollbackEventStepInput[]
----@return RollbackEventDiff
+---@return RollbackEventDiff?, string?, RollbackEventsErrorCode?
 function rollback_events.apply(timeline, replaced_from_tick, replaced_through_tick, steps)
     assert_timeline(timeline)
+    if timeline._status == "unconfirmed_window_exceeded" then
+        return nil,
+            "rollback event timeline cannot accept steps after its unconfirmed window",
+            "unconfirmed_window_exceeded"
+    end
     assert(
         type(replaced_from_tick) == "number"
             and replaced_from_tick == math.floor(replaced_from_tick)
@@ -442,6 +558,8 @@ function rollback_events.apply(timeline, replaced_from_tick, replaced_through_ti
         "rollback events cannot correct an already-confirmed tick"
     )
     assert(type(steps) == "table", "rollback event corrected steps are required")
+    assert_dense_steps(steps)
+    assert(#steps > 0, "rollback event replacement requires at least one corrected step")
 
     local latest = latest_speculative_tick(timeline)
     local replacing = timeline._steps[replaced_from_tick] ~= nil
@@ -465,16 +583,19 @@ function rollback_events.apply(timeline, replaced_from_tick, replaced_through_ti
         )
     end
 
-    local previous_snapshot = snapshot_before(timeline, replaced_from_tick)
+    local previous_state = state_before(timeline, replaced_from_tick)
     local old_steps = {}
     for tick = replaced_from_tick, replaced_through_tick do
         old_steps[tick] = timeline._steps[tick]
-        timeline._steps[tick] = nil
     end
 
     local new_steps = {}
     for index, supplied in ipairs(steps) do
         assert(type(supplied) == "table", "rollback event step input is required")
+        assert(
+            not previous_state.finished,
+            "rollback event timeline cannot apply a step after full time"
+        )
         local output = supplied.output
         local expected_tick = replaced_from_tick + index - 1
         assert(
@@ -485,16 +606,43 @@ function rollback_events.apply(timeline, replaced_from_tick, replaced_through_ti
             output.tick <= replaced_through_tick,
             "rollback event corrected steps extend beyond the replaced interval"
         )
-        local step = make_step(output, supplied.snapshot, previous_snapshot)
+        local step = make_step(output, supplied.snapshot, previous_state, timeline._players)
         new_steps[step.tick] = step
-        timeline._steps[step.tick] = step
-        previous_snapshot = step.snapshot
+        previous_state = step.state
+    end
+    local replaced_count = replaced_through_tick - replaced_from_tick + 1
+    if replacing and #steps < replaced_count then
+        local final_step = assert(new_steps[replaced_from_tick + #steps - 1])
+        assert(
+            final_step.state.finished,
+            "rollback event correction may shorten the stale tail only at full time"
+        )
+    end
+
+    local retained_after = retained_step_count(timeline)
+        - (replacing and replaced_count or 0)
+        + #steps
+    if retained_after > timeline._max_unconfirmed_ticks then
+        timeline._status = "unconfirmed_window_exceeded"
+        return nil,
+            ("rollback event confirmation stalled beyond the %d-tick unconfirmed window"):format(
+                timeline._max_unconfirmed_ticks
+            ),
+            "unconfirmed_window_exceeded"
     end
 
     local old_events = ordered_events(old_steps, replaced_from_tick, replaced_through_tick)
     local corrected_through = replaced_from_tick + #steps - 1
     local new_events = ordered_events(new_steps, replaced_from_tick, corrected_through)
-    return diff_events(old_events, new_events)
+    local diff = diff_events(old_events, new_events)
+
+    for tick = replaced_from_tick, replaced_through_tick do
+        timeline._steps[tick] = nil
+    end
+    for tick, step in pairs(new_steps) do
+        timeline._steps[tick] = step
+    end
+    return diff
 end
 
 ---@param timeline RollbackEventTimeline
@@ -502,6 +650,10 @@ end
 ---@return RollbackEventStep[]
 function rollback_events.confirm(timeline, confirmed_output_tick)
     assert_timeline(timeline)
+    assert(
+        timeline._status == "active",
+        "rollback event timeline cannot confirm after its unconfirmed window is exceeded"
+    )
     assert(
         type(confirmed_output_tick) == "number"
             and confirmed_output_tick == math.floor(confirmed_output_tick)
@@ -517,22 +669,55 @@ function rollback_events.confirm(timeline, confirmed_output_tick)
     end
 
     local confirmed = {}
+    local boundary = timeline._confirmed_boundary
+    local final_state = timeline._confirmed_state
     for tick = timeline._confirmed_tick + 1, confirmed_output_tick do
         local step = assert(
             timeline._steps[tick],
             ("rollback event confirmation is missing tick %d"):format(tick)
         )
         assert(
-            step.start_boundary == timeline._confirmed_boundary,
+            step.start_boundary == boundary,
             ("rollback event confirmation is noncontiguous at tick %d"):format(tick)
         )
         confirmed[#confirmed + 1] = copy_step(step)
-        timeline._confirmed_tick = tick
-        timeline._confirmed_boundary = step.end_boundary
-        timeline._confirmed_snapshot = copy_snapshot(step.snapshot)
+        boundary = step.end_boundary
+        final_state = step.state
+    end
+
+    timeline._confirmed_tick = confirmed_output_tick
+    timeline._confirmed_boundary = boundary
+    timeline._confirmed_state = copy_state_view(final_state)
+    for tick = confirmed_output_tick - #confirmed + 1, confirmed_output_tick do
         timeline._steps[tick] = nil
     end
     return confirmed
+end
+
+---@param timeline RollbackEventTimeline
+---@return RollbackEventsDiagnostics
+function rollback_events.diagnostics(timeline)
+    assert_timeline(timeline)
+    local step_count = 0
+    local event_count = 0
+    local oldest = nil
+    local latest = nil
+    for tick, step in pairs(timeline._steps) do
+        step_count = step_count + 1
+        event_count = event_count + #step.match_events + #step.lifecycle_events
+        oldest = oldest and math.min(oldest, tick) or tick
+        latest = latest and math.max(latest, tick) or tick
+    end
+    return {
+        status = timeline._status,
+        confirmed_tick = timeline._confirmed_tick,
+        confirmed_boundary = timeline._confirmed_boundary,
+        max_unconfirmed_ticks = timeline._max_unconfirmed_ticks,
+        retained_step_count = step_count,
+        retained_event_count = event_count,
+        oldest_tick = oldest,
+        latest_tick = latest,
+    }
 end
 
 return rollback_events
