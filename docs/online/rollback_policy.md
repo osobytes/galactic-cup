@@ -261,3 +261,47 @@ successful restores, while `correction_count` counts accepted authoritative
 rows that differed from consumed effective rows. Latest/maximum rollback depth
 is `old_present_boundary - causal_tick`; late-window failures are counted
 separately.
+
+## Stable events and confirmed publication
+
+`sim.rollback_events` keeps presentation identity outside `MatchState` and the
+canonical snapshot/replay schemas. A wrapped match event uses the domain
+`match/<kind>`; lifecycle domains are `lifecycle/goal`,
+`lifecycle/kickoff`, and `lifecycle/full_time`. Its fixed identity encoding
+contains the causal input tick, domain length and bytes, and a four-digit
+per-domain ordinal. Interleaving another event kind therefore cannot renumber
+shots, tackles, or keeper events at the same tick. Actor, position, style,
+outcome, team, and post-goal score remain payload rather than identity.
+
+When corrected play retains an identity but changes its payload, the event
+timeline reports one explicit replacement. A changed kind/domain reports a
+revocation plus an addition. Additions and replacements follow corrected
+tick/event order; revocations follow the stale order. Reapplying an identical
+timeline produces no diff. All supplied snapshots/events and all returned
+diffs/confirmed steps are defensive copies.
+
+Goal, kickoff, and full-time events are derived from canonical pre-step and
+post-step snapshots:
+
+- one score increment produces a goal with the scoring team and post-goal
+  score;
+- an active post-goal state also produces a kickoff for the conceding team;
+- the first transition to `finished` produces full time;
+- a max-goal step produces goal plus full time but no kickoff, while timer
+  expiry produces full time alone.
+
+Opening kickoff is before input tick zero and deliberately has no event.
+Lifecycle audio, goal replay, statistics, result flow, and other irreversible
+effects wait for confirmation. Consumers may render immediate speculative
+feedback only when they can reverse additions, revocations, and replacements.
+Confirmed wrappers keep the same IDs that they had speculatively.
+
+The call order is part of the contract. A normal update calls
+`rollback_events.apply` with the new output and its canonical post-step
+snapshot, then calls `confirm` with
+`rollback_session.diagnostics(...).confirmed_output_tick`. After arrivals,
+call `rollback_session.reconcile`, apply its corrected outputs and snapshot
+lookups as one replacement of the complete stale output range, and only then
+advance confirmation. A corrected list may end before the stale range when
+full time moves earlier. Correction or confirmation of an already-confirmed
+tick, and missing/noncontiguous steps, fail loudly.
