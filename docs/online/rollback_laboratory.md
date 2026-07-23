@@ -5,6 +5,49 @@ one no-delay reference match beside one impaired rollback client and proves
 that both consume the same checked-in authoritative input stream. It has no
 LÖVE, display, socket, browser, or wall-clock dependency.
 
+## Playable development mode
+
+`sim.rollback_playable_lab` is the incremental counterpart used by the match
+screen's explicit `MatchScreenOptions.rollback_lab` development option. It does
+not add a product route or transport. `profile = "product"` rejects the option.
+Normal `Match.new()` and `RealMatch` construction continue to use the legacy
+single-player input path.
+
+The screen keeps its one existing `sim.fixed_clock`. Render input is sampled by
+`game.match_input_adapter`; only a consumed fixed tick calls `next_tick`, then
+`sim.slot_input.to_sample` routes that row to the configured immutable slot.
+The controller generates the other seven rows with seeded bots that read only
+the independent reference state. It steps one complete reference
+`InputFrame`, delivers the local row immediately, sends remote rows through the
+selected network profile, reconciles one delivery batch, and catches the
+displayed client up to the reference boundary. The screen restores only the
+controller's copied current snapshot.
+
+Corrected outputs replace the complete speculative stable-event tail before
+new outputs are appended. Confirmation runs after corrections and again after
+catch-up, which frees the oldest event slot at the exact 30-tick supported
+edge. Each render update aggregates every output, event diff, confirmed step,
+and correction rather than retaining only its last fixed tick. These copied
+batches are a seam for the presentation reconciliation work; the current
+legacy replay, effects, event audio, goal celebration, and observer paths do
+not consume speculative rollback state.
+
+Reference full time ends match-input production. Later fixed updates advance
+transport only: they resend the retained final remote rows, poll, reconcile,
+and confirm until final authority is complete and the network queue is empty.
+Settlement is bounded to 256 transport ticks by default and reports
+`drain_incomplete` instead of looping synchronously or inventing post-finish
+frames.
+
+The cached screen overlay reports the selected profile, reference/client/
+transport ticks, confirmation, prediction, rollback depth, resimulation,
+snapshot retention, network pending/high-water counters, and latest confirmed
+convergence. Drawing reads that copied model only. A live `R` in laboratory
+mode reconstructs the reference, bot RNG, rollback and event histories,
+network queue/counters, settlement and convergence state, fixed clock, input
+adapter, and renderer-owned replay/view/effect/audio state while preserving the
+selected laboratory configuration.
+
 The runner accepts only a validated `InputTape`. The tape already contains
 materialized eight-slot `InputFrame` rows and a canonical initial snapshot.
 Authoritative decisions therefore belong to the tape/reference side and can
