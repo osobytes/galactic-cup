@@ -62,6 +62,7 @@ SCENARIOS = (
 )
 SOAK_NETWORK_SEEDS = (2001, 2002, 2003, 2001, 2002)
 DEFAULT_TIMEOUT_SECONDS = 7200
+BROWSER_SOAK_TIMEOUT_MULTIPLIER = 3
 POLL_SECONDS = 0.2
 ERROR_MARKERS = (
     "GC_BROWSER|error|",
@@ -1696,6 +1697,14 @@ def browser_plan() -> list[tuple[str, tuple[str, ...]]]:
     return plan
 
 
+def browser_suite_timeout_seconds(suite: str, timeout_seconds: int) -> int:
+    """Scale the browser timeout for the five-fixture persistent soak."""
+
+    if suite == "soak":
+        return timeout_seconds * BROWSER_SOAK_TIMEOUT_MULTIPLIER
+    return timeout_seconds
+
+
 def browser_matrix(
     evidence: dict[str, Any],
     artifact: Path,
@@ -1741,6 +1750,10 @@ def browser_matrix(
             browser_evidence["runtimes"][browser_name] = runtime
             for run_number, (suite, arguments) in enumerate(browser_plan(), start=1):
                 slug = "-".join((browser_name, suite, *arguments))
+                suite_timeout_seconds = browser_suite_timeout_seconds(
+                    suite,
+                    timeout_seconds,
+                )
                 run = run_browser_once(
                     browser_name,
                     binary,
@@ -1749,8 +1762,9 @@ def browser_matrix(
                     suite,
                     arguments,
                     raw_root / f"{slug}.log",
-                    timeout_seconds,
+                    suite_timeout_seconds,
                 )
+                run["timeout_seconds"] = suite_timeout_seconds
                 run["run"] = run_number
                 runtime["runs"].append(run)
                 if suite == "soak" and not run["soak_memory"]["pass"]:
@@ -1839,6 +1853,10 @@ def run_self_test() -> None:
     ]
     if browser_plan() != expected_plan:
         raise RuntimeError("browser matrix plan self-test failed")
+    if browser_suite_timeout_seconds("browser-full", 1800) != 1800:
+        raise RuntimeError("single-fixture browser timeout scaling self-test failed")
+    if browser_suite_timeout_seconds("soak", 1800) != 5400:
+        raise RuntimeError("browser soak timeout scaling self-test failed")
     expected_counts = {
         ("native", ()): 39,
         ("browser-full", ("clean", "2001")): 1,

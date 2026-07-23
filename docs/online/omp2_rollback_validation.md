@@ -139,6 +139,10 @@ executable/browser/driver identity, profile/tape hashes, every logical marker, t
 percentiles, retained-byte breakdowns, memory checkpoints, and bounded teardown/orphan status.
 Browser teardown combines descendant tracking with a pre-launch/post-run executable census so an
 early-detached driver, browser, or crash helper cannot evade the orphan gate.
+The browser harness keeps the configured timeout for each single-fixture or short scenario run and
+uses three times that bound for the persistent five-fixture soak. CI therefore allows 1,800 seconds
+per ordinary browser run and 5,400 seconds for the soak, while the browser job retains its
+180-minute hard limit.
 
 ## OMP-3 transport inputs
 
