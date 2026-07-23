@@ -45,8 +45,8 @@ local slot_input = require("sim.slot_input")
 ---@field replaced_through_tick integer
 ---@field corrected_from_tick integer
 ---@field corrected_through_tick integer
----@field old_present_hash string
----@field new_present_hash string
+---@field old_present_hash string?
+---@field new_present_hash string?
 ---@field first_difference MatchSnapshotDifference?
 
 ---@class RollbackPlayableConvergence
@@ -353,8 +353,8 @@ local function correction_view(result)
         replaced_through_tick = assert(result.replaced_through_tick),
         corrected_from_tick = assert(result.corrected_from_tick),
         corrected_through_tick = assert(result.corrected_through_tick),
-        old_present_hash = assert(result.old_present_hash),
-        new_present_hash = assert(result.new_present_hash),
+        old_present_hash = result.old_present_hash,
+        new_present_hash = result.new_present_hash,
         first_difference = copy_value(result.first_difference),
     }
 end

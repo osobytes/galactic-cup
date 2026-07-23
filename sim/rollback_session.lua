@@ -60,8 +60,8 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field restored_boundary integer
 ---@field old_present_boundary integer
 ---@field new_present_boundary integer
----@field old_present_hash string
----@field new_present_hash string
+---@field old_present_hash string?
+---@field new_present_hash string?
 ---@field first_difference MatchSnapshotDifference?
 
 ---@class RollbackSessionDiagnostics
@@ -498,8 +498,9 @@ end
 
 ---@param session RollbackSession
 ---@param causal_tick integer
+---@param detailed_diagnostics boolean
 ---@return RollbackReconcileResult
-local function reconcile_changed(session, causal_tick)
+local function reconcile_changed(session, causal_tick, detailed_diagnostics)
     local old_present = session._state.input_tick
     local restore_status = rollback_snapshot_history.status(session._snapshot_history, causal_tick)
     if restore_status == "outside_window" then
@@ -515,12 +516,16 @@ local function reconcile_changed(session, causal_tick)
             old_present
         )
     )
-    local old_snapshot = measured(session, "capture", function()
-        return match_snapshot.capture(session._state)
-    end)
-    ---@cast old_snapshot MatchSnapshot
-    local old_hash =
-        assert(rollback_snapshot_history.boundary_hash(session._snapshot_history, old_present))
+    ---@type MatchSnapshot?
+    local old_snapshot = nil
+    local old_hash = nil
+    if detailed_diagnostics then
+        old_snapshot = measured(session, "capture", function()
+            return match_snapshot.capture(session._state)
+        end)
+        old_hash =
+            assert(rollback_snapshot_history.boundary_hash(session._snapshot_history, old_present))
+    end
     assert(
         rollback_input_history.consume_earliest_divergence(session._input_history) == causal_tick,
         "rollback divergence changed before restore"
@@ -554,15 +559,19 @@ local function reconcile_changed(session, causal_tick)
     end
     prune_retained_outputs(session)
 
-    local new_hash =
-        assert(rollback_snapshot_history.boundary_hash(session._snapshot_history, new_present))
-    local first_difference = old_hash ~= new_hash
-            and rollback_snapshot_history.first_difference(
+    local new_hash = nil
+    local first_difference = nil
+    if detailed_diagnostics then
+        new_hash =
+            assert(rollback_snapshot_history.boundary_hash(session._snapshot_history, new_present))
+        if old_hash ~= new_hash then
+            first_difference = rollback_snapshot_history.first_difference(
                 session._snapshot_history,
                 new_present,
-                old_snapshot
+                assert(old_snapshot)
             )
-        or nil
+        end
+    end
     local depth = old_present - causal_tick
     session._rollback_count = session._rollback_count + 1
     session._latest_rollback_depth = depth
@@ -597,9 +606,14 @@ local function reconcile_changed(session, causal_tick)
 end
 
 ---@param session RollbackSession
+---@param detailed_diagnostics boolean? Compute predicted-versus-corrected hashes and difference.
 ---@return RollbackReconcileResult
-function rollback_session.reconcile(session)
+function rollback_session.reconcile(session, detailed_diagnostics)
     assert_session(session)
+    assert(
+        detailed_diagnostics == nil or type(detailed_diagnostics) == "boolean",
+        "rollback detailed diagnostics flag must be boolean"
+    )
     if session._status == "late_input_unrecoverable" then
         local late_tick = assert(
             session._late_input_tick,
@@ -612,7 +626,7 @@ function rollback_session.reconcile(session)
         return unchanged_reconcile_result(session, nil, nil)
     end
     local result = measured(session, "rollback", function()
-        return reconcile_changed(session, causal_tick)
+        return reconcile_changed(session, causal_tick, detailed_diagnostics == true)
     end)
     ---@cast result RollbackReconcileResult
     return result

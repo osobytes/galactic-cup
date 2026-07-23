@@ -226,18 +226,23 @@ and input histories are pruned to the snapshot floor after every advance.
 
 `reconcile` first checks terminal status and whether a divergence exists. A
 no-op/equal batch and repeated terminal call therefore do not capture or hash
-the present; their optional old/new hash fields are absent. A changed rollback
-hashes the old present before replacing anything, consumes the earliest
-divergence once, restores its exact `present` or `retained` boundary, and
-rematerializes corrected frames toward the old present. All later authority in
-the same batch is therefore applied during that one replay. Corrected outputs
-are returned in causal tick order and also replace the session's per-tick
-output index for confirmed-event publication. A missing boundary inside the
-supported range is an invariant failure. An outside-window arrival enters
-terminal `late_input_unrecoverable` status without consuming another retained
-divergence or changing the live match; diagnostics always attribute a mixed
-batch to that actual late input tick. `step` cannot make hidden progress from
-the terminal state.
+the present. A changed rollback consumes the earliest divergence once, restores
+its exact `present` or `retained` boundary, and rematerializes corrected frames
+toward the old present. All later authority in the same batch is therefore
+applied during that one replay. Corrected outputs are returned in causal tick
+order and also replace the session's per-tick output index for confirmed-event
+publication.
+
+Per-correction predicted-versus-corrected hashes and the first structural
+difference are explicit detailed diagnostics: `reconcile(session, true)`
+collects them, while the production default omits that redundant work.
+Authoritative boundary comparison and final convergence still always use the
+canonical snapshots, hashes, and first-difference report below. A missing
+boundary inside the supported range is an invariant failure. An outside-window
+arrival enters terminal `late_input_unrecoverable` status without consuming
+another retained divergence or changing the live match; diagnostics always
+attribute a mixed batch to that actual late input tick. `step` cannot make
+hidden progress from the terminal state.
 
 If corrected play finishes before the old present at boundary `N`, the session
 stores the final output/boundary, truncates snapshots strictly after `N`, then
