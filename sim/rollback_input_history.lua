@@ -7,7 +7,7 @@ local input_frame = require("sim.input_frame")
 
 ---@alias RollbackInputSource "local"|"remote"
 ---@alias RollbackInputStatus "authoritative"|"predicted"
----@alias RollbackInputHistoryErrorCode "malformed"|"conflicting_authoritative"
+---@alias RollbackInputHistoryErrorCode "malformed"|"conflicting_authoritative"|"outside_window"|"pending_divergence"
 
 ---@class RollbackInputSlotRecord
 ---@field source RollbackInputSource
@@ -23,12 +23,41 @@ local input_frame = require("sim.input_frame")
 ---@field confirmed_tick integer -- Highest contiguous all-authoritative tick, or -1 before tick zero.
 ---@field earliest_divergence integer? -- Earliest unconsumed corrected tick used by the simulation.
 
+---@class RollbackInputAnchor
+---@field tick integer
+---@field sample InputSample
+
+---@class RollbackInputHistoryDiagnostics
+---@field oldest_retained_tick integer
+---@field newest_retained_tick integer?
+---@field authoritative_tick_count integer
+---@field authoritative_sample_count integer
+---@field effective_tick_count integer
+---@field record_tick_count integer
+---@field predecessor_anchor_count integer
+---@field confirmed_tick integer
+---@field earliest_divergence integer?
+
+---@class RollbackInputTruncateResult
+---@field boundary_tick integer
+---@field effective_removed integer
+---@field records_removed integer
+---@field cleared_divergence boolean
+---@field diagnostics RollbackInputHistoryDiagnostics
+
 ---@class RollbackInputHistory
 ---@field _sources RollbackInputSource[]
 ---@field _authoritative table<integer, table<integer, InputSample>>
 ---@field _authoritative_counts table<integer, integer>
+---@field _authoritative_ticks integer[][] -- Sorted authoritative ticks for each slot.
+---@field _anchors table<integer, RollbackInputAnchor>
 ---@field _effective table<integer, InputFrame>
 ---@field _records table<integer, RollbackInputTickRecord>
+---@field _oldest_retained_tick integer
+---@field _authoritative_tick_count integer
+---@field _authoritative_sample_count integer
+---@field _effective_tick_count integer
+---@field _record_tick_count integer
 ---@field _confirmed_tick integer
 ---@field _earliest_divergence integer?
 
@@ -59,6 +88,11 @@ local function assert_history(history)
         "rollback authoritative input history is missing"
     )
     assert(type(history._effective) == "table", "rollback effective input history is missing")
+    assert(
+        type(history._authoritative_ticks) == "table",
+        "rollback authoritative input indexes are missing"
+    )
+    assert(type(history._anchors) == "table", "rollback predecessor anchors are missing")
 end
 
 ---@param sample InputSample
@@ -143,23 +177,55 @@ local function advance_confirmation(history)
     end
 end
 
+---@param ticks integer[]
+---@param target integer
+---@return integer -- Array index of the greatest tick <= target, or zero.
+local function predecessor_index(ticks, target)
+    local low, high = 1, #ticks
+    local found = 0
+    while low <= high do
+        local middle = math.floor((low + high) / 2)
+        if ticks[middle] <= target then
+            found = middle
+            low = middle + 1
+        else
+            high = middle - 1
+        end
+    end
+    return found
+end
+
+---@param ticks integer[]
+---@param tick integer
+local function insert_tick(ticks, tick)
+    local low, high = 1, #ticks + 1
+    while low < high do
+        local middle = math.floor((low + high) / 2)
+        if ticks[middle] and ticks[middle] < tick then
+            low = middle + 1
+        else
+            high = middle
+        end
+    end
+    table.insert(ticks, low, tick)
+end
+
 ---@param history RollbackInputHistory
 ---@param tick integer
 ---@param slot_index integer
 ---@return InputSample?
 local function latest_authoritative(history, tick, slot_index)
-    local latest_tick = -1
-    local latest_sample = nil
-    for authoritative_tick, slots in pairs(history._authoritative) do
-        if authoritative_tick <= tick and authoritative_tick > latest_tick then
-            local sample = slots[slot_index]
-            if sample ~= nil then
-                latest_tick = authoritative_tick
-                latest_sample = sample
-            end
-        end
+    local ticks = history._authoritative_ticks[slot_index]
+    local index = predecessor_index(ticks, tick)
+    if index > 0 then
+        local slots = history._authoritative[ticks[index]]
+        return assert(slots[slot_index], "rollback authoritative index is inconsistent")
     end
-    return latest_sample
+    local anchor = history._anchors[slot_index]
+    if anchor and anchor.tick <= tick then
+        return anchor.sample
+    end
+    return nil
 end
 
 ---@param sources RollbackInputSource[] Canonical eight-slot local/remote ownership metadata.
@@ -170,12 +236,23 @@ function rollback_input_history.new(sources)
     for index = 1, input_frame.SLOT_COUNT do
         copied_sources[index] = sources[index]
     end
+    local authoritative_ticks = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        authoritative_ticks[index] = {}
+    end
     return {
         _sources = copied_sources,
         _authoritative = {},
         _authoritative_counts = {},
+        _authoritative_ticks = authoritative_ticks,
+        _anchors = {},
         _effective = {},
         _records = {},
+        _oldest_retained_tick = 0,
+        _authoritative_tick_count = 0,
+        _authoritative_sample_count = 0,
+        _effective_tick_count = 0,
+        _record_tick_count = 0,
         _confirmed_tick = -1,
         _earliest_divergence = nil,
     }
@@ -207,6 +284,14 @@ function rollback_input_history.add_authoritative(history, tick, slot_index, sam
     if not ok then
         return nil, err, code
     end
+    if tick < history._oldest_retained_tick then
+        return nil,
+            ("authoritative input tick %d is older than retained tick %d"):format(
+                tick,
+                history._oldest_retained_tick
+            ),
+            "outside_window"
+    end
 
     local slots = history._authoritative[tick]
     local existing = slots and slots[slot_index] or nil
@@ -234,9 +319,12 @@ function rollback_input_history.add_authoritative(history, tick, slot_index, sam
         slots = {}
         history._authoritative[tick] = slots
         history._authoritative_counts[tick] = 0
+        history._authoritative_tick_count = history._authoritative_tick_count + 1
     end
     slots[slot_index] = copy_sample(sample)
+    insert_tick(history._authoritative_ticks[slot_index], tick)
     history._authoritative_counts[tick] = history._authoritative_counts[tick] + 1
+    history._authoritative_sample_count = history._authoritative_sample_count + 1
     advance_confirmation(history)
 
     return {
@@ -258,6 +346,10 @@ function rollback_input_history.materialize(history, tick)
     assert(
         is_integer(tick) and tick >= 0 and tick <= input_frame.MAX_TICK,
         "rollback input tick must be a bounded non-negative integer"
+    )
+    assert(
+        tick >= history._oldest_retained_tick,
+        "rollback input tick is older than retained history"
     )
     assert(
         history._earliest_divergence == nil or tick < history._earliest_divergence,
@@ -299,6 +391,12 @@ function rollback_input_history.materialize(history, tick)
 
     local frame = assert(input_frame.new(tick, samples))
     local record = { tick = tick, slots = records }
+    if history._effective[tick] == nil then
+        history._effective_tick_count = history._effective_tick_count + 1
+    end
+    if history._records[tick] == nil then
+        history._record_tick_count = history._record_tick_count + 1
+    end
     history._effective[tick] = copy_frame(frame)
     history._records[tick] = copy_record(record)
     return copy_frame(frame), copy_record(record)
@@ -354,6 +452,173 @@ function rollback_input_history.consume_earliest_divergence(history)
     local tick = history._earliest_divergence
     history._earliest_divergence = nil
     return tick
+end
+
+---@param history RollbackInputHistory
+---@return RollbackInputHistoryDiagnostics
+function rollback_input_history.diagnostics(history)
+    assert_history(history)
+    local newest = nil
+    for index = 1, input_frame.SLOT_COUNT do
+        local ticks = history._authoritative_ticks[index]
+        local tick = ticks[#ticks]
+        if tick and (newest == nil or tick > newest) then
+            newest = tick
+        end
+    end
+    for tick in pairs(history._effective) do
+        if newest == nil or tick > newest then
+            newest = tick
+        end
+    end
+    local anchor_count = 0
+    for index = 1, input_frame.SLOT_COUNT do
+        if history._anchors[index] ~= nil then
+            anchor_count = anchor_count + 1
+        end
+    end
+    return {
+        oldest_retained_tick = history._oldest_retained_tick,
+        newest_retained_tick = newest,
+        authoritative_tick_count = history._authoritative_tick_count,
+        authoritative_sample_count = history._authoritative_sample_count,
+        effective_tick_count = history._effective_tick_count,
+        record_tick_count = history._record_tick_count,
+        predecessor_anchor_count = anchor_count,
+        confirmed_tick = history._confirmed_tick,
+        earliest_divergence = history._earliest_divergence,
+    }
+end
+
+-- Boundary N is the state before InputFrame N. Discarding from N removes only
+-- effective frames and source/status diagnostics from an obsolete simulated
+-- tail; authoritative arrivals and confirmation remain valid upstream facts.
+---@param history RollbackInputHistory
+---@param boundary_tick integer
+---@return RollbackInputTruncateResult?, string?, RollbackInputHistoryErrorCode?
+function rollback_input_history.truncate_from(history, boundary_tick)
+    assert_history(history)
+    if
+        not is_integer(boundary_tick)
+        or boundary_tick < 0
+        or boundary_tick > input_frame.MAX_TICK
+    then
+        return nil,
+            "rollback input truncate tick must be a bounded non-negative integer",
+            "malformed"
+    end
+    if boundary_tick < history._oldest_retained_tick then
+        return nil,
+            ("rollback input boundary %d is older than retained tick %d"):format(
+                boundary_tick,
+                history._oldest_retained_tick
+            ),
+            "outside_window"
+    end
+
+    local effective_removed = 0
+    for tick in pairs(history._effective) do
+        if tick >= boundary_tick then
+            history._effective[tick] = nil
+            history._effective_tick_count = history._effective_tick_count - 1
+            effective_removed = effective_removed + 1
+        end
+    end
+    local records_removed = 0
+    for tick in pairs(history._records) do
+        if tick >= boundary_tick then
+            history._records[tick] = nil
+            history._record_tick_count = history._record_tick_count - 1
+            records_removed = records_removed + 1
+        end
+    end
+    local cleared_divergence = history._earliest_divergence ~= nil
+        and history._earliest_divergence >= boundary_tick
+    if cleared_divergence then
+        history._earliest_divergence = nil
+    end
+    return {
+        boundary_tick = boundary_tick,
+        effective_removed = effective_removed,
+        records_removed = records_removed,
+        cleared_divergence = cleared_divergence,
+        diagnostics = rollback_input_history.diagnostics(history),
+    }
+end
+
+-- Drop input/effective records that no retained snapshot can restore. One
+-- copied authoritative predecessor per slot survives as the prediction anchor.
+-- A pending correction must be handed to the rollback session before its
+-- evidence can leave the retained window.
+---@param history RollbackInputHistory
+---@param oldest_retained_tick integer
+---@return RollbackInputHistoryDiagnostics?, string?, RollbackInputHistoryErrorCode?
+function rollback_input_history.prune_before(history, oldest_retained_tick)
+    assert_history(history)
+    assert(
+        is_integer(oldest_retained_tick)
+            and oldest_retained_tick >= history._oldest_retained_tick
+            and oldest_retained_tick <= input_frame.MAX_TICK,
+        "rollback input prune tick must advance within the bounded tick range"
+    )
+    if
+        history._earliest_divergence ~= nil
+        and history._earliest_divergence < oldest_retained_tick
+    then
+        return nil,
+            ("cannot prune unconsumed divergence at tick %d before retained tick %d"):format(
+                history._earliest_divergence,
+                oldest_retained_tick
+            ),
+            "pending_divergence"
+    end
+    if oldest_retained_tick == history._oldest_retained_tick then
+        return rollback_input_history.diagnostics(history)
+    end
+
+    for index = 1, input_frame.SLOT_COUNT do
+        local ticks = history._authoritative_ticks[index]
+        local predecessor = predecessor_index(ticks, oldest_retained_tick - 1)
+        if predecessor > 0 then
+            local tick = ticks[predecessor]
+            local slots = history._authoritative[tick]
+            history._anchors[index] = {
+                tick = tick,
+                sample = copy_sample(assert(slots[index], "rollback prune index is inconsistent")),
+            }
+        end
+        local retained_ticks = {}
+        for tick_index = predecessor + 1, #ticks do
+            retained_ticks[#retained_ticks + 1] = ticks[tick_index]
+        end
+        history._authoritative_ticks[index] = retained_ticks
+    end
+
+    for tick, slots in pairs(history._authoritative) do
+        if tick < oldest_retained_tick then
+            local sample_count = history._authoritative_counts[tick]
+            assert(sample_count ~= nil, "rollback authoritative count is missing")
+            history._authoritative[tick] = nil
+            history._authoritative_counts[tick] = nil
+            history._authoritative_tick_count = history._authoritative_tick_count - 1
+            history._authoritative_sample_count = history._authoritative_sample_count - sample_count
+            assert(next(slots) ~= nil, "rollback authoritative tick is empty")
+        end
+    end
+    for tick in pairs(history._effective) do
+        if tick < oldest_retained_tick then
+            history._effective[tick] = nil
+            history._effective_tick_count = history._effective_tick_count - 1
+        end
+    end
+    for tick in pairs(history._records) do
+        if tick < oldest_retained_tick then
+            history._records[tick] = nil
+            history._record_tick_count = history._record_tick_count - 1
+        end
+    end
+    history._oldest_retained_tick = oldest_retained_tick
+    return rollback_input_history.diagnostics(history)
 end
 
 return rollback_input_history

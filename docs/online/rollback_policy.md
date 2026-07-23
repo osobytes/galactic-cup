@@ -102,19 +102,74 @@ Mutating one cannot change retained history or a later read.
 ## Initial rollback window
 
 OMP-2 uses a maximum rollback depth of **30 input ticks**, exactly **500 ms at
-60 Hz**. `sim.rollback_input_history` publishes those two constants but does
-not evict records: bounded snapshot/history storage is the responsibility of
-the next rollback-history layer.
+60 Hz**. `sim.rollback_input_history` publishes those two constants, and
+`sim.rollback_snapshot_history` uses the tick count as its default maximum.
 
-That layer must retain the current start-of-tick boundary plus the preceding
-30 boundaries (31 boundaries total). A correction whose earliest divergence
-requires a boundary more than 30 ticks behind the current simulation tick is
-unrecoverable in this first policy. It must produce the explicit late-input
-failure/desynchronized state defined by restore/resimulation work; it must not
-clamp the tick, invent a snapshot, overwrite current state, or silently ignore
-the correction. The 30-tick bound is an initial laboratory decision to make
-memory, CPU, and failure behavior measurable, not a production internet
-latency promise.
+Snapshot history retains the current start-of-tick boundary plus the preceding
+30 boundaries: exactly 31 ring positions. `store` derives the boundary key
+from `snapshot.state.input_tick`; callers cannot provide a second tick that
+could disagree. Advancing the present boundary deterministically evicts every
+stored tick below `present - 30`. Lookup identifies the present boundary, an
+older retained boundary, a gap inside the supported range, or a tick outside
+the window. Stored snapshots and lookup results are independent copies.
+
+The history canonically encodes each insertion to maintain exact retained-byte
+accounting. Hashes remain lazy and cached: ordinary storage does not hash or
+perform another canonical encoding solely for diagnostics, and replacement
+invalidates the old cached hash. The final full-time boundary is stored like
+any other start-of-tick boundary even though the finished state must not
+consume another `InputFrame`.
+
+After snapshot eviction, the session calls
+`prune_before(input_history, oldest_retained_tick)`. Input history removes
+authoritative, effective, and diagnostic records below that public floor but
+keeps one copied authoritative predecessor per slot. Predictions at the oldest
+retained boundary therefore preserve held/axis continuity without retaining an
+unbounded timeline. Per-slot sorted tick indexes and binary predecessor lookup
+make materialization depend on bounded retained history rather than scanning
+every historical tick. Diagnostics expose the floor, newest retained tick,
+record/sample counts, anchor count, confirmed tick, and pending divergence.
+
+The floor only advances. A valid authoritative arrival below it returns the
+recoverable `outside_window` result without mutation. Pruning refuses with
+`pending_divergence` if it would discard an unconsumed correction; the caller
+must first transfer that divergence to the rollback session. Confirmation
+never moves backward, including when already-confirmed records are pruned.
+
+Resimulation can finish before the former predicted present, including by
+reaching full time earlier. If corrected simulation ends at boundary `N`, that
+boundary is retained but `InputFrame N` was not consumed. The session must
+discard snapshot boundaries strictly after `N` with
+`snapshot_history.truncate_after(..., N)` and discard effective input/record
+ticks greater than or equal to `N` with `input_history.truncate_from(..., N)`.
+The input operation preserves authoritative arrivals, prediction indexes,
+anchors, and monotonic confirmation. It clears a pending earliest divergence
+only when that divergence starts inside the wholly discarded tail. Authority
+for a discarded effective tick therefore remains ordinary upstream data and
+cannot create a false correction until some later timeline materializes that
+tick again.
+
+The snapshot retention floor is also monotonic. Tail truncation moves the
+present boundary backward but never makes already-evicted history restorable.
+It rejects malformed, missing, or outside-window final boundaries without
+mutation. A normal #70 correction follows this storage order:
+
+1. Consume the earliest divergence and restore its retained snapshot.
+2. Resimulate, replacing snapshots and effective frames along the corrected
+   timeline.
+3. Store the corrected final/present boundary `N`.
+4. Call snapshot `truncate_after(N)`, then input `truncate_from(N)` if the
+   corrected timeline did not return to the former present.
+5. Advance input pruning from the snapshot diagnostics
+   `oldest_supported_tick`.
+
+A correction whose earliest divergence requires a boundary more than 30 ticks
+behind the current simulation tick is unrecoverable in this first policy. It
+must produce the explicit late-input failure/desynchronized state defined by
+restore/resimulation work; it must not clamp the tick, invent a snapshot,
+overwrite current state, or silently ignore the correction. The 30-tick bound
+is an initial laboratory decision to make memory, CPU, and failure behavior
+measurable, not a production internet latency promise.
 
 ## Public operations
 
@@ -128,3 +183,20 @@ latency promise.
 - `earliest_divergence(...)` peeks at the current correction batch;
   `consume_earliest_divergence(...)` transfers that boundary to the rollback
   session before resimulation.
+- `prune_before(...)` advances the retained floor after snapshot eviction;
+  `diagnostics(...)` reports the bounded range and record/sample counts.
+- `truncate_from(history, boundary_tick)` removes effective frames and records
+  at or after a corrected final boundary without discarding authority.
+
+`sim.rollback_snapshot_history` provides:
+
+- `new(max_rollback_ticks?)` for the fixed-capacity boundary ring.
+- `store(history, snapshot)` for insertion, replacement, and deterministic
+  eviction keyed by the snapshot's own `input_tick`.
+- `lookup(history, tick)` with `present`, `retained`, `missing`, and
+  `outside_window` results.
+- `boundary_hash(history, tick)` for lazy cached diagnostics.
+- `truncate_after(history, boundary_tick)` keeps the named corrected boundary,
+  makes it present, and removes only later snapshots.
+- `diagnostics(history)` for capacity, retained count/range, and canonical byte
+  totals.

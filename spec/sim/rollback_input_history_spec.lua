@@ -209,6 +209,155 @@ t.describe("OMP-2 rollback input history", function()
         t.eq(retained_authoritative.sample.move_x, 70)
     end)
 
+    t.it("prunes through a public floor while retaining one prediction anchor per slot", function()
+        local history = rollback_input_history.new(sources())
+        assert(rollback_input_history.add_authoritative(history, 0, 1, sample(10, 0, 0, 0)))
+        assert(rollback_input_history.add_authoritative(history, 5, 1, sample(50, 0, 0, 0)))
+        assert(rollback_input_history.add_authoritative(history, 10, 1, sample(100, 0, 0, 0)))
+        for tick = 0, 10 do
+            rollback_input_history.materialize(history, tick)
+        end
+
+        local diagnostics = assert(rollback_input_history.prune_before(history, 8))
+        t.eq(diagnostics.oldest_retained_tick, 8)
+        t.eq(diagnostics.newest_retained_tick, 10)
+        t.eq(diagnostics.authoritative_tick_count, 1)
+        t.eq(diagnostics.authoritative_sample_count, 1)
+        t.eq(diagnostics.effective_tick_count, 3)
+        t.eq(diagnostics.record_tick_count, 3)
+        t.eq(diagnostics.predecessor_anchor_count, 1)
+        t.eq(rollback_input_history.authoritative_record(history, 5, 1), nil)
+
+        local replayed = rollback_input_history.materialize(history, 8)
+        t.eq(replayed.slots[1].move_x, 50, "the copied predecessor anchors prediction")
+        local rejected, message, code =
+            rollback_input_history.add_authoritative(history, 7, 1, sample(70, 0, 0, 0))
+        t.eq(rejected, nil)
+        t.eq(code, "outside_window")
+        t.is_true(assert(message):match("older than retained tick 8") ~= nil)
+    end)
+
+    t.it("never prunes an unconsumed divergence and preserves monotonic confirmation", function()
+        local history = rollback_input_history.new(sources())
+        for tick = 0, 2 do
+            add_full_tick(history, tick)
+            rollback_input_history.materialize(history, tick)
+        end
+        t.eq(rollback_input_history.confirmed_tick(history), 2)
+        assert(rollback_input_history.add_authoritative(history, 3, 1, sample(30, 0, 0, 0)))
+        rollback_input_history.materialize(history, 3)
+        local correction =
+            assert(rollback_input_history.add_authoritative(history, 3, 2, sample(-30, 0, 0, 0)))
+        t.eq(correction.earliest_divergence, 3)
+
+        local pruned, _, code = rollback_input_history.prune_before(history, 4)
+        t.eq(pruned, nil)
+        t.eq(code, "pending_divergence")
+        t.eq(rollback_input_history.diagnostics(history).oldest_retained_tick, 0)
+        t.eq(rollback_input_history.consume_earliest_divergence(history), 3)
+        local replayed = rollback_input_history.materialize(history, 3)
+        t.eq(replayed.slots[2].move_x, -30, "resimulation replaces the effective record")
+        local replaced = assert(rollback_input_history.record(history, 3))
+        t.eq(replaced.slots[2].sample.move_x, -30)
+        t.eq(rollback_input_history.diagnostics(history).effective_tick_count, 4)
+
+        assert(rollback_input_history.prune_before(history, 3))
+        for index = 2, input_frame.SLOT_COUNT do
+            if index ~= 2 then
+                assert(
+                    rollback_input_history.add_authoritative(
+                        history,
+                        3,
+                        index,
+                        input_frame.neutral_sample()
+                    )
+                )
+            end
+        end
+        t.eq(rollback_input_history.confirmed_tick(history), 3)
+    end)
+
+    t.it("truncates only the obsolete effective tail and preserves earlier divergence", function()
+        local history = rollback_input_history.new(sources())
+        rollback_input_history.materialize(history, 1)
+        rollback_input_history.materialize(history, 4)
+        assert(rollback_input_history.add_authoritative(history, 1, 1, sample(10, 0, 0, 0)))
+        assert(rollback_input_history.add_authoritative(history, 4, 1, sample(40, 0, 0, 0)))
+        t.eq(rollback_input_history.earliest_divergence(history), 1)
+
+        local truncated = assert(rollback_input_history.truncate_from(history, 4))
+        t.eq(truncated.effective_removed, 1)
+        t.eq(truncated.records_removed, 1)
+        t.eq(truncated.cleared_divergence, false)
+        t.eq(truncated.diagnostics.earliest_divergence, 1)
+        t.eq(rollback_input_history.record(history, 4), nil)
+        t.is_true(rollback_input_history.authoritative_record(history, 4, 1) ~= nil)
+
+        local bounded = rollback_input_history.new(sources())
+        assert(rollback_input_history.prune_before(bounded, 3))
+        local rejected, _, code = rollback_input_history.truncate_from(bounded, 2)
+        t.eq(rejected, nil)
+        t.eq(code, "outside_window")
+        ---@type any
+        local malformed_tick = 3.5
+        rejected, _, code = rollback_input_history.truncate_from(bounded, malformed_tick)
+        t.eq(rejected, nil)
+        t.eq(code, "malformed")
+        t.eq(rollback_input_history.diagnostics(bounded).oldest_retained_tick, 3)
+    end)
+
+    t.it(
+        "fails malformed source configuration loudly and malformed arrivals recoverably",
+        function()
+            ---@type any
+            local malformed_sources = sources()
+            malformed_sources[8] = "spectator"
+            t.is_true(not pcall(rollback_input_history.new, malformed_sources))
+
+            local history = rollback_input_history.new(sources())
+            local accepted, _, code = rollback_input_history.add_authoritative(
+                history,
+                0,
+                9,
+                input_frame.neutral_sample()
+            )
+            t.eq(accepted, nil)
+            t.eq(code, "malformed")
+            accepted, _, code = rollback_input_history.add_authoritative(
+                history,
+                0,
+                1,
+                { move_x = 999, move_y = 0, held = 0, edges = 0 }
+            )
+            t.eq(accepted, nil)
+            t.eq(code, "malformed")
+            t.eq(rollback_input_history.diagnostics(history).authoritative_sample_count, 0)
+        end
+    )
+
+    t.it("keeps a 7,201-tick three-delay fixture bounded", function()
+        local history = rollback_input_history.new(sources())
+        for tick = 0, 7200 do
+            local arrived_tick = tick - 3
+            if arrived_tick >= 0 then
+                local value = sample((arrived_tick % 255) - 127, 0, 0, 0)
+                add_full_tick(history, arrived_tick, value)
+                rollback_input_history.consume_earliest_divergence(history)
+            end
+            rollback_input_history.materialize(history, tick)
+            assert(rollback_input_history.prune_before(history, math.max(0, tick - 30)))
+        end
+
+        local diagnostics = rollback_input_history.diagnostics(history)
+        t.eq(diagnostics.oldest_retained_tick, 7170)
+        t.eq(diagnostics.newest_retained_tick, 7200)
+        t.is_true(diagnostics.authoritative_tick_count <= 31)
+        t.is_true(diagnostics.authoritative_sample_count <= 31 * input_frame.SLOT_COUNT)
+        t.is_true(diagnostics.effective_tick_count <= 31)
+        t.is_true(diagnostics.record_tick_count <= 31)
+        t.eq(diagnostics.predecessor_anchor_count, input_frame.SLOT_COUNT)
+    end)
+
     t.it("pins the initial rollback window to thirty 60 Hz ticks", function()
         t.eq(rollback_input_history.ROLLBACK_WINDOW_TICKS, 30)
         t.eq(rollback_input_history.ROLLBACK_WINDOW_MILLISECONDS, 500)
