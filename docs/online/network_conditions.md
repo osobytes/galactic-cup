@@ -13,6 +13,14 @@ Transport time and match input time are deliberately separate integers:
 - `drain` advances only the transport clock. A final input can therefore be
   resent and recovered while the match remains at the same simulation tick.
 
+Both clocks currently allow exact integers from zero through `2147483647`, but
+they remain separate contracts. `MAX_TRANSPORT_TICK` owns the delivery bound.
+A send or resend is rejected before retaining authority, consuming RNG, or
+changing counters when the profile's maximum possible arrival would exceed
+that bound. `drain` preflights its entire requested transport range the same
+way, and `poll` rejects ticks above the bound. No accepted envelope can become
+undrainable through integer overflow.
+
 ## Profiles
 
 `data.network_profiles` contains the exact OMP-2 configurations. Rates are
@@ -43,7 +51,15 @@ the copied current row, so a consumer can feed every result directly to:
 
 ```lua
 for _, record in ipairs(network_conditions.records(delivery)) do
-    rollback_input_history.add_authoritative(history, record.tick, delivery.source_slot, record.sample)
+    local accepted, err, code = rollback_input_history.add_authoritative(
+        history,
+        record.tick,
+        delivery.source_slot,
+        record.sample
+    )
+    if accepted == nil then
+        return nil, err, code
+    end
 end
 ```
 
@@ -105,8 +121,9 @@ Both arrive together.
 ```
 
 This makes equal-arrival order stable across runtimes. The `reordered` counter
-increments once for a unique sequence that is eventually delivered after a
-higher sequence. Duplicate copies do not inflate that counter.
+increments when an original envelope is eventually delivered after a higher
+original sequence. Every sequence has exactly one original, so duplicate
+copies do not need a lifetime identity set and cannot inflate that counter.
 
 ## Counters
 
@@ -123,6 +140,20 @@ higher sequence. Duplicate copies do not inflate that counter.
 
 `pending` reports queued delivery envelopes. Counter and pending reads do not
 advance either clock.
+
+Delivered-sample bookkeeping is also bounded. Each sample is represented by a
+collision-free mixed-radix integer packing of the two 255-value axes, 128-value
+held mask, and 32-value edge mask. This is an exact identity, not a hash. A
+ledger row remains only while that tick is among the slot's seven retained
+authoritative records or is referenced by a pending envelope. This is enough
+to de-duplicate redundant and reordered history, detect an impossible
+conflict, and track a retained drain target without keeping match-lifetime
+sample tables.
+
+`diagnostics` returns retained-authority, delivered-ledger, pending-envelope,
+and pending-record-reference counts for memory evidence. `sample_key` exposes
+the exact packed identity for diagnostic boundary tests; it is not a production
+wire encoding.
 
 ## Drain and resend
 
@@ -152,8 +183,8 @@ The OMP-2 runner should consume this module as follows:
    `rollback_input_history.add_authoritative` using `delivery.source_slot`.
 5. After the last match input tick, call `drain` for final remote rows without
    stepping the reference or client match.
-6. Record copied counters and assert `pending == 0` before final convergence
-   evidence.
+6. Record copied counters and diagnostics, then assert `pending == 0` and a
+   bounded delivered ledger before final convergence evidence.
 
 This contract simulates delivery conditions only. Restore, resimulation,
 confirmed events, presentation reconciliation, and real production transport

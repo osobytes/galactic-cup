@@ -161,6 +161,76 @@ t.describe("OMP-2 deterministic network conditions", function()
         t.eq(clamped_receipt.arrival_tick, 12)
     end)
 
+    t.it("bounds transport arrival before mutating send or drain state", function()
+        local maximum = network_conditions.MAX_TRANSPORT_TICK
+        t.eq(maximum, 2147483647)
+
+        local rejected = network_conditions.new(profile({ base_delay_ticks = 3 }), 7)
+        local receipt, message, code =
+            network_conditions.send(rejected, maximum - 2, 1, 0, sample(1))
+        t.eq(receipt, nil)
+        t.eq(code, "malformed")
+        t.is_true(assert(message):match("transport tick limit") ~= nil)
+        t.eq(network_conditions.counters(rejected).sent, 0)
+        t.eq(network_conditions.diagnostics(rejected).retained_authoritative_records, 0)
+
+        local boundary = assert(network_conditions.send(rejected, maximum - 3, 1, 0, sample(1)))
+        t.eq(boundary.sequence, 1, "rejected send consumes neither sequence nor RNG state")
+        t.eq(boundary.arrival_tick, maximum)
+        t.eq(delivery_schedule(network_conditions.poll(rejected, maximum)), "1:0@2147483647")
+        t.is_true(
+            not pcall(network_conditions.poll, rejected, maximum + 1),
+            "poll rejects transport ticks above the exact bound"
+        )
+
+        local draining = network_conditions.new(profile({ base_delay_ticks = 3 }), 9)
+        assert(network_conditions.send(draining, maximum - 6, 1, 4, sample(4)))
+        network_conditions.poll(draining, maximum - 3)
+        local before = network_conditions.counters(draining)
+        local result, drain_message, drain_code = network_conditions.drain(
+            draining,
+            maximum - 2,
+            1,
+            { { source_slot = 1, input_tick = 4 } }
+        )
+        t.eq(result, nil)
+        t.eq(drain_code, "malformed")
+        t.is_true(assert(drain_message):match("transport tick limit") ~= nil)
+        t.eq(network_conditions.counters(draining).sent, before.sent)
+        t.eq(network_conditions.pending(draining), 0)
+    end)
+
+    t.it("packs sample extrema into distinct collision-free diagnostic keys", function()
+        local minimum = assert(input_frame.new_sample({
+            move_x = -127,
+            move_y = -127,
+            held = 0,
+            edges = 0,
+        }))
+        local before_rollover = assert(input_frame.new_sample({
+            move_x = -127,
+            move_y = 127,
+            held = 127,
+            edges = 31,
+        }))
+        local after_rollover = assert(input_frame.new_sample({
+            move_x = -126,
+            move_y = -127,
+            held = 0,
+            edges = 0,
+        }))
+        local maximum = assert(input_frame.new_sample({
+            move_x = 127,
+            move_y = 127,
+            held = 127,
+            edges = 31,
+        }))
+        t.eq(assert(network_conditions.sample_key(minimum)), 0)
+        t.eq(assert(network_conditions.sample_key(before_rollover)), 255 * 128 * 32 - 1)
+        t.eq(assert(network_conditions.sample_key(after_rollover)), 255 * 128 * 32)
+        t.eq(assert(network_conditions.sample_key(maximum)), 255 * 255 * 128 * 32 - 1)
+    end)
+
     t.it("hits both jitter bounds and reorders only by natural arrival", function()
         local conditions = network_conditions.new(
             profile({ base_delay_ticks = 2, jitter_min_ticks = -2, jitter_max_ticks = 2 }),
@@ -174,6 +244,11 @@ t.describe("OMP-2 deterministic network conditions", function()
         t.eq(delivery_schedule(network_conditions.poll(conditions, 1)), "2:0@1")
         t.eq(delivery_schedule(network_conditions.poll(conditions, 4)), "1:0@4")
         t.eq(network_conditions.counters(conditions).reordered, 1)
+        t.eq(
+            network_conditions.counters(conditions).history_recovered,
+            1,
+            "the reordered original does not recount history recovered by the later sequence"
+        )
     end)
 
     t.it("follows the literal independent-loss schedule for seed 85", function()
@@ -200,6 +275,7 @@ t.describe("OMP-2 deterministic network conditions", function()
         t.eq(deliveries[1].sequence, deliveries[2].sequence)
         t.eq(deliveries[1].current.tick, deliveries[2].current.tick)
         t.eq(network_conditions.counters(conditions).duplicated, 2)
+        t.eq(network_conditions.counters(conditions).history_recovered, 0)
     end)
 
     t.it("applies a literal three-tick burst per source slot", function()
@@ -244,6 +320,18 @@ t.describe("OMP-2 deterministic network conditions", function()
         t.eq(records[1].tick, 0)
         t.eq(records[2].tick, 1)
         t.eq(network_conditions.counters(recovered).history_recovered, 1)
+
+        local oldest = network_conditions.new(profile({ independent_loss_rate = 0.5 }), 290)
+        for tick = 0, 6 do
+            assert(network_conditions.send(oldest, tick, 1, tick, sample(60 + tick)))
+        end
+        local oldest_delivery = network_conditions.poll(oldest, 6)
+        t.eq(#oldest_delivery, 1)
+        local oldest_records = network_conditions.records(oldest_delivery[1])
+        t.eq(#oldest_records, 7)
+        t.eq(oldest_records[1].tick, 0, "the oldest of six redundant rows is recovered")
+        t.eq(oldest_records[7].tick, 6)
+        t.eq(network_conditions.counters(oldest).history_recovered, 6)
     end)
 
     t.it("rejects conflicting history and resends without adding an input row", function()
@@ -321,5 +409,44 @@ t.describe("OMP-2 deterministic network conditions", function()
         t.is_true(counters.duplicated >= 5 and counters.duplicated <= 60)
         t.is_true(counters.reordered > 0)
         t.is_true(counters.history_recovered > 0)
+    end)
+
+    t.it("bounds retained diagnostics across a full seven-remote fixture", function()
+        local conditions = network_conditions.new(network_profiles.clean, 1201)
+        local last_tick = 7200
+        local remote_slots = 7
+        for tick = 0, last_tick do
+            for source_slot = 1, remote_slots do
+                assert(
+                    network_conditions.send(
+                        conditions,
+                        tick,
+                        source_slot,
+                        tick,
+                        sample((tick + source_slot) % 128)
+                    )
+                )
+            end
+            network_conditions.poll(conditions, tick)
+            if tick % 600 == 0 then
+                local diagnostics = network_conditions.diagnostics(conditions)
+                t.is_true(
+                    diagnostics.retained_authoritative_records
+                        <= remote_slots * network_conditions.RETAINED_RECORDS
+                )
+                t.is_true(
+                    diagnostics.delivered_ledger_entries
+                        <= diagnostics.retained_authoritative_records
+                            + diagnostics.pending_record_references
+                )
+            end
+        end
+
+        local diagnostics = network_conditions.diagnostics(conditions)
+        t.eq(diagnostics.retained_authoritative_records, 49)
+        t.eq(diagnostics.delivered_ledger_entries, 49)
+        t.eq(diagnostics.pending_envelopes, 0)
+        t.eq(diagnostics.pending_record_references, 0)
+        t.eq(network_conditions.counters(conditions).sent, 50407)
     end)
 end)

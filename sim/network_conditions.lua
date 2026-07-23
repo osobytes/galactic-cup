@@ -43,6 +43,12 @@ local input_frame = require("sim.input_frame")
 ---@field reordered integer -- Unique sequence identities delivered after a later sequence.
 ---@field history_recovered integer -- First-seen samples recovered from redundant history.
 
+---@class NetworkConditionDiagnostics
+---@field retained_authoritative_records integer
+---@field delivered_ledger_entries integer
+---@field pending_envelopes integer
+---@field pending_record_references integer
+
 ---@class NetworkResendRequest
 ---@field source_slot integer
 ---@field input_tick integer
@@ -62,10 +68,10 @@ local input_frame = require("sim.input_frame")
 ---@field _clock_tick integer
 ---@field _records table<integer, NetworkInputRecord[]>
 ---@field _pending NetworkDelivery[]
+---@field _pending_references table<integer, table<integer, integer>>
 ---@field _burst_until table<integer, integer>
----@field _delivered_samples table<integer, table<integer, InputSample>>
+---@field _delivered_fingerprints table<integer, table<integer, integer>>
 ---@field _max_delivered_sequence integer
----@field _reordered_sequences table<integer, boolean>
 ---@field _counters NetworkConditionCounters
 
 ---@class NetworkConditionsModule
@@ -73,6 +79,11 @@ local network_conditions = {}
 
 network_conditions.HISTORY_RECORDS = 6
 network_conditions.RETAINED_RECORDS = network_conditions.HISTORY_RECORDS + 1
+network_conditions.MAX_TRANSPORT_TICK = 2147483647
+
+local AXIS_CARDINALITY = input_frame.MOVE_SCALE * 2 + 1
+local HELD_CARDINALITY = 128
+local EDGE_CARDINALITY = 32
 
 ---@param value any
 ---@return boolean
@@ -201,8 +212,14 @@ end
 
 ---@param tick any
 ---@return boolean
-local function is_bounded_tick(tick)
+local function is_input_tick(tick)
     return is_integer(tick) and tick >= 0 and tick <= input_frame.MAX_TICK
+end
+
+---@param tick any
+---@return boolean
+local function is_transport_tick(tick)
+    return is_integer(tick) and tick >= 0 and tick <= network_conditions.MAX_TRANSPORT_TICK
 end
 
 ---@param source_slot any
@@ -232,6 +249,31 @@ end
 local function jitter_from_roll(profile, roll)
     local width = profile.jitter_max_ticks - profile.jitter_min_ticks + 1
     return profile.jitter_min_ticks + math.floor(roll * width)
+end
+
+---@param profile NetworkProfile
+---@param send_tick integer
+---@return integer
+local function maximum_arrival_tick(profile, send_tick)
+    return math.max(send_tick, send_tick + profile.base_delay_ticks + profile.jitter_max_ticks)
+end
+
+---@param profile NetworkProfile
+---@param send_tick integer
+---@return boolean
+local function arrival_fits(profile, send_tick)
+    return maximum_arrival_tick(profile, send_tick) <= network_conditions.MAX_TRANSPORT_TICK
+end
+
+-- This is a collision-free mixed-radix encoding, not a hash. InputSample's
+-- declared bounds keep the result below 2^53 on every supported runtime.
+---@param sample InputSample
+---@return integer
+local function sample_fingerprint(sample)
+    local packed = sample.move_x + input_frame.MOVE_SCALE
+    packed = packed * AXIS_CARDINALITY + sample.move_y + input_frame.MOVE_SCALE
+    packed = packed * HELD_CARDINALITY + sample.held
+    return packed * EDGE_CARDINALITY + sample.edges
 end
 
 ---@param records NetworkInputRecord[]
@@ -318,6 +360,55 @@ local function packet_history(conditions, source_slot, input_tick)
 end
 
 ---@param conditions NetworkConditions
+---@param delivery NetworkDelivery
+---@param delta integer
+local function adjust_pending_references(conditions, delivery, delta)
+    local references = conditions._pending_references[delivery.source_slot]
+    if references == nil then
+        references = {}
+        conditions._pending_references[delivery.source_slot] = references
+    end
+    for _, record in ipairs(delivery.history) do
+        references[record.tick] = (references[record.tick] or 0) + delta
+        assert(references[record.tick] >= 0, "network pending history reference underflow")
+        if references[record.tick] == 0 then
+            references[record.tick] = nil
+        end
+    end
+    local current_tick = delivery.current.tick
+    references[current_tick] = (references[current_tick] or 0) + delta
+    assert(references[current_tick] >= 0, "network pending current reference underflow")
+    if references[current_tick] == 0 then
+        references[current_tick] = nil
+    end
+end
+
+---@param conditions NetworkConditions
+---@param source_slot integer
+---@param input_tick integer
+---@return boolean
+local function record_is_retained(conditions, source_slot, input_tick)
+    return find_record(conditions, source_slot, input_tick) ~= nil
+end
+
+-- Delivered identities remain only while the corresponding authority is
+-- retained or a pending envelope can still repeat it.
+---@param conditions NetworkConditions
+local function prune_delivered_ledger(conditions)
+    for source_slot, delivered in pairs(conditions._delivered_fingerprints) do
+        local pending = conditions._pending_references[source_slot]
+        for input_tick in pairs(delivered) do
+            if
+                not record_is_retained(conditions, source_slot, input_tick)
+                and (pending == nil or pending[input_tick] == nil)
+            then
+                delivered[input_tick] = nil
+            end
+        end
+    end
+end
+
+---@param conditions NetworkConditions
 ---@param source_slot integer
 ---@param send_tick integer
 ---@param input_tick integer
@@ -383,12 +474,14 @@ local function schedule_packet(
         history = packet_history(conditions, source_slot, input_tick),
     }
     conditions._pending[#conditions._pending + 1] = delivery
+    adjust_pending_references(conditions, delivery, 1)
 
     local duplicated = duplicate_roll < profile.duplication_rate
     if duplicated then
         local duplicate = copy_delivery(delivery)
         duplicate.duplicate_ordinal = 1
         conditions._pending[#conditions._pending + 1] = duplicate
+        adjust_pending_references(conditions, duplicate, 1)
         conditions._counters.duplicated = conditions._counters.duplicated + 1
     end
 
@@ -409,13 +502,16 @@ end
 ---@param sample any
 ---@return boolean?, string?, NetworkConditionErrorCode?
 local function validate_send(conditions, send_tick, source_slot, input_tick, sample)
-    if not is_bounded_tick(send_tick) or send_tick < conditions._clock_tick then
+    if not is_transport_tick(send_tick) or send_tick < conditions._clock_tick then
         return failure("malformed", "network send tick must be bounded and monotonic")
+    end
+    if not arrival_fits(conditions._profile, send_tick) then
+        return failure("malformed", "network send can arrive beyond the transport tick limit")
     end
     if not is_source_slot(source_slot) then
         return failure("malformed", "network source slot must be between one and eight")
     end
-    if not is_bounded_tick(input_tick) then
+    if not is_input_tick(input_tick) then
         return failure("malformed", "network input tick must be a bounded non-negative integer")
     end
     local ok, err = input_frame.validate_sample(sample)
@@ -441,10 +537,10 @@ function network_conditions.new(profile, seed)
         _clock_tick = -1,
         _records = {},
         _pending = {},
+        _pending_references = {},
         _burst_until = {},
-        _delivered_samples = {},
+        _delivered_fingerprints = {},
         _max_delivered_sequence = 0,
-        _reordered_sequences = {},
         _counters = {
             sent = 0,
             delivered = 0,
@@ -478,7 +574,9 @@ function network_conditions.send(conditions, send_tick, source_slot, input_tick,
         return nil, retain_err, retain_code
     end
     conditions._clock_tick = send_tick
-    return schedule_packet(conditions, source_slot, send_tick, input_tick, duplicate)
+    local receipt = schedule_packet(conditions, source_slot, send_tick, input_tick, duplicate)
+    prune_delivered_ledger(conditions)
+    return receipt
 end
 
 -- Schedule an already-retained sample without adding another input-history row.
@@ -489,56 +587,59 @@ end
 ---@return NetworkSendReceipt?, string?, NetworkConditionErrorCode?
 function network_conditions.resend(conditions, send_tick, source_slot, input_tick)
     assert_conditions(conditions)
-    if not is_bounded_tick(send_tick) or send_tick < conditions._clock_tick then
+    if not is_transport_tick(send_tick) or send_tick < conditions._clock_tick then
         return failure("malformed", "network resend tick must be bounded and monotonic")
     end
-    if not is_source_slot(source_slot) or not is_bounded_tick(input_tick) then
+    if not arrival_fits(conditions._profile, send_tick) then
+        return failure("malformed", "network resend can arrive beyond the transport tick limit")
+    end
+    if not is_source_slot(source_slot) or not is_input_tick(input_tick) then
         return failure("malformed", "network resend slot and input tick are invalid")
     end
     if find_record(conditions, source_slot, input_tick) == nil then
         return failure("not_retained", "network resend input is outside retained history")
     end
     conditions._clock_tick = send_tick
-    return schedule_packet(conditions, source_slot, send_tick, input_tick, true)
+    local receipt = schedule_packet(conditions, source_slot, send_tick, input_tick, true)
+    prune_delivered_ledger(conditions)
+    return receipt
 end
 
 ---@param conditions NetworkConditions
 ---@param delivery NetworkDelivery
 local function record_delivery(conditions, delivery)
     conditions._counters.delivered = conditions._counters.delivered + 1
-    if
-        delivery.sequence < conditions._max_delivered_sequence
-        and not conditions._reordered_sequences[delivery.sequence]
-    then
-        conditions._reordered_sequences[delivery.sequence] = true
-        conditions._counters.reordered = conditions._counters.reordered + 1
+    if delivery.duplicate_ordinal == 0 then
+        if delivery.sequence < conditions._max_delivered_sequence then
+            conditions._counters.reordered = conditions._counters.reordered + 1
+        end
+        conditions._max_delivered_sequence =
+            math.max(conditions._max_delivered_sequence, delivery.sequence)
     end
-    conditions._max_delivered_sequence =
-        math.max(conditions._max_delivered_sequence, delivery.sequence)
 
-    local delivered = conditions._delivered_samples[delivery.source_slot]
+    local delivered = conditions._delivered_fingerprints[delivery.source_slot]
     if delivered == nil then
         delivered = {}
-        conditions._delivered_samples[delivery.source_slot] = delivered
+        conditions._delivered_fingerprints[delivery.source_slot] = delivered
     end
     for _, record in ipairs(delivery.history) do
         local existing = delivered[record.tick]
         assert(
-            existing == nil or samples_equal(existing, record.sample),
+            existing == nil or existing == sample_fingerprint(record.sample),
             "network history delivered conflicting authority"
         )
         if existing == nil then
-            delivered[record.tick] = copy_sample(record.sample)
+            delivered[record.tick] = sample_fingerprint(record.sample)
             conditions._counters.history_recovered = conditions._counters.history_recovered + 1
         end
     end
     local existing = delivered[delivery.current.tick]
     assert(
-        existing == nil or samples_equal(existing, delivery.current.sample),
+        existing == nil or existing == sample_fingerprint(delivery.current.sample),
         "network current delivery conflicts with prior authority"
     )
     if existing == nil then
-        delivered[delivery.current.tick] = copy_sample(delivery.current.sample)
+        delivered[delivery.current.tick] = sample_fingerprint(delivery.current.sample)
     end
 end
 
@@ -563,7 +664,7 @@ end
 function network_conditions.poll(conditions, delivery_tick)
     assert_conditions(conditions)
     assert(
-        is_bounded_tick(delivery_tick) and delivery_tick >= conditions._clock_tick,
+        is_transport_tick(delivery_tick) and delivery_tick >= conditions._clock_tick,
         "network poll tick must be bounded and monotonic"
     )
     conditions._clock_tick = delivery_tick
@@ -573,6 +674,7 @@ function network_conditions.poll(conditions, delivery_tick)
     for _, delivery in ipairs(conditions._pending) do
         if delivery.arrival_tick <= delivery_tick then
             due[#due + 1] = delivery
+            adjust_pending_references(conditions, delivery, -1)
         else
             pending[#pending + 1] = delivery
         end
@@ -585,6 +687,7 @@ function network_conditions.poll(conditions, delivery_tick)
         record_delivery(conditions, delivery)
         result[index] = copy_delivery(delivery)
     end
+    prune_delivered_ledger(conditions)
     return result
 end
 
@@ -611,6 +714,46 @@ function network_conditions.counters(conditions)
     }
 end
 
+---@param conditions NetworkConditions
+---@return NetworkConditionDiagnostics
+function network_conditions.diagnostics(conditions)
+    assert_conditions(conditions)
+    local retained_authoritative_records = 0
+    for _, records in pairs(conditions._records) do
+        retained_authoritative_records = retained_authoritative_records + #records
+    end
+    local delivered_ledger_entries = 0
+    for _, delivered in pairs(conditions._delivered_fingerprints) do
+        for _ in pairs(delivered) do
+            delivered_ledger_entries = delivered_ledger_entries + 1
+        end
+    end
+    local pending_record_references = 0
+    for _, references in pairs(conditions._pending_references) do
+        for _, count in pairs(references) do
+            pending_record_references = pending_record_references + count
+        end
+    end
+    return {
+        retained_authoritative_records = retained_authoritative_records,
+        delivered_ledger_entries = delivered_ledger_entries,
+        pending_envelopes = #conditions._pending,
+        pending_record_references = pending_record_references,
+    }
+end
+
+-- Return the collision-free packed diagnostic identity used by the bounded
+-- delivered ledger. This is not a hash or a production wire encoding.
+---@param sample InputSample
+---@return integer?, string?, NetworkConditionErrorCode?
+function network_conditions.sample_key(sample)
+    local ok, err = input_frame.validate_sample(sample)
+    if not ok then
+        return failure("malformed", err or "network input sample is malformed")
+    end
+    return sample_fingerprint(sample)
+end
+
 -- Return a delivery's redundant rows followed by its current row. The result
 -- is copied and can be passed in order to rollback_input_history.add_authoritative.
 ---@param delivery NetworkDelivery
@@ -625,7 +768,7 @@ end
 ---@param request NetworkResendRequest
 ---@return boolean
 local function request_delivered(conditions, request)
-    local delivered = conditions._delivered_samples[request.source_slot]
+    local delivered = conditions._delivered_fingerprints[request.source_slot]
     return delivered ~= nil and delivered[request.input_tick] ~= nil
 end
 
@@ -653,7 +796,7 @@ local function validated_requests(requests)
         if
             type(request) ~= "table"
             or not is_source_slot(request.source_slot)
-            or not is_bounded_tick(request.input_tick)
+            or not is_input_tick(request.input_tick)
         then
             return failure("malformed", "network drain request is invalid")
         end
@@ -687,13 +830,16 @@ end
 function network_conditions.drain(conditions, start_tick, max_ticks, requests)
     assert_conditions(conditions)
     if
-        not is_bounded_tick(start_tick)
+        not is_transport_tick(start_tick)
         or start_tick < conditions._clock_tick
         or not is_integer(max_ticks)
         or max_ticks < 1
-        or start_tick + max_ticks - 1 > input_frame.MAX_TICK
+        or start_tick + max_ticks - 1 > network_conditions.MAX_TRANSPORT_TICK
     then
         return failure("malformed", "network drain tick range must be bounded and monotonic")
+    end
+    if not arrival_fits(conditions._profile, start_tick + max_ticks - 1) then
+        return failure("malformed", "network drain can arrive beyond the transport tick limit")
     end
     local sorted, err, code = validated_requests(requests)
     if sorted == nil then
