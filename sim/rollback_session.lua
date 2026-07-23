@@ -1,0 +1,594 @@
+-- Pure rollback coordinator. It owns the live MatchState and composes bounded
+-- input/snapshot histories into deterministic restore and resimulation.
+
+local fixed_clock = require("sim.fixed_clock")
+local input_frame = require("sim.input_frame")
+local match = require("sim.match")
+local match_snapshot = require("sim.match_snapshot")
+local rollback_input_history = require("sim.rollback_input_history")
+local rollback_snapshot_history = require("sim.rollback_snapshot_history")
+
+---@alias RollbackSessionStatus "active"|"finished"|"late_input_unrecoverable"
+---@alias RollbackSessionErrorCode "match_finished"|"late_input_unrecoverable"
+
+---@class RollbackOutputStateView
+---@field score { home: integer, away: integer }
+---@field time_left number
+---@field finished boolean
+
+---@class RollbackTickOutput
+---@field tick integer -- Causal input tick.
+---@field start_boundary integer
+---@field end_boundary integer
+---@field input RollbackInputTickRecord
+---@field events MatchEvent[]
+---@field state RollbackOutputStateView
+---@field finished boolean
+
+---@class RollbackSessionArrival: RollbackAuthoritativeArrival
+---@field correction boolean -- Accepted authority differs from a previously consumed sample.
+
+---@class RollbackComparison
+---@field matched boolean
+---@field boundary_mismatch boolean
+---@field actual_boundary integer
+---@field expected_boundary integer
+---@field actual_hash string
+---@field expected_hash string
+---@field causal_tick integer?
+---@field first_difference MatchSnapshotDifference?
+
+---@class RollbackReconcileResult
+---@field changed boolean
+---@field status RollbackSessionStatus
+---@field causal_tick integer?
+---@field restored_boundary integer?
+---@field restore_status RollbackSnapshotLookupStatus?
+---@field old_present_boundary integer
+---@field new_present_boundary integer
+---@field corrected_from_tick integer?
+---@field corrected_through_tick integer?
+---@field replaced_from_tick integer?
+---@field replaced_through_tick integer?
+---@field corrected_outputs RollbackTickOutput[]
+---@field old_present_hash string
+---@field new_present_hash string
+---@field first_difference MatchSnapshotDifference?
+
+---@class RollbackSessionLastRollback
+---@field causal_tick integer
+---@field restored_boundary integer
+---@field old_present_boundary integer
+---@field new_present_boundary integer
+---@field old_present_hash string
+---@field new_present_hash string
+---@field first_difference MatchSnapshotDifference?
+
+---@class RollbackSessionDiagnostics
+---@field status RollbackSessionStatus
+---@field present_boundary integer
+---@field confirmed_tick integer -- Monotonic input-authority boundary.
+---@field confirmed_output_tick integer -- Confirmed input capped to outputs that exist.
+---@field rollback_count integer
+---@field correction_count integer
+---@field predicted_slot_samples integer -- Cumulative executions, including resimulation.
+---@field predicted_ticks integer -- Cumulative executions with at least one prediction.
+---@field latest_rollback_depth integer
+---@field max_rollback_depth integer
+---@field resimulated_ticks integer
+---@field late_window_failures integer
+---@field last_rollback RollbackSessionLastRollback?
+---@field last_comparison RollbackComparison?
+---@field input_history RollbackInputHistoryDiagnostics
+---@field snapshot_history RollbackSnapshotHistoryDiagnostics
+
+---@class RollbackSession
+---@field _state MatchState
+---@field _input_history RollbackInputHistory
+---@field _snapshot_history RollbackSnapshotHistory
+---@field _outputs table<integer, RollbackTickOutput>
+---@field _status RollbackSessionStatus
+---@field _rollback_count integer
+---@field _correction_count integer
+---@field _predicted_slot_samples integer
+---@field _predicted_ticks integer
+---@field _latest_rollback_depth integer
+---@field _max_rollback_depth integer
+---@field _resimulated_ticks integer
+---@field _late_window_failures integer
+---@field _late_input_tick integer?
+---@field _last_rollback RollbackSessionLastRollback?
+---@field _last_comparison RollbackComparison?
+
+---@class RollbackSessionModule
+local rollback_session = {}
+
+---@param session RollbackSession
+local function assert_session(session)
+    assert(type(session) == "table", "rollback session is required")
+    assert(type(session._state) == "table", "rollback session state is missing")
+    assert(type(session._input_history) == "table", "rollback session input history is missing")
+    assert(
+        type(session._snapshot_history) == "table",
+        "rollback session snapshot history is missing"
+    )
+end
+
+---@param sample InputSample
+---@param record RollbackInputSlotRecord
+---@return boolean
+local function sample_differs(sample, record)
+    local used = record.sample
+    return sample.move_x ~= used.move_x
+        or sample.move_y ~= used.move_y
+        or sample.held ~= used.held
+        or sample.edges ~= used.edges
+end
+
+---@param event MatchEvent
+---@return MatchEvent
+local function copy_event(event)
+    local result = {}
+    for key, value in pairs(event) do
+        assert(type(value) ~= "table", "rollback output events must contain canonical scalars")
+        result[key] = value
+    end
+    ---@cast result MatchEvent
+    return result
+end
+
+---@param events MatchEvent[]
+---@return MatchEvent[]
+local function copy_events(events)
+    local result = {}
+    for index, event in ipairs(events) do
+        result[index] = copy_event(event)
+    end
+    return result
+end
+
+---@param record RollbackInputTickRecord
+---@return RollbackInputTickRecord
+local function copy_input_record(record)
+    local slots = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        local slot = record.slots[index]
+        slots[index] = {
+            source = slot.source,
+            status = slot.status,
+            sample = assert(input_frame.new_sample(slot.sample)),
+        }
+    end
+    return { tick = record.tick, slots = slots }
+end
+
+---@param output RollbackTickOutput
+---@return RollbackTickOutput
+local function copy_output(output)
+    return {
+        tick = output.tick,
+        start_boundary = output.start_boundary,
+        end_boundary = output.end_boundary,
+        input = copy_input_record(output.input),
+        events = copy_events(output.events),
+        state = {
+            score = { home = output.state.score.home, away = output.state.score.away },
+            time_left = output.state.time_left,
+            finished = output.state.finished,
+        },
+        finished = output.finished,
+    }
+end
+
+---@param comparison RollbackComparison
+---@return RollbackComparison
+local function copy_comparison(comparison)
+    local first = comparison.first_difference
+    return {
+        matched = comparison.matched,
+        boundary_mismatch = comparison.boundary_mismatch,
+        actual_boundary = comparison.actual_boundary,
+        expected_boundary = comparison.expected_boundary,
+        actual_hash = comparison.actual_hash,
+        expected_hash = comparison.expected_hash,
+        causal_tick = comparison.causal_tick,
+        first_difference = first and {
+            path = first.path,
+            expected = first.expected,
+            actual = first.actual,
+        } or nil,
+    }
+end
+
+---@param rollback RollbackSessionLastRollback
+---@return RollbackSessionLastRollback
+local function copy_last_rollback(rollback)
+    local first = rollback.first_difference
+    return {
+        causal_tick = rollback.causal_tick,
+        restored_boundary = rollback.restored_boundary,
+        old_present_boundary = rollback.old_present_boundary,
+        new_present_boundary = rollback.new_present_boundary,
+        old_present_hash = rollback.old_present_hash,
+        new_present_hash = rollback.new_present_hash,
+        first_difference = first and {
+            path = first.path,
+            expected = first.expected,
+            actual = first.actual,
+        } or nil,
+    }
+end
+
+---@param session RollbackSession
+---@param record RollbackInputTickRecord
+local function count_predictions(session, record)
+    local predicted = 0
+    for index = 1, input_frame.SLOT_COUNT do
+        if record.slots[index].status == "predicted" then
+            predicted = predicted + 1
+        end
+    end
+    session._predicted_slot_samples = session._predicted_slot_samples + predicted
+    if predicted > 0 then
+        session._predicted_ticks = session._predicted_ticks + 1
+    end
+end
+
+---@param tick integer
+---@param record RollbackInputTickRecord
+---@param snapshot MatchSnapshot
+---@return RollbackTickOutput
+local function make_output(tick, record, snapshot)
+    local state = snapshot.state
+    return {
+        tick = tick,
+        start_boundary = tick,
+        end_boundary = tick + 1,
+        input = copy_input_record(record),
+        events = copy_events(state.events),
+        state = {
+            score = { home = state.score.home, away = state.score.away },
+            time_left = state.time_left,
+            finished = state.finished,
+        },
+        finished = state.finished,
+    }
+end
+
+---@param session RollbackSession
+---@param tick integer
+---@return RollbackTickOutput
+local function execute_tick(session, tick)
+    assert(not session._state.finished, "rollback session cannot simulate after full time")
+    assert(session._state.input_tick == tick, "rollback session boundary is inconsistent")
+    local frame, record = rollback_input_history.materialize(session._input_history, tick)
+    count_predictions(session, record)
+    match.step(session._state, fixed_clock.TICK_SECONDS, frame)
+    local boundary = match_snapshot.capture(session._state)
+    assert(
+        boundary.state.input_tick == tick + 1,
+        "rollback session step did not advance one boundary"
+    )
+    assert(rollback_snapshot_history.store(session._snapshot_history, boundary))
+    local output = make_output(tick, record, boundary)
+    session._outputs[tick] = copy_output(output)
+    return output
+end
+
+---@param session RollbackSession
+local function prune_retained_outputs(session)
+    local snapshot_diagnostics = rollback_snapshot_history.diagnostics(session._snapshot_history)
+    local floor = assert(
+        snapshot_diagnostics.oldest_supported_tick,
+        "rollback snapshot history has no supported floor"
+    )
+    assert(rollback_input_history.prune_before(session._input_history, floor))
+    for tick in pairs(session._outputs) do
+        if tick < floor then
+            session._outputs[tick] = nil
+        end
+    end
+end
+
+---@param initial_snapshot MatchSnapshot Canonical slot-mode boundary zero.
+---@param sources RollbackInputSource[] Canonical eight-slot local/remote ownership.
+---@param max_rollback_ticks integer?
+---@return RollbackSession
+function rollback_session.new(initial_snapshot, sources, max_rollback_ticks)
+    local state = match_snapshot.restore(initial_snapshot)
+    assert(state.slot_mode, "rollback session requires a slot-mode match snapshot")
+    assert(state.input_tick == 0, "rollback session requires the tick-zero boundary")
+    assert(not state.finished, "rollback session tick-zero boundary must be active")
+    local canonical = match_snapshot.capture(state)
+    local snapshots = rollback_snapshot_history.new(max_rollback_ticks)
+    assert(rollback_snapshot_history.store(snapshots, canonical))
+    return {
+        _state = match_snapshot.restore(canonical),
+        _input_history = rollback_input_history.new(sources),
+        _snapshot_history = snapshots,
+        _outputs = {},
+        _status = "active",
+        _rollback_count = 0,
+        _correction_count = 0,
+        _predicted_slot_samples = 0,
+        _predicted_ticks = 0,
+        _latest_rollback_depth = 0,
+        _max_rollback_depth = 0,
+        _resimulated_ticks = 0,
+        _late_window_failures = 0,
+        _late_input_tick = nil,
+        _last_rollback = nil,
+        _last_comparison = nil,
+    }
+end
+
+---@param session RollbackSession
+---@param tick integer
+---@param slot_index integer
+---@param sample InputSample
+---@return RollbackSessionArrival?, string?, RollbackInputHistoryErrorCode?
+function rollback_session.add_authoritative(session, tick, slot_index, sample)
+    assert_session(session)
+    local used = rollback_input_history.record(session._input_history, tick)
+    local arrival, err, code =
+        rollback_input_history.add_authoritative(session._input_history, tick, slot_index, sample)
+    if not arrival then
+        if code == "outside_window" and session._status ~= "late_input_unrecoverable" then
+            session._status = "late_input_unrecoverable"
+            session._late_window_failures = session._late_window_failures + 1
+            session._late_input_tick = tick
+        end
+        return nil, err, code
+    end
+    local correction = used ~= nil
+            and used.slots[slot_index] ~= nil
+            and sample_differs(sample, used.slots[slot_index])
+        or false
+    if correction and not arrival.duplicate then
+        session._correction_count = session._correction_count + 1
+    end
+    return {
+        duplicate = arrival.duplicate,
+        confirmed_tick = arrival.confirmed_tick,
+        earliest_divergence = arrival.earliest_divergence,
+        correction = correction and not arrival.duplicate,
+    }
+end
+
+---@param session RollbackSession
+---@return RollbackTickOutput?, string?, RollbackSessionErrorCode?
+function rollback_session.step(session)
+    assert_session(session)
+    if session._status == "late_input_unrecoverable" then
+        return nil,
+            "rollback session cannot progress after an over-window correction",
+            "late_input_unrecoverable"
+    end
+    if session._state.finished then
+        session._status = "finished"
+        return nil, "rollback session cannot simulate after full time", "match_finished"
+    end
+    local output = execute_tick(session, session._state.input_tick)
+    session._status = session._state.finished and "finished" or "active"
+    prune_retained_outputs(session)
+    return copy_output(output)
+end
+
+---@param session RollbackSession
+---@return RollbackReconcileResult
+function rollback_session.reconcile(session)
+    assert_session(session)
+    local old_present = session._state.input_tick
+    local old_snapshot = match_snapshot.capture(session._state)
+    local old_hash = match_snapshot.hash(old_snapshot)
+    local causal_tick = rollback_input_history.earliest_divergence(session._input_history)
+    if causal_tick == nil then
+        local late_tick = session._late_input_tick
+        return {
+            changed = false,
+            status = session._status,
+            causal_tick = late_tick,
+            restored_boundary = nil,
+            restore_status = late_tick and "outside_window" or nil,
+            old_present_boundary = old_present,
+            new_present_boundary = old_present,
+            corrected_from_tick = nil,
+            corrected_through_tick = nil,
+            replaced_from_tick = nil,
+            replaced_through_tick = nil,
+            corrected_outputs = {},
+            old_present_hash = old_hash,
+            new_present_hash = old_hash,
+            first_difference = nil,
+        }
+    end
+    if session._status == "late_input_unrecoverable" then
+        return {
+            changed = false,
+            status = session._status,
+            causal_tick = causal_tick,
+            restored_boundary = nil,
+            restore_status = "outside_window",
+            old_present_boundary = old_present,
+            new_present_boundary = old_present,
+            corrected_from_tick = nil,
+            corrected_through_tick = nil,
+            replaced_from_tick = nil,
+            replaced_through_tick = nil,
+            corrected_outputs = {},
+            old_present_hash = old_hash,
+            new_present_hash = old_hash,
+            first_difference = nil,
+        }
+    end
+
+    local lookup = rollback_snapshot_history.lookup(session._snapshot_history, causal_tick)
+    if lookup.status == "outside_window" then
+        session._status = "late_input_unrecoverable"
+        session._late_window_failures = session._late_window_failures + 1
+        session._late_input_tick = causal_tick
+        return {
+            changed = false,
+            status = session._status,
+            causal_tick = causal_tick,
+            restored_boundary = nil,
+            restore_status = lookup.status,
+            old_present_boundary = old_present,
+            new_present_boundary = old_present,
+            corrected_from_tick = nil,
+            corrected_through_tick = nil,
+            replaced_from_tick = nil,
+            replaced_through_tick = nil,
+            corrected_outputs = {},
+            old_present_hash = old_hash,
+            new_present_hash = old_hash,
+            first_difference = nil,
+        }
+    end
+    assert(
+        lookup.status ~= "missing",
+        ("rollback snapshot invariant: boundary %d is missing before correction of present %d"):format(
+            causal_tick,
+            old_present
+        )
+    )
+    local restored_snapshot = assert(lookup.snapshot, "rollback restore snapshot is missing")
+    assert(
+        rollback_input_history.consume_earliest_divergence(session._input_history) == causal_tick,
+        "rollback divergence changed before restore"
+    )
+    session._state = match_snapshot.restore(restored_snapshot)
+
+    local corrected_outputs = {}
+    local tick = causal_tick
+    while tick < old_present and not session._state.finished do
+        local output = execute_tick(session, tick)
+        corrected_outputs[#corrected_outputs + 1] = copy_output(output)
+        session._resimulated_ticks = session._resimulated_ticks + 1
+        tick = tick + 1
+    end
+
+    local new_present = session._state.input_tick
+    if new_present < old_present then
+        assert(rollback_snapshot_history.truncate_after(session._snapshot_history, new_present))
+        assert(rollback_input_history.truncate_from(session._input_history, new_present))
+        for output_tick in pairs(session._outputs) do
+            if output_tick >= new_present then
+                session._outputs[output_tick] = nil
+            end
+        end
+    end
+    prune_retained_outputs(session)
+
+    local new_snapshot = match_snapshot.capture(session._state)
+    local new_hash = match_snapshot.hash(new_snapshot)
+    local first_difference = match_snapshot.first_difference(old_snapshot, new_snapshot)
+    local depth = old_present - causal_tick
+    session._rollback_count = session._rollback_count + 1
+    session._latest_rollback_depth = depth
+    session._max_rollback_depth = math.max(session._max_rollback_depth, depth)
+    session._status = session._state.finished and "finished" or "active"
+    session._last_rollback = {
+        causal_tick = causal_tick,
+        restored_boundary = causal_tick,
+        old_present_boundary = old_present,
+        new_present_boundary = new_present,
+        old_present_hash = old_hash,
+        new_present_hash = new_hash,
+        first_difference = first_difference,
+    }
+    return {
+        changed = true,
+        status = session._status,
+        causal_tick = causal_tick,
+        restored_boundary = causal_tick,
+        restore_status = lookup.status,
+        old_present_boundary = old_present,
+        new_present_boundary = new_present,
+        corrected_from_tick = #corrected_outputs > 0 and causal_tick or nil,
+        corrected_through_tick = #corrected_outputs > 0 and new_present - 1 or nil,
+        replaced_from_tick = causal_tick,
+        replaced_through_tick = old_present > causal_tick and old_present - 1 or nil,
+        corrected_outputs = corrected_outputs,
+        old_present_hash = old_hash,
+        new_present_hash = new_hash,
+        first_difference = first_difference,
+    }
+end
+
+---@param session RollbackSession
+---@return MatchSnapshot
+function rollback_session.current_snapshot(session)
+    assert_session(session)
+    return match_snapshot.capture(session._state)
+end
+
+---@param session RollbackSession
+---@param boundary_tick integer
+---@return RollbackSnapshotLookup
+function rollback_session.snapshot(session, boundary_tick)
+    assert_session(session)
+    return rollback_snapshot_history.lookup(session._snapshot_history, boundary_tick)
+end
+
+---@param session RollbackSession
+---@param input_tick integer
+---@return RollbackTickOutput?
+function rollback_session.output(session, input_tick)
+    assert_session(session)
+    local output = session._outputs[input_tick]
+    return output and copy_output(output) or nil
+end
+
+---@param session RollbackSession
+---@param expected MatchSnapshot
+---@param causal_tick integer?
+---@return RollbackComparison
+function rollback_session.compare(session, expected, causal_tick)
+    assert_session(session)
+    local actual = match_snapshot.capture(session._state)
+    local actual_hash = match_snapshot.hash(actual)
+    local expected_hash = match_snapshot.hash(expected)
+    local comparison = {
+        matched = actual_hash == expected_hash,
+        boundary_mismatch = actual.state.input_tick ~= expected.state.input_tick,
+        actual_boundary = actual.state.input_tick,
+        expected_boundary = expected.state.input_tick,
+        actual_hash = actual_hash,
+        expected_hash = expected_hash,
+        causal_tick = causal_tick,
+        first_difference = match_snapshot.first_difference(expected, actual),
+    }
+    session._last_comparison = copy_comparison(comparison)
+    return copy_comparison(comparison)
+end
+
+---@param session RollbackSession
+---@return RollbackSessionDiagnostics
+function rollback_session.diagnostics(session)
+    assert_session(session)
+    local confirmed = rollback_input_history.confirmed_tick(session._input_history)
+    local output_ceiling = session._state.input_tick - 1
+    return {
+        status = session._status,
+        present_boundary = session._state.input_tick,
+        confirmed_tick = confirmed,
+        confirmed_output_tick = math.min(confirmed, output_ceiling),
+        rollback_count = session._rollback_count,
+        correction_count = session._correction_count,
+        predicted_slot_samples = session._predicted_slot_samples,
+        predicted_ticks = session._predicted_ticks,
+        latest_rollback_depth = session._latest_rollback_depth,
+        max_rollback_depth = session._max_rollback_depth,
+        resimulated_ticks = session._resimulated_ticks,
+        late_window_failures = session._late_window_failures,
+        last_rollback = session._last_rollback and copy_last_rollback(session._last_rollback)
+            or nil,
+        last_comparison = session._last_comparison and copy_comparison(session._last_comparison)
+            or nil,
+        input_history = rollback_input_history.diagnostics(session._input_history),
+        snapshot_history = rollback_snapshot_history.diagnostics(session._snapshot_history),
+    }
+end
+
+return rollback_session
