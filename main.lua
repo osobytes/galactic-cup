@@ -140,7 +140,24 @@ if has_flag("--rollback-lab") then
     function love.load()
         local profile_arg, seed_arg, corruption_arg = args_after("--rollback-lab")
         local profile = profile_arg or "omp0_parity"
-        local seed = tonumber(seed_arg) and math.floor(tonumber(seed_arg) --[[@as number]]) or 7302
+        local seed = 7302
+        if seed_arg ~= nil then
+            local parsed = tonumber(seed_arg)
+            assert(
+                parsed
+                    and parsed == parsed
+                    and parsed ~= math.huge
+                    and parsed ~= -math.huge
+                    and parsed == math.floor(parsed),
+                "--rollback-lab seed must be a finite integer"
+            )
+            ---@cast parsed integer
+            seed = parsed
+        end
+        assert(
+            corruption_arg == nil or corruption_arg == "corrupt",
+            "--rollback-lab third argument must be 'corrupt' when supplied"
+        )
         local evidence = require("sim.determinism_evidence")
         local rollback_lab = require("sim.rollback_lab")
         local timing = {
@@ -153,23 +170,23 @@ if has_flag("--rollback-lab") then
         ---@param operation fun(): any
         ---@return any
         local function measure(label, operation)
-            local started = os.clock()
+            local started = love.timer.getTime()
             local value = operation()
             local row = timing[label]
-            row.seconds = row.seconds + os.clock() - started
+            row.seconds = row.seconds + love.timer.getTime() - started
             row.calls = row.calls + 1
             return value
         end
 
         local tape = evidence.fixture_tape()
-        local started = os.clock()
+        local started = love.timer.getTime()
         local result = rollback_lab.run(tape, {
             profile_name = profile,
             network_seed = seed,
             corruption = corruption_arg == "corrupt" and { tick = 24, slot = 5 } or nil,
             measure = measure,
         })
-        local total_seconds = os.clock() - started
+        local total_seconds = love.timer.getTime() - started
         print(rollback_lab.logical_marker(result))
         print(rollback_lab.summary(result))
         print(table.concat({

@@ -212,7 +212,7 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
 
         local final = rollback_lab.run(varying_tape(6, "final-row-recovery"), {
             profile_name = "final-loss-spec",
-            profile = profile({ independent_loss_rate = 0.5 }),
+            profile = profile({ base_delay_ticks = 4, independent_loss_rate = 0.5 }),
             network_seed = 85,
             sources = one_remote(),
         })
@@ -220,6 +220,14 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
         t.is_true(final.drain.complete)
         t.eq(final.drain.recovered, 1)
         t.is_true(final.network_counters.sent > 6, "the lost final row must be resent")
+        t.is_true(
+            final.metrics.peaks.network_pending_envelopes
+                > final.network_diagnostics.pending_envelopes
+        )
+        t.is_true(
+            final.metrics.peaks.network_pending_record_references
+                > final.network_diagnostics.pending_record_references
+        )
     end)
 
     t.it("keeps impairment-created duplicates idempotent", function()
@@ -275,17 +283,17 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
     t.it("supports exactly thirty ticks and fails explicitly at thirty-one", function()
         local tape = varying_tape(40)
         local at_limit = rollback_lab.run(tape, {
-            profile_name = "recovery-30-spec",
-            profile = profile({
-                base_delay_ticks = 24,
-                burst_start_rate = 0.001,
-                burst_length_ticks = 6,
-            }),
-            network_seed = 133,
+            profile_name = "delay-30-spec",
+            profile = profile({ base_delay_ticks = 30 }),
+            network_seed = 30,
             sources = one_remote(),
         })
         t.is_true(at_limit.success)
         t.eq(at_limit.metrics.max_rollback_depth, rollback_input_history.ROLLBACK_WINDOW_TICKS)
+        t.is_true(
+            at_limit.metrics.confirmed_redundant_rows_skipped > 0,
+            "confirmed tick-zero history is skipped while supported current rows reconcile"
+        )
 
         local over_limit = rollback_lab.run(tape, {
             profile_name = "delay-31-spec",
@@ -337,7 +345,8 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
             sources = one_remote(),
             measure = function(_, operation)
                 calls_b = calls_b + 7
-                return operation()
+                operation()
+                return "fabricated observer result"
             end,
         })
 
@@ -345,6 +354,45 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
         t.is_true(calls_b > calls_a)
         t.eq(rollback_lab.logical_marker(first), rollback_lab.logical_marker(second))
         t.is_true(rollback_lab.logical_marker(first):match("timing") == nil)
+
+        local missing_call = pcall(rollback_lab.run, tape, {
+            profile = profile(),
+            sources = one_remote(),
+            measure = function() end,
+        })
+        t.is_true(not missing_call, "an observer cannot skip the owned operation")
+        local double_call = pcall(rollback_lab.run, tape, {
+            profile = profile(),
+            sources = one_remote(),
+            measure = function(_, operation)
+                operation()
+                pcall(operation)
+            end,
+        })
+        t.is_true(not double_call, "a swallowed second call still fails the once guard")
+    end)
+
+    t.it("uses collision-safe strings and exact tape/profile identity in markers", function()
+        local injected = rollback_lab.run(varying_tape(2, "fixture|profile=forged"), {
+            profile = profile({ independent_loss_rate = 0.1 }),
+            network_seed = 2,
+            sources = one_remote(),
+        })
+        local adjacent = rollback_lab.run(varying_tape(2, "fixture|profile=forged="), {
+            profile_name = "custom|status=forged",
+            profile = profile({ independent_loss_rate = 0.10000000000000002 }),
+            network_seed = 2,
+            sources = one_remote(),
+        })
+        local injected_marker = rollback_lab.logical_marker(injected)
+        local adjacent_marker = rollback_lab.logical_marker(adjacent)
+
+        t.eq(injected.profile, "custom")
+        t.is_true(injected_marker:match("fixture|profile=forged") == nil)
+        t.is_true(adjacent_marker:match("custom|status=forged") == nil)
+        t.is_true(injected.profile_parameters ~= adjacent.profile_parameters)
+        t.is_true(injected.tape_digest ~= adjacent.tape_digest)
+        t.is_true(injected_marker ~= adjacent_marker)
     end)
 
     t.it("bounds retained resources and never passes with unconfirmed authority", function()
@@ -360,6 +408,15 @@ t.describe("OMP-2 authoritative-reference rollback laboratory", function()
         t.is_true(bounded.metrics.peaks.input_authoritative_samples <= 32 * 8)
         t.is_true(bounded.metrics.peaks.network_authoritative_records <= 7)
         t.eq(bounded.network_diagnostics.pending_envelopes, 0)
+        t.is_true(
+            bounded.metrics.peaks.network_pending_envelopes
+                > bounded.network_diagnostics.pending_envelopes
+        )
+        t.is_true(
+            bounded.metrics.peaks.network_pending_record_references
+                > bounded.network_diagnostics.pending_record_references
+        )
+        t.eq(rawget(bounded.drain, "deliveries"), nil)
 
         local unconfirmed = rollback_lab.run(varying_tape(10, "unconfirmed"), {
             profile_name = "all-loss-spec",

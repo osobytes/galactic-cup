@@ -199,7 +199,8 @@ measurable, not a production internet latency promise.
 - `truncate_after(history, boundary_tick)` keeps the named corrected boundary,
   makes it present, and removes only later snapshots.
 - `diagnostics(history)` for capacity, retained count/range, and canonical byte
-  totals.
+  totals, including count/byte high-water marks captured before tail
+  truncation can hide the obsolete predicted timeline.
 
 ## Session restore and resimulation
 

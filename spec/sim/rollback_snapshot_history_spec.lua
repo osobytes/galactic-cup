@@ -218,6 +218,11 @@ t.describe("bounded rollback snapshot history", function()
         t.eq(snapshot_tail.diagnostics.latest_tick, 3)
         t.eq(snapshot_tail.diagnostics.retained_boundary_count, 4)
         t.eq(snapshot_tail.diagnostics.canonical_bytes, retained_bytes)
+        t.eq(snapshot_tail.diagnostics.peak_retained_boundary_count, 6)
+        t.is_true(
+            snapshot_tail.diagnostics.peak_canonical_bytes
+                > snapshot_tail.diagnostics.canonical_bytes
+        )
         t.eq(rollback_snapshot_history.lookup(snapshots, 3).status, "present")
         t.is_true(assert(rollback_snapshot_history.lookup(snapshots, 3).snapshot).state.finished)
         t.eq(rollback_snapshot_history.lookup(snapshots, 4).status, "missing")

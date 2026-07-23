@@ -27,10 +27,16 @@ For every tape frame, the laboratory:
 5. compares every newly confirmed client output boundary with the retained
    reference boundary.
 
-Rows below the retained input floor are not filtered as “redundant.” An
+Before forwarding redundant packet history, the lab suppresses only rows at or
+below the session's monotonic `confirmed_tick`. All eight slots for those
+ticks were already proven authoritative, so a later copy remains a duplicate
+even after bounded storage prunes it. A first-seen gap can never be suppressed:
+confirmation cannot cross that gap. Every unconfirmed row is forwarded, an
 `outside_window` result is an explicit `late_input_unrecoverable` failure, and
 the rest of that delivery batch is still processed so the report preserves
-the earliest causal late tick.
+the earliest causal late tick. This lets a constant 30-tick stream reconcile
+at the supported limit while a constant 31-tick stream fails on causal tick
+zero.
 
 After the final input, the runner asks the network simulator to recover the
 last row for every remote slot. Drain deliveries are grouped by their actual
@@ -73,15 +79,33 @@ continues to consume the original tape. The failed result names the causal
 input tick, expected and actual boundary hashes, and the first differing
 canonical snapshot path.
 
+Free-string marker values are byte-length-prefixed and hexadecimal escaped, so
+fixture or custom-profile text containing `|` or `=` cannot forge fields.
+Profile numbers use the lossless canonical number encoding shared with match
+snapshots rather than rounded decimal formatting. A tape digest covers the
+canonical initial snapshot, every exact encoded input frame, all declared
+boundary hashes, and the complete fixture/build/source/content/tuning/config
+identity. An injected profile without an explicit name is reported as
+`custom`.
+
+Network conditions and snapshot history maintain their own high-water
+diagnostics at mutation time, before polling, pruning, replay replacement, or
+tail truncation can hide transient use. The lab copies those peaks into its
+logical result. Drain deliveries are consumed in arrival groups and then
+discarded; the returned result retains only the delivery-free drain summary.
+
 ## Timing isolation
 
 Pure lab/session state never reads a clock and the logical result contains no
 duration. `rollback_session.new` accepts an optional injected
-`measure(label, operation)` observer. The normal default calls the operation
-directly. The headless runner owns `os.clock`, uses that observer for capture,
-restore, resimulation, and total rollback phases, and prints a separate
-`GC_ROLLBACK_LAB|timing|...` observation. Timings may vary between runs and
-must never be used in marker equality or simulation decisions.
+`measure(label, operation)` observer. Simulation retains ownership of the
+operation and its return: the observer must invoke it exactly once, cannot
+replace its result, and fails loudly if it skips or repeats it. The normal
+default calls the operation directly. The headless runner owns monotonic
+`love.timer.getTime()`, uses that observer for capture, restore,
+resimulation, and inclusive total rollback phases, and prints a separate
+`GC_ROLLBACK_LAB|timing|...` wall-time observation. Timings may vary between
+runs and must never be used in marker equality or simulation decisions.
 
 ## Headless report
 

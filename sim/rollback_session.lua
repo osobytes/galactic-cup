@@ -112,10 +112,30 @@ local rollback_session = {}
 ---@param operation fun(): any
 ---@return any
 local function measured(session, label, operation)
-    if session._measure then
-        return session._measure(label, operation)
+    if session._measure == nil then
+        return operation()
     end
-    return operation()
+    local calls = 0
+    local result = nil
+    local operation_succeeded = false
+    local operation_error = nil
+    session._measure(label, function()
+        calls = calls + 1
+        assert(calls == 1, "rollback measurement operation must run exactly once")
+        local ok, value = pcall(operation)
+        operation_succeeded = ok
+        if not ok then
+            operation_error = value
+            error(value, 0)
+        end
+        result = value
+        return result
+    end)
+    assert(calls == 1, "rollback measurement observer must run its operation exactly once")
+    if not operation_succeeded then
+        error(operation_error, 0)
+    end
+    return result
 end
 
 ---@param value any
