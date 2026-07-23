@@ -512,12 +512,38 @@ end
 ---@param value integer
 ---@return integer
 local function unsigned_decimal_bytes(value)
-    local bytes = 1
-    while value >= 10 do
-        value = math.floor(value / 10)
-        bytes = bytes + 1
+    if value < 10 then
+        return 1
+    elseif value < 100 then
+        return 2
+    elseif value < 1000 then
+        return 3
+    elseif value < 10000 then
+        return 4
+    elseif value < 100000 then
+        return 5
+    elseif value < 1000000 then
+        return 6
+    elseif value < 10000000 then
+        return 7
+    elseif value < 100000000 then
+        return 8
+    elseif value < 1000000000 then
+        return 9
+    elseif value < 10000000000 then
+        return 10
+    elseif value < 100000000000 then
+        return 11
+    elseif value < 1000000000000 then
+        return 12
+    elseif value < 10000000000000 then
+        return 13
+    elseif value < 100000000000000 then
+        return 14
+    elseif value < 1000000000000000 then
+        return 15
     end
-    return bytes
+    return 16
 end
 
 ---@param value integer
