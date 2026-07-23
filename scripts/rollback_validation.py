@@ -1394,8 +1394,8 @@ def run_browser_once(
     teardown: dict[str, Any]
     resources: dict[str, Any]
     try:
-        driver.set_page_load_timeout(90)
-        driver.set_script_timeout(90)
+        driver.set_page_load_timeout(min(timeout_seconds, 300))
+        driver.set_script_timeout(timeout_seconds)
         query_arguments = [
             "--rollback-validation",
             suite,

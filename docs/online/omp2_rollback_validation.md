@@ -37,9 +37,16 @@ The required `scripts/check_rollback.sh` suite runs:
 
 The short registry covers possession change, tackle, shot, goal, kickoff, aerial/header,
 keeper action, repeated rollback, and full time. Goal and kickoff use a deterministic synthetic
-goal-line fixture; the remaining scenarios are normalized from pinned OMP-1 windows or scanned
-event boundaries. Every case owns a no-delay reference, an impaired rollback client, confirmed
-snapshot comparisons, stable event transcripts, and game-layer consumer audits.
+goal-line fixture; the remaining scenarios are normalized from pinned OMP-1 boundaries.
+Possession change starts at boundary 22 and the shot window at boundary 1684; their required
+event/lifecycle assertions prevent those pins from becoming silent stale coordinates. Every case
+owns a no-delay reference, an impaired rollback client, confirmed snapshot comparisons, stable
+event transcripts, and game-layer consumer audits.
+
+The complete tape is constructed from the already checked-in OMP-1 frame wires and boundary
+hashes. Its structure and initial hash are validated synchronously, while the independent
+authority re-verifies the actual simulation incrementally. This avoids replaying all 7,201 frames
+on the browser main thread before the first observable update.
 
 `sim.rollback_lab.new_campaign` and `step_campaign` are the shared logical state machine. Native
 execution advances it one tick at a time in a tight loop; browser execution advances one logical

@@ -129,55 +129,6 @@ local function normalized_window(source, first_boundary, last_boundary, scenario
     return input_tape.new(identity, initial, frames)
 end
 
----@param source InputTape
----@param predicate fun(before: MatchState, after: MatchState): boolean
----@return integer
-local function scan_tick(source, predicate)
-    local state = match_snapshot.restore(source.initial)
-    for index, frame in ipairs(source.frames) do
-        local before = match_snapshot.restore(match_snapshot.capture(state))
-        match.step(state, fixed_clock.TICK_SECONDS, frame)
-        if predicate(before, state) then
-            return index - 1
-        end
-    end
-    assert(false, "rollback validation scan predicate was not covered")
-    return 0
-end
-
----@param state MatchState
----@return string?
-local function owner_id(state)
-    return state.owner and state.players[state.owner].id or nil
-end
-
----@param source InputTape
----@param scenario Omp2RollbackScenario
----@return InputTape
-local function scanned_window(source, scenario)
-    local tick
-    if scenario.id == "possession_change" then
-        tick = scan_tick(source, function(before, after)
-            local prior = owner_id(before)
-            local current = owner_id(after)
-            return prior ~= nil and current ~= prior
-        end)
-    else
-        local expected = assert(scenario.event_kind)
-        tick = scan_tick(source, function(_, after)
-            for _, event in ipairs(after.events) do
-                if event.kind == expected then
-                    return true
-                end
-            end
-            return false
-        end)
-    end
-    local first = math.max(0, tick - 2)
-    local last = math.min(#source.frames, tick + 3)
-    return normalized_window(source, first, last, scenario.id)
-end
-
 ---@return InputTape
 local function synthetic_goal_tape()
     local ownership = match.ownership_for_teams(teams.nebula, teams.orion)
@@ -260,6 +211,7 @@ local function lab_options(profile_name, network_seed, measure)
         network_seed = network_seed,
         sources = sources(),
         measure = measure,
+        prevalidated_tape = true,
     }
 end
 
@@ -293,8 +245,6 @@ local function scenario_cases(measure, profile_name, network_seed)
         local tape
         if scenario.kind == "synthetic_goal" then
             tape = goal
-        elseif scenario.kind == "scan" then
-            tape = scanned_window(source, scenario)
         else
             tape = normalized_window(
                 source,

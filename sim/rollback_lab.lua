@@ -38,6 +38,7 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field drain_ticks integer?
 ---@field corruption RollbackLabCorruption?
 ---@field measure RollbackSessionMeasure? Optional runner-owned wall-time observer.
+---@field prevalidated_tape boolean? Skip full replay after structural validation.
 
 ---@class RollbackLabDepth
 ---@field depth integer
@@ -967,7 +968,10 @@ end
 ---@return RollbackLabCampaign
 function rollback_lab.new_campaign(tape, options)
     options = options or {}
-    assert(input_tape.validate(tape))
+    assert(
+        options.prevalidated_tape and input_tape.validate_structure(tape)
+            or input_tape.validate(tape)
+    )
     assert(#tape.frames > 0, "rollback lab tape must contain at least one input frame")
     local sources = copy_sources(options.sources)
     local profile, profile_name = selected_profile(options)

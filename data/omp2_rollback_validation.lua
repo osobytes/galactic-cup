@@ -1,6 +1,6 @@
 ---@class Omp2RollbackScenario
 ---@field id string
----@field kind "window"|"scan"|"synthetic_goal"|"repeated"
+---@field kind "window"|"synthetic_goal"|"repeated"
 ---@field first_boundary integer?
 ---@field last_boundary integer?
 ---@field event_kind string?
@@ -40,7 +40,9 @@ return {
     scenarios = {
         {
             id = "possession_change",
-            kind = "scan",
+            kind = "window",
+            first_boundary = 22,
+            last_boundary = 27,
         },
         {
             id = "tackle",
@@ -51,7 +53,9 @@ return {
         },
         {
             id = "shot",
-            kind = "scan",
+            kind = "window",
+            first_boundary = 1684,
+            last_boundary = 1689,
             event_kind = "shot",
         },
         {
