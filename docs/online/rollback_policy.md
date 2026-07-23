@@ -1,0 +1,130 @@
+# OMP-2 rollback input and confirmation policy
+
+`sim.rollback_input_history` is the pure source of truth for the eight input
+rows a rollback client has received and the complete `InputFrame` it actually
+used on each simulation tick. It is an in-process policy layer: it has no
+transport, LÖVE, presentation, snapshot, or wall-clock dependency.
+
+The canonical sample shape, slot order, integer quantization, and fixed
+ownership remain the OMP-1 contracts in [`input_frame.md`](input_frame.md) and
+[`slot_match.md`](slot_match.md). The simulation cadence remains 60 Hz as
+defined in [`fixed_tick.md`](fixed_tick.md).
+
+## Tick and record terminology
+
+- **Input tick `N`** is the causal `InputFrame.tick == N` consumed by
+  `sim.match.step`.
+- **Boundary `N`** is the start-of-tick snapshot before input tick `N`. It
+  describes the state after input `N - 1`, as defined in
+  [`snapshot_replay.md`](snapshot_replay.md).
+- An **authoritative sample** is the immutable local or remote sample accepted
+  for one tick and slot.
+- A **predicted sample** is the row materialized because remote authority for
+  that tick and slot has not arrived.
+- An **effective frame** is the complete eight-row frame materialized
+  immediately before the simulation consumes that tick. Its per-slot record
+  preserves both the fixed `local` / `remote` source and the
+  `authoritative` / `predicted` status used at that time.
+
+Source and status are independent. A remote sample can be authoritative once
+it arrives. A local row must always be authoritative before materialization;
+missing local input is a producer bug and fails loudly instead of being hidden
+as prediction. Only a missing remote row is eligible for prediction.
+
+## Authoritative arrival rules
+
+`add_authoritative(history, tick, slot, sample)` accepts local samples from the
+local input adapter and remote samples from the eventual packet/laboratory
+adapter through the same deterministic path. Arrivals may be out of order.
+The history deep-copies the sample before retaining it, so later caller
+mutation cannot rewrite authority.
+
+An identical duplicate is idempotent. A second, different authoritative
+sample for the same tick and slot returns the recoverable
+`conflicting_authoritative` failure and changes no sample, count, confirmed
+tick, or divergence state. The client must treat that conflict as invalid
+upstream data; authority is never last-writer-wins.
+
+## Prediction rule
+
+For each missing remote row on tick `N`, search that slot's authoritative
+history at or before `N` and choose the greatest tick found:
+
+1. Copy `move_x`, `move_y`, and `held` from that sample.
+2. Set `edges` to zero unconditionally.
+3. If no prior authoritative sample exists, use the fully neutral sample:
+   zero axes, zero held bits, and zero edges.
+
+Future out-of-order arrivals are never used to predict an earlier tick.
+Predictions chain from the latest authoritative sample, not from another
+prediction. Discrete shoot, pass, switch, dash, and dodge edges therefore fire
+only when their authoritative tick is simulated; a lost or delayed edge can
+never become sticky or repeat across predicted ticks.
+
+## Confirmation
+
+The **confirmed tick** is the greatest contiguous input tick starting at zero
+for which all eight slots are authoritative. Its initial sentinel is `-1`,
+meaning even tick zero is not yet fully authoritative. A complete future tick
+cannot cross a gap. When that gap becomes complete, confirmation advances
+through every already-complete following tick. It never moves backward.
+
+This definition deliberately requires all local and remote rows. It is an
+input-history boundary only; confirmed presentation events are introduced by
+the later stable-event contract.
+
+## Divergence and resimulation handoff
+
+An authoritative arrival is a **divergence** only if its sample differs from
+the effective row already materialized and used for that same tick and slot.
+An identical prediction produces no divergence, and an arrival for a tick that
+has not been materialized is simply authority. Across any batch of differing
+arrivals, the history retains the smallest affected tick.
+
+The caller follows this order:
+
+1. Insert all arrivals available for the update.
+2. Peek at `earliest_divergence(history)` for diagnostics.
+3. Consume that tick with `consume_earliest_divergence(history)` immediately
+   before restoring its start-of-tick boundary.
+4. Resimulate forward, calling `materialize` again for each replayed tick. Each
+   call replaces that tick's former effective record with the corrected one.
+
+Materializing at or after an unconsumed divergence fails loudly. This prevents
+normal forward simulation or accidental diagnostics from overwriting evidence
+needed to choose the restore boundary. Consuming clears only the reported
+batch boundary; authoritative samples remain immutable, and a later correction
+can establish a new earliest divergence.
+
+Returned frames, effective records, and authoritative records are deep copies.
+Mutating one cannot change retained history or a later read.
+
+## Initial rollback window
+
+OMP-2 uses a maximum rollback depth of **30 input ticks**, exactly **500 ms at
+60 Hz**. `sim.rollback_input_history` publishes those two constants but does
+not evict records: bounded snapshot/history storage is the responsibility of
+the next rollback-history layer.
+
+That layer must retain the current start-of-tick boundary plus the preceding
+30 boundaries (31 boundaries total). A correction whose earliest divergence
+requires a boundary more than 30 ticks behind the current simulation tick is
+unrecoverable in this first policy. It must produce the explicit late-input
+failure/desynchronized state defined by restore/resimulation work; it must not
+clamp the tick, invent a snapshot, overwrite current state, or silently ignore
+the correction. The 30-tick bound is an initial laboratory decision to make
+memory, CPU, and failure behavior measurable, not a production internet
+latency promise.
+
+## Public operations
+
+- `new(sources)` copies exactly eight canonical `local` / `remote` source rows.
+- `add_authoritative(...)` validates, copies, de-duplicates, and detects a
+  correction against used input.
+- `materialize(history, tick)` produces a complete copied frame plus its
+  copied source/status record.
+- `authoritative_record(...)` and `record(...)` return copied diagnostics.
+- `confirmed_tick(...)` returns the contiguous all-eight-authoritative tick.
+- `earliest_divergence(...)` peeks at the current correction batch;
+  `consume_earliest_divergence(...)` transfers that boundary to the rollback
+  session before resimulation.
