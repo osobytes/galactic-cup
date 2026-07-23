@@ -94,6 +94,12 @@ local function copy_snapshot(snapshot)
     return match_snapshot.capture(match_snapshot.restore(snapshot))
 end
 
+---@param snapshot MatchSnapshot
+---@return MatchSnapshot
+local function copy_owned_snapshot(snapshot)
+    return match_snapshot.capture_owned(snapshot.state)
+end
+
 ---@param history RollbackSnapshotHistory
 ---@param tick integer
 ---@return integer
@@ -310,7 +316,7 @@ function rollback_snapshot_history.lookup(history, tick)
     return {
         status = status,
         tick = tick,
-        snapshot = copy_snapshot(entry.snapshot),
+        snapshot = copy_owned_snapshot(entry.snapshot),
         canonical_bytes = entry.canonical_bytes,
     }
 end
@@ -333,7 +339,7 @@ function rollback_snapshot_history.restore(history, tick)
     end
     local entry = assert(history._entries[ring_index(history, tick)])
     assert(entry.tick == tick, "rollback snapshot ring restore is inconsistent")
-    return match_snapshot.restore(entry.snapshot), status
+    return match_snapshot.restore_owned(entry.snapshot), status
 end
 
 -- Hashing and canonical wire materialization are diagnostic and deliberately

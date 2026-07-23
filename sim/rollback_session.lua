@@ -354,7 +354,7 @@ local function execute_tick(session, tick)
     count_predictions(session, record)
     match.step(session._state, fixed_clock.TICK_SECONDS, frame)
     local boundary = measured(session, "capture", function()
-        return match_snapshot.capture(session._state)
+        return match_snapshot.capture_owned(session._state)
     end)
     ---@cast boundary MatchSnapshot
     assert(
@@ -392,11 +392,11 @@ function rollback_session.new(initial_snapshot, sources, max_rollback_ticks, mea
     assert(state.slot_mode, "rollback session requires a slot-mode match snapshot")
     assert(state.input_tick == 0, "rollback session requires the tick-zero boundary")
     assert(not state.finished, "rollback session tick-zero boundary must be active")
-    local canonical = match_snapshot.capture(state)
+    local canonical = match_snapshot.capture_owned(state)
     local snapshots = rollback_snapshot_history.new(max_rollback_ticks)
     assert(rollback_snapshot_history.store_owned(snapshots, canonical))
     return {
-        _state = match_snapshot.restore(canonical),
+        _state = state,
         _input_history = rollback_input_history.new(sources),
         _snapshot_history = snapshots,
         _outputs = {},
@@ -521,7 +521,7 @@ local function reconcile_changed(session, causal_tick, detailed_diagnostics)
     local old_hash = nil
     if detailed_diagnostics then
         old_snapshot = measured(session, "capture", function()
-            return match_snapshot.capture(session._state)
+            return match_snapshot.capture_owned(session._state)
         end)
         old_hash =
             assert(rollback_snapshot_history.boundary_hash(session._snapshot_history, old_present))
@@ -636,7 +636,7 @@ end
 ---@return MatchSnapshot
 function rollback_session.current_snapshot(session)
     assert_session(session)
-    return match_snapshot.capture(session._state)
+    return match_snapshot.capture_owned(session._state)
 end
 
 ---@param session RollbackSession
@@ -671,7 +671,7 @@ end
 ---@return RollbackComparison
 function rollback_session.compare(session, expected, causal_tick)
     assert_session(session)
-    local actual = match_snapshot.capture(session._state)
+    local actual = match_snapshot.capture_owned(session._state)
     local actual_hash = match_snapshot.hash(actual)
     local expected_hash = match_snapshot.hash(expected)
     local matched = actual_hash == expected_hash

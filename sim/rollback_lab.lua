@@ -850,7 +850,7 @@ end
 ---@return RollbackLabResult
 local function finish_result(state, tape, profile_name, profile, network_seed, drain)
     local session = rollback_session.diagnostics(state.session)
-    local reference_snapshot = match_snapshot.capture(state.reference)
+    local reference_snapshot = match_snapshot.capture_owned(state.reference)
     local client_snapshot = rollback_session.current_snapshot(state.session)
     local final_comparison =
         rollback_session.compare(state.session, reference_snapshot, state.late_input_tick)
@@ -1072,7 +1072,7 @@ local function advance_frame(campaign, frame)
     )
     match.step(state.reference, 1 / tape.identity.tick_rate, frame)
     local reference_boundary = capture(options.measure, function()
-        return match_snapshot.capture(state.reference)
+        return match_snapshot.capture_owned(state.reference)
     end)
     ---@cast reference_boundary MatchSnapshot
     assert(rollback_snapshot_history.store_owned(state.reference_history, reference_boundary))

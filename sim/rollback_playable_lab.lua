@@ -477,7 +477,7 @@ local function advance_reference(lab, local_sample)
     local base = assert(input_frame.new(lab._transport_tick, slots))
     local frame = slot_input.materialize(lab._producer, lab._reference, base)
     match.step(lab._reference, fixed_clock.TICK_SECONDS, frame)
-    local boundary = match_snapshot.capture(lab._reference)
+    local boundary = match_snapshot.capture_owned(lab._reference)
     assert(rollback_snapshot_history.store_owned(lab._reference_history, boundary))
 
     add_authority(lab, frame.tick, lab._local_slot, frame.slots[lab._local_slot])
@@ -522,7 +522,7 @@ local function finish_settlement_if_ready(lab)
     then
         return
     end
-    local expected = match_snapshot.capture(lab._reference)
+    local expected = match_snapshot.capture_owned(lab._reference)
     local comparison = rollback_session.compare(lab._session, expected, final_tick)
     lab._latest_convergence = {
         status = comparison.matched and "matched" or "diverged",
@@ -658,7 +658,7 @@ end
 ---@param lab RollbackPlayableLab
 ---@return MatchSnapshot
 function rollback_playable_lab.reference_snapshot(lab)
-    return match_snapshot.capture(lab._reference)
+    return match_snapshot.capture_owned(lab._reference)
 end
 
 ---@param lab RollbackPlayableLab

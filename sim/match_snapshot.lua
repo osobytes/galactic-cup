@@ -478,6 +478,165 @@ local function copy_state(source, path, make_vec)
     return result
 end
 
+-- Rollback owns states that have already crossed capture/restore's validating
+-- boundary. These copies keep the same explicit schema and deep-ownership
+-- contract without repeating allowlist checks or constructing diagnostic paths
+-- at every predicted and resimulated boundary.
+---@param value Vec2
+---@param make_vec boolean
+---@return Vec2
+local function copy_owned_vec(value, make_vec)
+    if make_vec then
+        return Vec2.new(value.x, value.y)
+    end
+    return { x = value.x, y = value.y }
+end
+
+---@param source MatchPlayer
+---@param make_vec boolean
+---@return MatchPlayer
+local function copy_owned_player(source, make_vec)
+    local result = {}
+    for _, field in ipairs(match_snapshot.PLAYER_FIELDS) do
+        local value = source[field]
+        if VECTOR_FIELDS[field] then
+            result[field] = copy_owned_vec(value, make_vec)
+        elseif OPTIONAL_VECTOR_FIELDS[field] then
+            result[field] = value and copy_owned_vec(value, make_vec) or nil
+        elseif field == "windup_shot" then
+            if value then
+                result.windup_shot = {
+                    dir = copy_owned_vec(value.dir, make_vec),
+                    speed = value.speed,
+                    vz = value.vz,
+                    spin = value.spin,
+                    shot_type = value.shot_type,
+                }
+            end
+        else
+            result[field] = value
+        end
+    end
+    ---@cast result MatchPlayer
+    return result
+end
+
+---@param source MatchEvent
+---@return MatchEvent
+local function copy_owned_event(source)
+    local result = {}
+    for _, field in ipairs(EVENT_FIELDS) do
+        result[field] = source[field]
+    end
+    ---@cast result MatchEvent
+    return result
+end
+
+---@param source MarkingConfig
+---@return MarkingConfig
+local function copy_owned_marking(source)
+    local result = {}
+    for _, field in ipairs(MARKING_FIELDS) do
+        result[field] = source[field]
+    end
+    ---@cast result MarkingConfig
+    return result
+end
+
+---@param source InputOwnership
+---@return InputOwnership
+local function copy_owned_ownership(source)
+    local rosters = { home = {}, away = {} }
+    for _, team in ipairs({ "home", "away" }) do
+        for index = 1, input_frame.FIXTURE_TEAM_SIZE do
+            rosters[team][index] = source.rosters[team][index]
+        end
+    end
+    local slots = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        local assignment = source.slots[index]
+        slots[index] = {
+            slot = assignment.slot,
+            team = assignment.team,
+            player_id = assignment.player_id,
+        }
+    end
+    return { version = source.version, rosters = rosters, slots = slots }
+end
+
+---@param source table<integer, integer>
+---@return table<integer, integer>
+local function copy_owned_sparse_indices(source)
+    local result = {}
+    for key, value in pairs(source) do
+        result[key] = value
+    end
+    return result
+end
+
+---@param source MatchState
+---@param make_vec boolean
+---@return MatchState
+local function copy_owned_state(source, make_vec)
+    local result = {
+        field = { w = source.field.w, h = source.field.h },
+        goal_home = {
+            x = source.goal_home.x,
+            y = source.goal_home.y,
+            w = source.goal_home.w,
+            h = source.goal_home.h,
+        },
+        goal_away = {
+            x = source.goal_away.x,
+            y = source.goal_away.y,
+            w = source.goal_away.w,
+            h = source.goal_away.h,
+        },
+        players = {},
+        ball = copy_owned_vec(source.ball, make_vec),
+        ball_vel = copy_owned_vec(source.ball_vel, make_vec),
+        ball_z = source.ball_z,
+        ball_vz = source.ball_vz,
+        owner = source.owner,
+        controlled = source.controlled,
+        human_controlled = source.human_controlled,
+        score = { home = source.score.home, away = source.score.away },
+        time_left = source.time_left,
+        max_goals = source.max_goals,
+        finished = source.finished,
+        pickup_cd = source.pickup_cd,
+        press = { home = source.press.home, away = source.press.away },
+        marking = {
+            home = copy_owned_marking(source.marking.home),
+            away = copy_owned_marking(source.marking.away),
+        },
+        marks = {
+            home = copy_owned_sparse_indices(source.marks.home),
+            away = copy_owned_sparse_indices(source.marks.away),
+        },
+        ball_spin = source.ball_spin,
+        rng = source.rng,
+        block_grace = source.block_grace,
+        aerial_lock = source.aerial_lock,
+        kickoff_hold = source.kickoff_hold,
+        events = {},
+        slot_mode = source.slot_mode,
+        input_ownership = source.input_ownership and copy_owned_ownership(source.input_ownership)
+            or nil,
+        slot_players = copy_owned_sparse_indices(source.slot_players),
+        slot_for_player = copy_owned_sparse_indices(source.slot_for_player),
+        input_tick = source.input_tick,
+    }
+    for index = 1, #source.players do
+        result.players[index] = copy_owned_player(source.players[index], make_vec)
+    end
+    for index = 1, #source.events do
+        result.events[index] = copy_owned_event(source.events[index])
+    end
+    ---@cast result MatchState
+    return result
+end
+
 ---@param state MatchState
 ---@return MatchSnapshot
 function match_snapshot.capture(state)
@@ -487,12 +646,36 @@ function match_snapshot.capture(state)
     }
 end
 
+-- Internal ownership-transfer copy for a MatchState previously produced by a
+-- validated snapshot or by sim.match. Arbitrary/external states must use
+-- capture() so schema drift and malformed values still fail loudly.
+---@param state MatchState
+---@return MatchSnapshot
+function match_snapshot.capture_owned(state)
+    assert(type(state) == "table", "owned match state is required")
+    return {
+        version = match_snapshot.VERSION,
+        state = copy_owned_state(state, false),
+    }
+end
+
 ---@param snapshot MatchSnapshot
 ---@return MatchState
 function match_snapshot.restore(snapshot)
     assert_fields(snapshot, SNAPSHOT_FIELD_SET, "snapshot")
     assert(snapshot.version == match_snapshot.VERSION, "unsupported match snapshot version")
     return copy_state(snapshot.state, "snapshot.state", true)
+end
+
+-- Internal restore for a canonical snapshot already owned by rollback. Public
+-- and external snapshots must use restore() for full validation.
+---@param snapshot MatchSnapshot
+---@return MatchState
+function match_snapshot.restore_owned(snapshot)
+    assert(type(snapshot) == "table", "owned match snapshot is required")
+    assert(snapshot.version == match_snapshot.VERSION, "unsupported owned match snapshot version")
+    assert(type(snapshot.state) == "table", "owned match snapshot state is required")
+    return copy_owned_state(snapshot.state, true)
 end
 
 ---@param number number

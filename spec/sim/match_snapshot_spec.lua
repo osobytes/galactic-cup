@@ -135,6 +135,98 @@ t.describe("canonical match snapshots", function()
         t.eq(restored.events[2].keeper_depth, 12)
     end)
 
+    t.it("keeps trusted rollback copies exact and independently owned", function()
+        local state = new_state()
+        state.marking.home = {
+            scheme = state.marking.home.scheme,
+            man_marks = state.marking.home.man_marks,
+            standoff = state.marking.home.standoff,
+            compactness = state.marking.home.compactness,
+            support = state.marking.home.support,
+        }
+        state.ball_z = -0.0
+        state.players[2].dash_cd = -0.0
+        state.players[2].dive_target = Vec2.new(10, 20)
+        state.players[2].windup_shot = {
+            dir = Vec2.new(0.25, -0.75),
+            speed = 456,
+            vz = 123,
+            spin = -8,
+            shot_type = "chip",
+        }
+        state.events[1] = {
+            kind = "header",
+            x = 44,
+            y = 55,
+            player = state.players[2].id,
+        }
+        local validated = match_snapshot.capture(state)
+        local owned = match_snapshot.capture_owned(state)
+
+        t.eq(match_snapshot.encode_canonical(owned), match_snapshot.encode(validated))
+        t.eq(match_snapshot.hash(owned), match_snapshot.hash(validated))
+        t.eq(
+            match_snapshot.encoded_size_canonical(owned),
+            match_snapshot.encoded_size_canonical(validated)
+        )
+
+        state.players[2].pos.x = -100
+        state.players[2].dive_target.y = -200
+        state.players[2].windup_shot.dir.x = -300
+        state.events[1].x = -400
+        state.field.w = -500
+        state.goal_home.x = -600
+        state.score.home = 7
+        state.press.away = 99
+        state.marking.home.standoff = -123
+        state.marks.home[1] = 9
+        state.input_ownership.rosters.home[1] = "mutated"
+        state.input_ownership.slots[1].player_id = "mutated"
+        state.slot_players[1] = 9
+        state.slot_for_player[1] = 9
+        t.is_true(owned.state.players[2].pos.x ~= -100)
+        t.is_true(owned.state.players[2].dive_target.y ~= -200)
+        t.is_true(owned.state.players[2].windup_shot.dir.x ~= -300)
+        t.is_true(owned.state.events[1].x ~= -400)
+        t.is_true(owned.state.field.w ~= -500)
+        t.is_true(owned.state.goal_home.x ~= -600)
+        t.is_true(owned.state.score.home ~= 7)
+        t.is_true(owned.state.press.away ~= 99)
+        t.is_true(owned.state.marking.home.standoff ~= -123)
+        t.is_true(owned.state.marks.home[1] ~= 9)
+        t.is_true(owned.state.input_ownership.rosters.home[1] ~= "mutated")
+        t.is_true(owned.state.input_ownership.slots[1].player_id ~= "mutated")
+        t.is_true(owned.state.slot_players[1] ~= 9)
+        t.is_true(owned.state.slot_for_player[1] ~= 9)
+
+        local public_restored = match_snapshot.restore(owned)
+        local owned_restored = match_snapshot.restore_owned(owned)
+        t.eq(
+            match_snapshot.hash(match_snapshot.capture_owned(owned_restored)),
+            match_snapshot.hash(match_snapshot.capture(public_restored))
+        )
+        owned.state.players[2].pos.y = -500
+        owned.state.players[2].dive_target.x = -600
+        owned.state.players[2].windup_shot.speed = -700
+        owned.state.events[1].y = -800
+        t.is_true(owned_restored.players[2].pos.y ~= -500)
+        t.is_true(owned_restored.players[2].dive_target.x ~= -600)
+        t.is_true(owned_restored.players[2].windup_shot.speed ~= -700)
+        t.is_true(owned_restored.events[1].y ~= -800)
+        t.near(owned_restored.players[2].pos:length(), public_restored.players[2].pos:length())
+    end)
+
+    t.it("guards the shallow trusted-copy ownership contract", function()
+        t.is_true(not pcall(match_snapshot.capture_owned, nil))
+        t.is_true(not pcall(match_snapshot.restore_owned, nil))
+        ---@type any
+        local wrong_version = { version = match_snapshot.VERSION - 1, state = {} }
+        ---@type any
+        local missing_state = { version = match_snapshot.VERSION, state = nil }
+        t.is_true(not pcall(match_snapshot.restore_owned, wrong_version))
+        t.is_true(not pcall(match_snapshot.restore_owned, missing_state))
+    end)
+
     t.it("canonically restores a v5 keeper state through goal and kickoff", function()
         local live = new_state()
         local away_keeper = live.players[6]
