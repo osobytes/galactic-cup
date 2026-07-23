@@ -183,7 +183,7 @@ local function store_retained(history, retained)
     if existing then
         remove_entry(history, existing)
     end
-    local canonical_wire = match_snapshot.encode(retained)
+    local canonical_wire = match_snapshot.encode_canonical(retained)
     local canonical_bytes = #canonical_wire
     history._entries[index] = {
         tick = tick,

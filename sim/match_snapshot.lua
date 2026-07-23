@@ -614,14 +614,12 @@ local function append_sparse_indices(output, values, count)
     end
 end
 
----@param snapshot MatchSnapshot
+---@param version integer
+---@param state MatchState
 ---@return string
-function match_snapshot.encode(snapshot)
-    -- Restore performs the full explicit allowlist/type validation and gives
-    -- serialization a normalized independent source.
-    local state = match_snapshot.restore(snapshot)
+local function encode_state(version, state)
     local output = { "GCMS;" }
-    append_scalar(output, snapshot.version)
+    append_scalar(output, version)
     for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
         append_name(output, field)
         local value = state[field]
@@ -667,6 +665,26 @@ function match_snapshot.encode(snapshot)
         end
     end
     return table.concat(output)
+end
+
+---@param snapshot MatchSnapshot
+---@return string
+function match_snapshot.encode(snapshot)
+    -- Restore performs the full explicit allowlist/type validation and gives
+    -- serialization a normalized independent source.
+    local state = match_snapshot.restore(snapshot)
+    return encode_state(snapshot.version, state)
+end
+
+-- Encode a snapshot just returned by capture(), or an equally canonical
+-- owned copy, without repeating its full restore/validation pass.
+---@param snapshot MatchSnapshot
+---@return string
+function match_snapshot.encode_canonical(snapshot)
+    assert(type(snapshot) == "table", "canonical match snapshot is required")
+    assert(snapshot.version == match_snapshot.VERSION, "unsupported canonical snapshot version")
+    assert(type(snapshot.state) == "table", "canonical match snapshot state is required")
+    return encode_state(snapshot.version, snapshot.state)
 end
 
 ---@param snapshot MatchSnapshot

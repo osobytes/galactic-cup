@@ -217,6 +217,7 @@ t.describe("canonical match snapshots", function()
         end
         local reordered = { state = reordered_state, version = snapshot.version }
         t.eq(match_snapshot.encode(reordered), match_snapshot.encode(snapshot))
+        t.eq(match_snapshot.encode_canonical(snapshot), match_snapshot.encode(snapshot))
         t.eq(match_snapshot.hash(reordered), match_snapshot.hash(snapshot))
     end)
 
