@@ -30,8 +30,12 @@ the shot type; shot/save events may carry shot type, on-target status, keeper
 state, and depth for deterministic telemetry. Snapshots and tapes carrying
 snapshot version 4 or earlier are intentionally rejected rather than silently
 restored without this behavior state. Soccer-only snapshots remain version 5
-and soccer-only input tapes remain version 1, preserving the frozen OMP-1
-artifact byte for byte.
+and soccer-only input-tape envelopes remain version 1. The current soccer
+fixture uses InputFrame v2 and is pinned at tape digest `d89f7fc53d660ab7`;
+the published historical InputFrame-v1/InputTape-v1 artifact remains archived
+at `881917e3ba798703`. Version 5 preserves the soccer snapshot schema and
+version-1 tape envelope, not byte identity across an input/ownership-schema
+upgrade.
 
 Combat-capable boundaries use MatchSnapshot version 6. The top-level snapshot
 owns `MatchState` and a version-1 `CombatMatchState` companion atomically;

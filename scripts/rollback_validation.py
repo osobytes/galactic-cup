@@ -694,11 +694,12 @@ def validate_runtime_metrics(
         raise RuntimeError(f"emitted {len(runtimes)} runtime provenance rows, expected one")
     runtime = runtimes[0].fields
     expected_runtime = {
-        "input_version": "1",
+        "input_version": "2",
         "gate_contract": "4",
         "love": "11.5.0",
-        "snapshot_version": "5",
+        "snapshot_versions": "5,6",
         "suite": suite,
+        "tape_versions": "1,2",
         "tick_rate": "60",
     }
     mismatches = [
@@ -2566,8 +2567,8 @@ def run_self_test() -> None:
 
     runtime_provenance = parse_runtime_metric(
         f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
-        f"gate_contract=4|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
-        "snapshot_version=5|tick_rate=60"
+        f"gate_contract=4|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=2|"
+        "tape_versions=1,2|snapshot_versions=5,6|tick_rate=60"
     )
     passing_samples = (10000,) * 6897 + (33301, 33400, 34000, 35000, 40000, 46040)
     passing_timing = timing_series("integrity", passing_samples)

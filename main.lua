@@ -399,8 +399,9 @@ if has_flag("--rollback-validation") then
             "suite=" .. suite,
             "gate_contract=4",
             "profile_digest=" .. rollback_validation.profile_digest(),
-            "input_version=1",
-            "snapshot_version=5",
+            "input_version=2",
+            "tape_versions=1,2",
+            "snapshot_versions=5,6",
             "tick_rate=60",
         }, "|"))
         flush_stdout()
