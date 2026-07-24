@@ -5,6 +5,7 @@
 - **Delivery:** post-showcase proofs
 - **Related:** `docs/vision.md`, `docs/showcase_release.md`,
   `docs/design/prototype_theme_roster.md`,
+  `docs/design/combat_interaction_contract.md`,
   [rigged-player contract issue #93][issue-93],
   [combat interaction contract issue #107][issue-107],
   [rigged 3D milestone 10][milestone-10], and
@@ -359,8 +360,10 @@ uses one of each family rather than inventing an economy.
 
 ### Owner-approved interaction defaults
 
-These decisions bound [issue #107][issue-107], which owns the normative input
-table, state transitions, coexistence cases, and initial tuning ranges:
+These decisions are specified normatively in
+`docs/design/combat_interaction_contract.md`, which resolves
+[issue #107][issue-107] with the input table, state transitions, coexistence
+cases, and initial tuning bounds:
 
 - Equipment uses a dedicated action: keyboard `J`, gamepad `B`. Existing
   Space/A shoot-tackle and K/X pass-switch mappings stay intact.
