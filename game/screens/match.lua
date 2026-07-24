@@ -55,6 +55,7 @@ local FIELD_H = 540
 
 ---@class MatchScreen : Screen
 ---@field state MatchState
+---@field _combat_state CombatMatchState?
 ---@field home_color number[]
 ---@field away_color number[]
 ---@field home_name string
@@ -273,19 +274,40 @@ function Match:consume_rollback_event_diff(diff)
     return true
 end
 
+-- Publish one stable rollback step to presentation consumers. Match and combat
+-- action records share the same confirmation ledger; lifecycle records retain
+-- their screen-owned transitions on top.
+---@param step RollbackEventStep
+---@return integer consumed_count
+function Match:consume_confirmed_step(step)
+    local consumed_count = 0
+    for _, event in ipairs(step.match_events) do
+        effects.confirm_event(event.id)
+        if audio.consume_confirmed(event) then
+            consumed_count = consumed_count + 1
+        end
+    end
+    for _, event in ipairs(step.combat_events or {}) do
+        effects.confirm_event(event.id)
+        if audio.consume_confirmed(event) then
+            consumed_count = consumed_count + 1
+        end
+    end
+    for _, event in ipairs(step.lifecycle_events) do
+        if self:consume_confirmed_lifecycle(event) then
+            consumed_count = consumed_count + 1
+        end
+    end
+    return consumed_count
+end
+
 ---@param self MatchScreen
 local function consume_rollback_presentation(self)
     for _, diff in ipairs(self._rollback_event_diffs) do
         self:consume_rollback_event_diff(diff)
     end
     for _, step in ipairs(self._rollback_confirmed_steps) do
-        for _, event in ipairs(step.match_events) do
-            effects.confirm_event(event.id)
-            audio.consume_confirmed(event)
-        end
-        for _, event in ipairs(step.lifecycle_events) do
-            self:consume_confirmed_lifecycle(event)
-        end
+        self:consume_confirmed_step(step)
     end
     if self._pending_confirmed_kickoff and not replay.active() then
         self._kickoff_banner = 1.15
@@ -324,10 +346,12 @@ function Match:restart()
     local away = self._opts.away or teams.orion
     local rollback_options = self._opts.rollback_lab
     local ownership = rollback_options and sim_match.ownership_for_teams(home, away) or nil
-    local initial = rollback_options
-            and rollback_options.initial_snapshot
-            and match_snapshot.restore(rollback_options.initial_snapshot)
-        or sim_match.new({
+    local initial ---@type MatchState
+    local initial_combat ---@type CombatMatchState?
+    if rollback_options and rollback_options.initial_snapshot then
+        initial, initial_combat = match_snapshot.restore(rollback_options.initial_snapshot)
+    else
+        initial = sim_match.new({
             home = home,
             away = away,
             field = { w = FIELD_W, h = FIELD_H },
@@ -338,17 +362,19 @@ function Match:restart()
             max_goals = rollback_options and rollback_options.max_goals or nil,
             input_ownership = ownership,
         })
+    end
     if rollback_options then
-        self._rollback_lab = rollback_playable_lab.new(match_snapshot.capture(initial), {
-            local_slot = rollback_options.local_slot,
-            profile_name = rollback_options.profile_name,
-            profile = rollback_options.network_profile,
-            network_seed = rollback_options.network_seed,
-            bot_seed = rollback_options.bot_seed,
-            max_rollback_ticks = rollback_options.max_rollback_ticks,
-            settlement_ticks = rollback_options.settlement_ticks,
-        })
-        self.state =
+        self._rollback_lab =
+            rollback_playable_lab.new(match_snapshot.capture(initial, initial_combat), {
+                local_slot = rollback_options.local_slot,
+                profile_name = rollback_options.profile_name,
+                profile = rollback_options.network_profile,
+                network_seed = rollback_options.network_seed,
+                bot_seed = rollback_options.bot_seed,
+                max_rollback_ticks = rollback_options.max_rollback_ticks,
+                settlement_ticks = rollback_options.settlement_ticks,
+            })
+        self.state, self._combat_state =
             match_snapshot.restore(rollback_playable_lab.current_snapshot(self._rollback_lab))
         local debug = rollback_playable_lab.debug_model(self._rollback_lab)
         ---@cast debug MatchRollbackDebugModel
@@ -357,6 +383,7 @@ function Match:restart()
         self._rollback_lab = nil
         self._rollback_debug = nil
         self.state = initial
+        self._combat_state = initial_combat
     end
     self._render_smoothing = correction_smoothing.new(self.state)
     self._render_pose = correction_smoothing.pose(self._render_smoothing)
@@ -703,7 +730,8 @@ function Match:update(dt)
             append_values(self._rollback_event_diffs, batch.event_diffs)
             append_values(self._rollback_confirmed_steps, batch.confirmed_steps)
             append_values(self._rollback_corrections, batch.corrections)
-            self.state = match_snapshot.restore(rollback_playable_lab.current_snapshot(lab))
+            self.state, self._combat_state =
+                match_snapshot.restore(rollback_playable_lab.current_snapshot(lab))
             return batch.status == "active" or batch.status == "settling"
         end)
         local debug = rollback_playable_lab.debug_model(lab)
@@ -722,7 +750,7 @@ function Match:update(dt)
         end, function(_, tick_input)
             replay.record(self.state) -- Pre-step, so the goal flight remains in the buffer.
             local score_before = self.state.score.home + self.state.score.away
-            sim_match.step(self.state, fixed_clock.TICK_SECONDS, tick_input)
+            sim_match.step(self.state, fixed_clock.TICK_SECONDS, tick_input, self._combat_state)
             for _, event in ipairs(self.state.events) do
                 self._frame_events[#self._frame_events + 1] = event
             end

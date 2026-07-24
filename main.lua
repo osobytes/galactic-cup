@@ -264,12 +264,13 @@ if has_flag("--rollback-validation") then
         local result = completed.result
         local game_pass = completed.expected_failure
         if not completed.expected_failure then
-            local initial = match_snapshot.restore(completed.initial_snapshot)
+            local initial, initial_combat = match_snapshot.restore(completed.initial_snapshot)
             local reference_final_state = match_snapshot.restore(result.reference_final_snapshot)
             local impaired_final_state = match_snapshot.restore(result.client_final_snapshot)
             local report = game_validation.run(initial, result.event_trace, {
                 home_team_id = "nebula",
                 away_team_id = "orion",
+                initial_combat_state = initial_combat,
                 reference_final_state = reference_final_state,
                 impaired_final_state = impaired_final_state,
                 seed = result.fixture_seed,
@@ -398,8 +399,9 @@ if has_flag("--rollback-validation") then
             "suite=" .. suite,
             "gate_contract=4",
             "profile_digest=" .. rollback_validation.profile_digest(),
-            "input_version=1",
-            "snapshot_version=5",
+            "input_version=2",
+            "tape_versions=1,2",
+            "snapshot_versions=5,6",
             "tick_rate=60",
         }, "|"))
         flush_stdout()

@@ -3823,6 +3823,9 @@ function match.step(s, dt, input, combat_state)
     local combat_module = combat_state and require("sim.combat") or nil
     if combat_state then
         assert(dt == fixed_clock.TICK_SECONDS, "combat matches require the canonical fixed tick")
+        if s.slot_mode then
+            assert(combat_state.tick == s.input_tick, "combat boundary does not match input tick")
+        end
     end
 
     local inputs ---@type table<integer, MatchInput>
@@ -3857,6 +3860,9 @@ function match.step(s, dt, input, combat_state)
     if s.time_left <= 0 then
         s.time_left = 0
         s.finished = true
+        if combat_state then
+            assert(combat_module).advance_boundary(combat_state)
+        end
         for _, player in ipairs(s.players) do
             player.keeper_set = 0
         end

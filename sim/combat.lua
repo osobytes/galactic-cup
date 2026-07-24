@@ -1,6 +1,8 @@
 local Vec2 = require("core.vec2")
+local combat_rules = require("sim.combat_rules")
 local fixed_clock = require("sim.fixed_clock")
 local match_snapshot = require("sim.match_snapshot")
+local combat_snapshot = require("sim.combat_snapshot")
 local action_families = require("data.action_families")
 local loadouts = require("data.loadouts")
 local player_pool = require("data.players")
@@ -18,6 +20,7 @@ local player_pool = require("data.players")
 ---| "guard_recoil"
 
 ---@class CombatPlayerState
+---@field loadout_id string?
 ---@field family_id ActionFamilyId?
 ---@field phase CombatActionPhase
 ---@field phase_ticks integer
@@ -54,6 +57,7 @@ local player_pool = require("data.players")
 ---@field displacement_px number?
 
 ---@class CombatMatchState
+---@field version integer
 ---@field tick integer
 ---@field player_ids string[]
 ---@field players CombatPlayerState[]
@@ -71,9 +75,9 @@ local player_pool = require("data.players")
 ---@field immune boolean
 ---@field source_pos Vec2
 
-local MAX_DISABLE_TICKS = 30
-local IMMUNITY_TICKS = 45
-local KNOCKBACK_THRESHOLD_PX = 12
+local MAX_DISABLE_TICKS = combat_rules.MAX_DISABLE_TICKS
+local IMMUNITY_TICKS = combat_rules.IMMUNITY_TICKS
+local KNOCKBACK_THRESHOLD_PX = combat_rules.KNOCKBACK_THRESHOLD_PX
 local PROJECTILE_STEP_PX = assert(action_families.ranged.projectile_speed_px_per_second)
     * fixed_clock.TICK_SECONDS
 local EPSILON = 1e-9
@@ -111,10 +115,12 @@ local function normalize_players_by_id(players_by_id)
     return by_id
 end
 
+---@param loadout_id string?
 ---@param family_id ActionFamilyId?
 ---@return CombatPlayerState
-local function new_player_state(family_id)
+local function new_player_state(loadout_id, family_id)
     return {
+        loadout_id = loadout_id,
         family_id = family_id,
         phase = "ready",
         phase_ticks = 0,
@@ -137,28 +143,29 @@ end
 function combat.new_state(state, players_by_id)
     match_snapshot.mark_unsupported(
         state,
-        "combat-active match snapshots are unsupported until issue #111"
+        "combat-active match snapshots require their CombatMatchState companion"
     )
     local by_id = normalize_players_by_id(players_by_id)
     local runtimes = {}
     local player_ids = {}
     for index, match_player in ipairs(state.players) do
         player_ids[index] = match_player.id
+        local loadout_id ---@type string?
         local family_id ---@type ActionFamilyId?
         if not match_player.is_keeper then
             local player_data = by_id[match_player.id]
             if player_data and player_data.loadout_id then
-                local loadout = assert(
-                    loadouts[player_data.loadout_id],
-                    "unknown combat loadout: " .. tostring(player_data.loadout_id)
-                )
+                loadout_id = player_data.loadout_id
+                local loadout =
+                    assert(loadouts[loadout_id], "unknown combat loadout: " .. tostring(loadout_id))
                 family_id = loadout.family_id
                 assert(action_families[family_id], "unknown action family: " .. tostring(family_id))
             end
         end
-        runtimes[index] = new_player_state(family_id)
+        runtimes[index] = new_player_state(loadout_id, family_id)
     end
     return {
+        version = combat_snapshot.VERSION,
         tick = 0,
         player_ids = player_ids,
         players = runtimes,
@@ -988,10 +995,17 @@ function combat.finish_tick(combat_state)
     combat_state.tick = combat_state.tick + 1
 end
 
+-- Full time still consumes one slot-mode InputFrame boundary, but it must not
+-- advance action mechanics after the match becomes terminal.
+---@param combat_state CombatMatchState
+function combat.advance_boundary(combat_state)
+    combat_state.tick = combat_state.tick + 1
+end
+
 ---@param combat_state CombatMatchState
 function combat.reset(combat_state)
     for index, runtime in ipairs(combat_state.players) do
-        combat_state.players[index] = new_player_state(runtime.family_id)
+        combat_state.players[index] = new_player_state(runtime.loadout_id, runtime.family_id)
     end
     combat_state.projectiles = {}
     combat_state.events = {}
@@ -1001,18 +1015,16 @@ end
 ---@param combat_state CombatMatchState
 function combat.reset_for_kickoff(combat_state)
     for index, runtime in ipairs(combat_state.players) do
-        combat_state.players[index] = new_player_state(runtime.family_id)
+        combat_state.players[index] = new_player_state(runtime.loadout_id, runtime.family_id)
     end
     combat_state.projectiles = {}
 end
 
 ---@param combat_state CombatMatchState
----@return nil
----@return string error
+---@return CombatMatchState
 function combat.snapshot(combat_state)
     assert(type(combat_state) == "table", "combat state is required")
-    return nil,
-        "combat snapshots are unsupported until issue #111 versions the authoritative schema"
+    return combat_snapshot.copy_owned(combat_state, false)
 end
 
 return combat

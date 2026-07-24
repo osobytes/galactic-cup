@@ -41,6 +41,10 @@ from web_serve import ArtifactHandler
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HISTORICAL_SOCCER_EVIDENCE = (
+    ROOT / "docs" / "online" / "evidence" / "omp2_rollback_linux_2026-07-24.json"
+)
+HISTORICAL_SOCCER_TAPE_DIGEST = "881917e3ba798703"
 MARKER_PREFIX = "GC_ROLLBACK_VALIDATION"
 METRICS_PREFIX = "GC_ROLLBACK_METRICS"
 TIMINGS_PREFIX = "GC_ROLLBACK_TIMINGS"
@@ -76,12 +80,26 @@ EXTERNAL_MEMORY_SAMPLES = SOAK_SAMPLES
 EXPECTED_PROFILE_DIGEST = "5fbf1e0d51a6f4d5"
 MAX_MEMORY_GROWTH_RATIO = 0.10
 MAX_SNAPSHOT_COUNT = 31
-MAX_SNAPSHOT_BYTES = 600 * 1024
+MAX_SNAPSHOT_BYTES = 768 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 MAX_P95_WORK_MS = 16.67
 MAX_ROLLBACK_P999_MS = 33.3
 MAX_ROLLBACK_P999_US = 33300
 ROLLBACK_PERCENTILE = 0.999
+
+
+def validate_historical_soccer_evidence() -> None:
+    try:
+        evidence = json.loads(HISTORICAL_SOCCER_EVIDENCE.read_text(encoding="utf-8"))
+        actual = evidence["simulation_contract"]["rollback_tape_digest"]
+    except (FileNotFoundError, KeyError, json.JSONDecodeError) as error:
+        raise RuntimeError("historical soccer rollback evidence is unavailable") from error
+    if actual != HISTORICAL_SOCCER_TAPE_DIGEST:
+        raise RuntimeError(
+            "historical soccer rollback tape digest changed: "
+            f"{actual!r} != {HISTORICAL_SOCCER_TAPE_DIGEST!r}"
+        )
+
 
 BROWSER_CONSOLE_WAIT_SCRIPT = """
 const cursor = arguments[0];
@@ -401,6 +419,14 @@ def expected_case_plan(
             "scenario": "complete_fixture",
         }
 
+    def combat_case(profile: str, seed: int, case_id: str | None = None) -> dict[str, str]:
+        return {
+            "case": case_id or f"combat-{profile}-{seed}",
+            "network_seed": str(seed),
+            "profile": profile,
+            "scenario": "combat",
+        }
+
     def scenario_case(scenario: str, profile: str, seed: int) -> dict[str, str]:
         return {
             "case": f"scenario-{scenario}-{profile}-{seed}",
@@ -415,9 +441,17 @@ def expected_case_plan(
         for profile in NATIVE_PROFILES:
             for seed in NETWORK_SEEDS:
                 plan.append(full_case(profile, seed))
+                plan.append(combat_case(profile, seed))
         for seed in NETWORK_SEEDS:
             for scenario in SCENARIOS:
                 plan.append(scenario_case(scenario, STRESS_PROFILE, seed))
+            plan.append(
+                combat_case(
+                    STRESS_PROFILE,
+                    seed,
+                    f"combat-stress-evidence-{seed}",
+                )
+            )
     elif suite == "browser-full":
         if len(arguments) != 2:
             raise RuntimeError("browser-full requires profile and network seed")
@@ -428,6 +462,7 @@ def expected_case_plan(
         if seed not in NETWORK_SEEDS:
             raise RuntimeError("browser-full received an unsupported network seed")
         plan.append(full_case(profile, seed))
+        plan.append(combat_case(profile, seed))
     elif suite == "browser-stress":
         if len(arguments) != 2 or arguments[0] != STRESS_PROFILE:
             raise RuntimeError("browser-stress requires the pinned stress profile and seed")
@@ -436,6 +471,13 @@ def expected_case_plan(
         seed = int(arguments[1])
         for scenario in SCENARIOS:
             plan.append(scenario_case(scenario, STRESS_PROFILE, seed))
+        plan.append(
+            combat_case(
+                STRESS_PROFILE,
+                seed,
+                f"combat-stress-evidence-{seed}",
+            )
+        )
     elif suite == "late-window":
         if arguments:
             raise RuntimeError("late-window validation does not accept case filters")
@@ -452,6 +494,13 @@ def expected_case_plan(
         if arguments:
             raise RuntimeError("soak validation does not accept case filters")
         for index, seed in enumerate(SOAK_NETWORK_SEEDS, start=1):
+            plan.append(
+                combat_case(
+                    "playable",
+                    seed,
+                    f"combat-soak-{index}-{seed}",
+                )
+            )
             plan.append(
                 {
                     "case": f"soak-{index}-{seed}",
@@ -503,6 +552,7 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             "cpu_gate",
             "cpu_gate_applied",
             "event_confirmed_digest",
+            "event_confirmed_combat",
             "event_reference_digest",
             "event_residue",
             "expected_failure",
@@ -510,15 +560,20 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             "gate_contract",
             "history_gate",
             "hidden_progress",
+            "initial_hash",
             "lab_success",
             "peak_history_bytes",
             "peak_snapshot_bytes",
             "peak_snapshots",
             "profile",
             "reference_hash",
+            "resimulated",
             "scenario_pass",
+            "snapshot_version",
             "snapshot_gate",
             "success",
+            "tape_digest",
+            "tape_version",
         )
         missing = [name for name in required if fields.get(name) in {None, ""}]
         if missing:
@@ -531,6 +586,33 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             raise RuntimeError(f"{case_id} did not cover its declared scenario")
         if fields["hidden_progress"] != "0":
             raise RuntimeError(f"{case_id} made hidden progress after a terminal result")
+        combat_case = fields.get("scenario") == "combat"
+        expected_tape_version = "2" if combat_case else "1"
+        expected_snapshot_version = "6" if combat_case else "5"
+        if fields["tape_version"] != expected_tape_version:
+            raise RuntimeError(
+                f"{case_id} reports tape_version={fields['tape_version']!r}, "
+                f"expected {expected_tape_version!r}"
+            )
+        if fields["snapshot_version"] != expected_snapshot_version:
+            raise RuntimeError(
+                f"{case_id} reports snapshot_version={fields['snapshot_version']!r}, "
+                f"expected {expected_snapshot_version!r}"
+            )
+        for field in ("initial_hash", "reference_hash", "client_hash", "tape_digest"):
+            if not re.fullmatch(r"[0-9a-f]{16}", fields[field]):
+                raise RuntimeError(f"{case_id} reports malformed {field}")
+        confirmed_combat = non_negative_integer(
+            fields["event_confirmed_combat"],
+            f"{case_id} event_confirmed_combat",
+        )
+        if combat_case and confirmed_combat == 0:
+            raise RuntimeError(f"{case_id} did not confirm a combat event")
+        if not combat_case and confirmed_combat != 0:
+            raise RuntimeError(f"{case_id} soccer fixture reported combat events")
+        resimulated = non_negative_integer(fields["resimulated"], f"{case_id} resimulated")
+        if combat_case and fields["profile"] != "clean" and resimulated == 0:
+            raise RuntimeError(f"{case_id} did not exercise combat resimulation")
         if fields["gate_contract"] != "4":
             raise RuntimeError(
                 f"{case_id} reports gate_contract={fields['gate_contract']!r}"
@@ -579,7 +661,7 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             if snapshot_count > MAX_SNAPSHOT_COUNT:
                 raise RuntimeError(f"{case_id} exceeded the 31-snapshot gate")
             if snapshot_bytes >= MAX_SNAPSHOT_BYTES:
-                raise RuntimeError(f"{case_id} exceeded the 600 KiB snapshot gate")
+                raise RuntimeError(f"{case_id} exceeded the 768 KiB snapshot gate")
             if history_bytes >= MAX_HISTORY_BYTES:
                 raise RuntimeError(f"{case_id} exceeded the 1 MiB history gate")
 
@@ -612,11 +694,12 @@ def validate_runtime_metrics(
         raise RuntimeError(f"emitted {len(runtimes)} runtime provenance rows, expected one")
     runtime = runtimes[0].fields
     expected_runtime = {
-        "input_version": "1",
+        "input_version": "2",
         "gate_contract": "4",
         "love": "11.5.0",
-        "snapshot_version": "5",
+        "snapshot_versions": "5,6",
         "suite": suite,
+        "tape_versions": "1,2",
         "tick_rate": "60",
     }
     mismatches = [
@@ -852,14 +935,16 @@ def rollback_timing_record(timings: list[RollbackTimingSeries]) -> dict[str, Any
 
 def validate_soak_contract(markers: list[ValidationMarker]) -> dict[str, ValidationMarker]:
     cases = [marker for marker in markers if marker.kind == "case"]
-    emitted_samples = [marker.fields.get("sample") for marker in cases]
+    checkpoint_cases = [marker for marker in cases if marker.fields.get("sample") != "none"]
+    combat_cases = [marker for marker in cases if marker.fields.get("sample") == "none"]
+    emitted_samples = [marker.fields.get("sample") for marker in checkpoint_cases]
     if emitted_samples != list(SOAK_SAMPLES):
         raise RuntimeError(
             "soak checkpoint order is "
             f"{emitted_samples!r}, expected {list(SOAK_SAMPLES)!r}"
         )
     by_sample: dict[str, ValidationMarker] = {}
-    for marker in cases:
+    for marker in checkpoint_cases:
         sample = marker.fields.get("sample")
         if sample not in SOAK_SAMPLES:
             raise RuntimeError(f"soak case has unexpected sample {sample!r}")
@@ -879,8 +964,13 @@ def validate_soak_contract(markers: list[ValidationMarker]) -> dict[str, Validat
     missing = [sample for sample in SOAK_SAMPLES if sample not in by_sample]
     if missing:
         raise RuntimeError(f"soak omitted checkpoints: {', '.join(missing)}")
-    if len(cases) != len(SOAK_SAMPLES):
-        raise RuntimeError("soak emitted unexpected non-checkpoint cases")
+    if combat_cases and len(combat_cases) != len(SOAK_NETWORK_SEEDS):
+        raise RuntimeError("soak emitted the wrong number of bounded combat cases")
+    for marker in combat_cases:
+        if marker.fields.get("scenario") != "combat":
+            raise RuntimeError("soak emitted an unexpected non-checkpoint case")
+        if marker.fields.get("forced_gc") is not None:
+            raise RuntimeError("bounded combat cases cannot become memory checkpoints")
     return by_sample
 
 
@@ -2173,6 +2263,7 @@ def browser_matrix(
 
 
 def run_self_test() -> None:
+    validate_historical_soccer_evidence()
     if Path("/proc").is_dir():
         current = read_process_table().get(os.getpid())
         if current is None:
@@ -2342,11 +2433,11 @@ def run_self_test() -> None:
     if fake_command_driver.command_executor.client_config.timeout != 1810.0:
         raise RuntimeError("WebDriver command timeout self-test failed")
     expected_counts = {
-        ("native", ()): 39,
-        ("browser-full", ("clean", "2001")): 1,
-        ("browser-stress", ("stress", "2001")): 9,
+        ("native", ()): 54,
+        ("browser-full", ("clean", "2001")): 2,
+        ("browser-stress", ("stress", "2001")): 10,
         ("late-window", ()): 2,
-        ("soak", ()): 5,
+        ("soak", ()): 10,
     }
     for (suite, arguments), count in expected_counts.items():
         if len(expected_case_plan(suite, arguments)) != count:
@@ -2377,12 +2468,17 @@ def run_self_test() -> None:
         raise RuntimeError("interruption handler self-test failed")
 
     integrity_case = parse_marker(
-        f"{MARKER_PREFIX}|case|schema=1|case=integrity|profile=playable|success=1|"
+        f"{MARKER_PREFIX}|case|schema=1|case=integrity|scenario=complete_fixture|"
+        "profile=playable|success=1|"
         "lab_success=1|expected_failure=0|hidden_progress=0|scenario_pass=1|"
         "gate_contract=4|cpu_gate=1|cpu_gate_applied=1|snapshot_gate=1|"
         "history_gate=1|game_gate=1|rollbacks=6903|"
-        "reference_hash=abcd|client_hash=abcd|event_reference_digest=ef01|"
-        "event_confirmed_digest=ef01|event_residue=0|peak_snapshots=31|"
+        "tape_version=1|snapshot_version=5|"
+        "initial_hash=0000000000000001|reference_hash=0000000000000002|"
+        "client_hash=0000000000000002|tape_digest=881917e3ba798703|resimulated=42|"
+        "event_reference_digest=0000000000000003|"
+        "event_confirmed_digest=0000000000000003|event_confirmed_combat=0|"
+        "event_residue=0|peak_snapshots=31|"
         "peak_snapshot_bytes=614399|peak_history_bytes=1048575"
     )
     validate_case_integrity([integrity_case], "native")
@@ -2403,6 +2499,15 @@ def run_self_test() -> None:
         integrity_case.raw.replace("peak_snapshots=31", "peak_snapshots=32"),
         "native",
         "over-budget playable case",
+    )
+    near_snapshot_limit = parse_marker(
+        integrity_case.raw.replace("peak_snapshot_bytes=614399", "peak_snapshot_bytes=786431")
+    )
+    validate_case_integrity([near_snapshot_limit], "native")
+    expect_integrity_failure(
+        integrity_case.raw.replace("peak_snapshot_bytes=614399", "peak_snapshot_bytes=786432"),
+        "native",
+        "768 KiB inclusive snapshot limit",
     )
     soak_case = parse_marker(
         integrity_case.raw.replace(
@@ -2462,8 +2567,8 @@ def run_self_test() -> None:
 
     runtime_provenance = parse_runtime_metric(
         f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
-        f"gate_contract=4|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
-        "snapshot_version=5|tick_rate=60"
+        f"gate_contract=4|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=2|"
+        "tape_versions=1,2|snapshot_versions=5,6|tick_rate=60"
     )
     passing_samples = (10000,) * 6897 + (33301, 33400, 34000, 35000, 40000, 46040)
     passing_timing = timing_series("integrity", passing_samples)
@@ -2899,6 +3004,7 @@ def main() -> int:
     if args.self_test:
         run_self_test()
         return 0
+    validate_historical_soccer_evidence()
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be positive")
     if args.mode in {"browser", "full"} and args.artifact is None:
