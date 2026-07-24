@@ -20,8 +20,10 @@ declarations live next to their data; this file is the human-readable overview.
 ---@class PlayerData
 ---@field id string          -- stable unique key
 ---@field name string
----@field planet string
+---@field planet string       -- current showcase identity copy
 ---@field position Position
+---@field species string      -- current showcase mechanical id; neutral in shipped content
+---@field presentation_species string? -- current showcase UI/pitch identity
 ---@field stats StatBlock
 ---@field trait string       -- reserved post-showcase trait id
 ```
@@ -64,10 +66,40 @@ A `Layout` is an ordered `Widget[]` (`id, rect, kind, text, selected, data`). Pu
 (`game/screens/squad|formation|tactic.lua`) build a Layout from state; `game/ui/draw.lua`
 renders it; `hit.at`/`hit.find` do pure hit-testing. See AGENTS.md §9.
 
+## Post-showcase GOLISEO identity separation
+
+The current showcase keeps presentation species directly on `PlayerData`.
+Post-showcase GOLISEO work will generalize this without coupling stats to a
+specific model:
+
+```text
+PlayerData
+    stable identity, name, number, position, stats, loadout
+        |
+        +-- presentation_id --> reusable character mesh/material/rig package
+        |
+        +-- cosmetic variant --> palette, head/face, safe accessory choices
+```
+
+Ten persistent players may therefore reference six reusable presentation
+packages while retaining different names, positions, stats, and loadouts.
+Presentation choice never grants stats or a theme passive.
+
+The first combat and rendering proofs use authored player records. A later
+roster generator may create them from a deterministic seed, but it must
+materialize and persist the resolved values. Stats, names, or cosmetics do not
+reroll per match or per load. Generated stat profiles use bounded budgets and
+position-weighted archetypes rather than five independent random values.
+
+This separation is authoritative direction but not an implemented
+`PlayerData` change. The prototype content contract and randomness guardrails
+live in `docs/design/prototype_theme_roster.md`.
+
 ## Parked after the showcase
 
 - `data/traits.lua` — `TraitData` (id, name, trigger, effect)
 - RPG fields layered onto a runtime `PlayerState` (xp, level, morale, fatigue) — kept separate
   from immutable `PlayerData`.
+- Deterministic generated-roster materialization and cosmetic variant fields.
 
 These shapes are not part of the active showcase scope. See `docs/showcase_release.md`.
