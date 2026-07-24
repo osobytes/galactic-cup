@@ -1904,6 +1904,25 @@ def set_webdriver_command_timeout(driver: Any, timeout_seconds: float) -> None:
     client_config.timeout = timeout_seconds
 
 
+def validated_browser_version(driver: Any, browser_name: str) -> str:
+    """Read an exact dotted-numeric browser version from raw WebDriver capabilities."""
+
+    capabilities = getattr(driver, "capabilities", None)
+    if not isinstance(capabilities, dict):
+        raise RuntimeError(f"{browser_name} WebDriver capabilities are malformed")
+    reported_browser = capabilities.get("browserName")
+    if reported_browser != browser_name:
+        raise RuntimeError(
+            f"{browser_name} WebDriver reports browserName={reported_browser!r}"
+        )
+    version = capabilities.get("browserVersion")
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", version):
+        raise RuntimeError(
+            f"{browser_name} WebDriver reports malformed browserVersion={version!r}"
+        )
+    return version
+
+
 def run_browser_once(
     browser_name: str,
     binary: Path,
@@ -1953,7 +1972,9 @@ def run_browser_once(
     result: ValidationMarker | None = None
     teardown: dict[str, Any]
     resources: dict[str, Any]
+    browser_version: str
     try:
+        browser_version = validated_browser_version(driver, browser_name)
         if browser_name == "chrome":
             driver.execute_cdp_cmd("Performance.enable", {})
         resource_checkpoints.append(browser_checkpoint(sampler, driver, browser_name, "started"))
@@ -2067,7 +2088,7 @@ def run_browser_once(
     record = {
         "arguments": list(arguments),
         "browser": browser_name,
-        "browser_version": str(driver.capabilities.get("browserVersion")),
+        "browser_version": browser_version,
         "duration_seconds": round(time.monotonic() - started, 6),
         "log": {
             "path": str(log_path.resolve()),
@@ -2114,8 +2135,8 @@ def browser_plan(campaign: str = "all") -> list[tuple[str, tuple[str, ...]]]:
         raise ValueError(f"unknown rollback campaign {campaign!r}")
     plan = []
     if campaign in {"all", "matrix"}:
-        for profile in BROWSER_FULL_PROFILES:
-            for network_seed in NETWORK_SEEDS:
+        for network_seed in NETWORK_SEEDS:
+            for profile in BROWSER_FULL_PROFILES:
                 plan.append(("browser-full", (profile, str(network_seed))))
         for network_seed in NETWORK_SEEDS:
             plan.append(("browser-stress", (STRESS_PROFILE, str(network_seed))))
@@ -2150,6 +2171,9 @@ def browser_cpu_case(
         reasons.append(f"{label} has malformed arguments")
         return None, None, reasons
     profile, seed = arguments
+    if not isinstance(profile, str) or not isinstance(seed, str):
+        reasons.append(f"{label} has non-string profile or seed arguments")
+        return None, None, reasons
     if profile not in BROWSER_FULL_PROFILES:
         reasons.append(f"{label} has unexpected profile {profile!r}")
         return None, None, reasons
@@ -2163,22 +2187,46 @@ def browser_cpu_case(
     if not isinstance(raw_markers, list):
         reasons.append(f"{label} omits validation markers")
         return key, None, reasons
+    if not all(isinstance(raw, str) for raw in raw_markers):
+        reasons.append(f"{label} contains a non-string validation marker")
+        return key, None, reasons
     try:
-        markers = [parse_marker(raw) for raw in raw_markers if isinstance(raw, str)]
+        markers = [parse_marker(raw) for raw in raw_markers]
     except RuntimeError as error:
         reasons.append(f"{label} has malformed validation markers: {error}")
         return key, None, reasons
     case_markers = [marker for marker in markers if marker.kind == "case"]
-    if len(case_markers) != 1:
+    result_markers = [marker for marker in markers if marker.kind == "result"]
+    if len(markers) != 2 or len(case_markers) != 1 or len(result_markers) != 1:
         reasons.append(
-            f"{label} has {len(case_markers)} case markers, expected exactly one"
+            f"{label} has {len(case_markers)} case and {len(result_markers)} result "
+            "markers, expected exactly one of each"
         )
         return key, None, reasons
     marker = case_markers[0]
+    result = result_markers[0]
+    expected_result = {
+        "case_count": "1",
+        "schema": "1",
+        "success": "1",
+        "suite": "browser-full",
+    }
+    result_mismatches = [
+        f"{name}={result.fields.get(name)!r}"
+        for name, value in expected_result.items()
+        if result.fields.get(name) != value
+    ]
+    if result_mismatches or not result.fields.get("logical_digest"):
+        reasons.append(
+            f"{label} result marker mismatch: "
+            + ", ".join(result_mismatches or ["logical_digest is missing"])
+        )
+        return key, None, reasons
     expected_marker = {
         "case": expected_case,
         "network_seed": seed,
         "profile": profile,
+        "schema": "1",
     }
     marker_mismatches = [
         f"{name}={marker.fields.get(name)!r}"
@@ -2194,20 +2242,70 @@ def browser_cpu_case(
     if not isinstance(rows, list):
         reasons.append(f"{label} omits runtime metric rows")
         return key, None, reasons
-    case_rows = [
-        row
-        for row in rows
-        if isinstance(row, dict) and row.get("kind") == "case"
-    ]
-    if len(case_rows) != 1:
+    parsed_metrics: list[RuntimeMetric] = []
+    for row_index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict) or set(row) != {"fields", "kind", "marker"}:
+            reasons.append(f"{label} runtime metric row {row_index} has malformed schema")
+            continue
+        fields = row["fields"]
+        kind = row["kind"]
+        raw = row["marker"]
+        if (
+            not isinstance(fields, dict)
+            or not all(
+                isinstance(name, str) and isinstance(value, str)
+                for name, value in fields.items()
+            )
+            or not isinstance(kind, str)
+            or not isinstance(raw, str)
+        ):
+            reasons.append(f"{label} runtime metric row {row_index} has malformed types")
+            continue
+        try:
+            parsed = parse_runtime_metric(raw)
+        except RuntimeError as error:
+            reasons.append(
+                f"{label} runtime metric row {row_index} is malformed: {error}"
+            )
+            continue
+        if parsed.kind != kind or parsed.fields != fields:
+            reasons.append(
+                f"{label} runtime metric row {row_index} differs from its marker"
+            )
+            continue
+        parsed_metrics.append(parsed)
+    runtime_rows = [metric for metric in parsed_metrics if metric.kind == "runtime"]
+    case_rows = [metric for metric in parsed_metrics if metric.kind == "case"]
+    if (
+        reasons
+        or len(rows) != 2
+        or len(runtime_rows) != 1
+        or len(case_rows) != 1
+    ):
         reasons.append(
-            f"{label} has {len(case_rows)} case metrics, expected exactly one"
+            f"{label} has {len(runtime_rows)} runtime and {len(case_rows)} case "
+            "metrics, expected exactly one of each"
         )
         return key, None, reasons
-    fields = case_rows[0].get("fields")
-    if not isinstance(fields, dict):
-        reasons.append(f"{label} case metric fields are malformed")
+    declared_metric_digest = runtime_metrics.get("marker_sha256")
+    metric_payload = ("\n".join(metric.raw for metric in parsed_metrics) + "\n").encode()
+    if (
+        not isinstance(declared_metric_digest, str)
+        or declared_metric_digest != sha256_bytes(metric_payload)
+    ):
+        reasons.append(f"{label} runtime metric digest is missing or mismatched")
         return key, None, reasons
+    runtime_fields = runtime_rows[0].fields
+    if (
+        runtime_fields.get("gate_contract") != GATE_CONTRACT
+        or runtime_fields.get("suite") != "browser-full"
+    ):
+        reasons.append(
+            f"{label} runtime metric does not identify contract "
+            f"{GATE_CONTRACT} browser-full evidence"
+        )
+        return key, None, reasons
+    fields = case_rows[0].fields
     if fields.get("case") != expected_case or fields.get("profile") != profile:
         reasons.append(
             f"{label} metric identifies case={fields.get('case')!r}, "
@@ -2267,14 +2365,22 @@ def browser_cpu_acceptance(
     rows: dict[tuple[str, str], dict[str, Any]] = {}
     browser_versions: set[str] = set()
     for run_index, run in enumerate(runs, start=1):
+        if not isinstance(run, dict):
+            reasons.append(
+                f"{browser_name} browser run {run_index} is not an evidence object"
+            )
+            continue
         if run.get("suite") != "browser-full":
             continue
         browser_version = run.get("browser_version")
-        if isinstance(browser_version, str) and browser_version:
+        if isinstance(browser_version, str) and re.fullmatch(
+            r"[0-9]+(?:\.[0-9]+)+",
+            browser_version,
+        ):
             browser_versions.add(browser_version)
         else:
             reasons.append(
-                f"{browser_name} browser-full run {run_index} omits browser_version"
+                f"{browser_name} browser-full run {run_index} has malformed browser_version"
             )
         key, row, row_reasons = browser_cpu_case(run, browser_name, run_index)
         reasons.extend(row_reasons)
@@ -2541,10 +2647,10 @@ def run_self_test() -> None:
 
     expected_plan = [
         ("browser-full", ("clean", "2001")),
-        ("browser-full", ("clean", "2002")),
-        ("browser-full", ("clean", "2003")),
         ("browser-full", ("playable", "2001")),
+        ("browser-full", ("clean", "2002")),
         ("browser-full", ("playable", "2002")),
+        ("browser-full", ("clean", "2003")),
         ("browser-full", ("playable", "2003")),
         ("browser-stress", ("stress", "2001")),
         ("browser-stress", ("stress", "2002")),
@@ -2649,6 +2755,43 @@ def run_self_test() -> None:
     set_webdriver_command_timeout(fake_command_driver, 1810.0)
     if fake_command_driver.command_executor.client_config.timeout != 1810.0:
         raise RuntimeError("WebDriver command timeout self-test failed")
+
+    class FakeCapabilityDriver:
+        def __init__(self, capabilities: Any) -> None:
+            self.capabilities = capabilities
+
+    if (
+        validated_browser_version(
+            FakeCapabilityDriver(
+                {"browserName": "firefox", "browserVersion": "153.0"}
+            ),
+            "firefox",
+        )
+        != "153.0"
+    ):
+        raise RuntimeError("raw browser-version bridge self-test lost the version")
+    malformed_capabilities = (
+        None,
+        {},
+        {"browserName": "chrome", "browserVersion": "153.0"},
+        {"browserName": "firefox"},
+        {"browserName": "firefox", "browserVersion": None},
+        {"browserName": "firefox", "browserVersion": ""},
+        {"browserName": "firefox", "browserVersion": 153.0},
+        {"browserName": "firefox", "browserVersion": "None"},
+        {"browserName": "firefox", "browserVersion": "153"},
+        {"browserName": "firefox", "browserVersion": "153.0 beta"},
+    )
+    for capabilities in malformed_capabilities:
+        try:
+            validated_browser_version(
+                FakeCapabilityDriver(capabilities),
+                "firefox",
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("malformed raw browser version passed self-test")
     expected_counts = {
         ("native", ()): 39,
         ("browser-full", ("clean", "2001")): 1,
@@ -2706,32 +2849,43 @@ def run_self_test() -> None:
         rollback_p999_ms: float,
         *,
         browser_name: str = "firefox",
-        browser_version: str = "self-test",
+        browser_version: str = "153.0",
         marker_seed: int | None = None,
     ) -> dict[str, Any]:
         emitted_seed = marker_seed or seed
         case_id = f"full-{profile}-{emitted_seed}"
+        runtime_metric = parse_runtime_metric(
+            f"{METRICS_PREFIX}|runtime|suite=browser-full|"
+            f"gate_contract={GATE_CONTRACT}"
+        )
+        case_metric = parse_runtime_metric(
+            f"{METRICS_PREFIX}|case|case=full-{profile}-{seed}|profile={profile}|"
+            f"max_rollback_ms={rollback_p999_ms + 1:.6f}|"
+            f"p95_work_ms={p95_work_ms:.6f}|"
+            "rollback_over_33_3_count=0|"
+            f"rollback_p999_ms={rollback_p999_ms:.6f}"
+        )
+        metrics = [runtime_metric, case_metric]
+        metric_payload = ("\n".join(metric.raw for metric in metrics) + "\n").encode()
         return {
             "arguments": [profile, str(seed)],
             "browser": browser_name,
             "browser_version": browser_version,
             "markers": [
-                f"{MARKER_PREFIX}|case|case={case_id}|profile={profile}|"
-                f"network_seed={emitted_seed}"
+                f"{MARKER_PREFIX}|case|schema=1|case={case_id}|profile={profile}|"
+                f"network_seed={emitted_seed}",
+                f"{MARKER_PREFIX}|result|schema=1|suite=browser-full|success=1|"
+                "logical_digest=self-test|case_count=1",
             ],
             "runtime_metrics": {
+                "marker_sha256": sha256_bytes(metric_payload),
                 "rows": [
                     {
-                        "fields": {
-                            "case": f"full-{profile}-{seed}",
-                            "max_rollback_ms": f"{rollback_p999_ms + 1:.6f}",
-                            "p95_work_ms": f"{p95_work_ms:.6f}",
-                            "profile": profile,
-                            "rollback_over_33_3_count": "0",
-                            "rollback_p999_ms": f"{rollback_p999_ms:.6f}",
-                        },
-                        "kind": "case",
+                        "fields": metric.fields,
+                        "kind": metric.kind,
+                        "marker": metric.raw,
                     }
+                    for metric in metrics
                 ]
             },
             "suite": "browser-full",
@@ -2742,8 +2896,8 @@ def run_self_test() -> None:
         rollback_regression_seeds: tuple[int, ...] = (),
     ) -> list[dict[str, Any]]:
         runs = []
-        for profile in BROWSER_FULL_PROFILES:
-            for index, seed in enumerate(NETWORK_SEEDS):
+        for index, seed in enumerate(NETWORK_SEEDS):
+            for profile in BROWSER_FULL_PROFILES:
                 clean_p95 = (2.0 + index * 0.25) * scale
                 if profile == "clean":
                     p95_work = clean_p95
@@ -2783,6 +2937,51 @@ def run_self_test() -> None:
     ):
         raise RuntimeError("aggregate browser CPU failure omitted a regressing pair")
     complete_controls = synthetic_browser_cpu_matrix(1.0)
+
+    def replace_control(
+        controls: list[dict[str, Any]],
+        replacement: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        arguments = replacement["arguments"]
+        return [
+            replacement if control["arguments"] == arguments else control
+            for control in controls
+        ]
+
+    exact_p95_boundary = browser_cpu_acceptance(
+        replace_control(
+            complete_controls,
+            synthetic_browser_cpu_run(
+                "playable",
+                2001,
+                2.0 * MAX_BROWSER_P95_WORK_RATIO,
+                2.0 * 9.5,
+            ),
+        ),
+        "firefox",
+    )
+    if exact_p95_boundary["pass"] or not any(
+        "seed 2001 p95_work_ratio=6.700000000" in reason
+        for reason in exact_p95_boundary["reasons"]
+    ):
+        raise RuntimeError("exact browser p95 ratio threshold passed strict gate")
+    exact_rollback_boundary = browser_cpu_acceptance(
+        replace_control(
+            complete_controls,
+            synthetic_browser_cpu_run(
+                "playable",
+                2002,
+                2.25 * 5.5,
+                2.25 * MAX_BROWSER_ROLLBACK_P999_RATIO,
+            ),
+        ),
+        "firefox",
+    )
+    if exact_rollback_boundary["pass"] or not any(
+        "seed 2002 rollback_p999_ratio=11.700000000" in reason
+        for reason in exact_rollback_boundary["reasons"]
+    ):
+        raise RuntimeError("exact browser rollback ratio threshold passed strict gate")
     missing_control = browser_cpu_acceptance(complete_controls[:-1], "firefox")
     if missing_control["pass"] or not any(
         "missing the playable case for seed 2003" in reason
@@ -2813,6 +3012,38 @@ def run_self_test() -> None:
         "marker mismatch" in reason for reason in mismatched_control["reasons"]
     ):
         raise RuntimeError("mismatched browser CPU control passed normalization")
+    non_string_marker_run = {
+        **complete_controls[0],
+        "markers": [*complete_controls[0]["markers"], 42],
+    }
+    non_string_marker = browser_cpu_acceptance(
+        [non_string_marker_run, *complete_controls[1:]],
+        "firefox",
+    )
+    if non_string_marker["pass"] or not any(
+        "non-string validation marker" in reason
+        for reason in non_string_marker["reasons"]
+    ):
+        raise RuntimeError("non-string browser CPU marker passed normalization")
+    malformed_metric_run = {
+        **complete_controls[0],
+        "runtime_metrics": {
+            **complete_controls[0]["runtime_metrics"],
+            "rows": [
+                *complete_controls[0]["runtime_metrics"]["rows"],
+                {"kind": "case"},
+            ],
+        },
+    }
+    malformed_metric = browser_cpu_acceptance(
+        [malformed_metric_run, *complete_controls[1:]],
+        "firefox",
+    )
+    if malformed_metric["pass"] or not any(
+        "runtime metric row 3 has malformed schema" in reason
+        for reason in malformed_metric["reasons"]
+    ):
+        raise RuntimeError("malformed extra browser CPU metric passed normalization")
     wrong_browser_controls = [
         synthetic_browser_cpu_run("clean", 2001, 2.0, 0.0, browser_name="chrome"),
         *complete_controls[1:],
@@ -2828,7 +3059,7 @@ def run_self_test() -> None:
             2001,
             2.0,
             0.0,
-            browser_version="different",
+            browser_version="154.0",
         ),
         *complete_controls[1:],
     ]

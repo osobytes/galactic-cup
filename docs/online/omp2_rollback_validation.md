@@ -81,6 +81,8 @@ browser-version, profile, and seed metadata, requires a finite positive clean p9
 and then evaluates every pair with strict `<` comparisons. Missing, duplicate, malformed, or
 mismatched controls fail closed. The normalized evidence records every pair, both ratios, the
 thresholds, all violations, and the absolute p95, p99.9, maximum, and over-33.3-ms count.
+Each clean control runs immediately before its matching playable seed. This interleaving reduces
+temporal shared-runner drift without adding a case or weakening exact seed pairing.
 
 The thresholds are calibrated from the complete Chrome and Firefox distributions in accepted
 exact runs
