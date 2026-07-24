@@ -327,7 +327,11 @@ function rollback_validation.observe_reference_step(audit, step)
         audit.reference_score.home = step.state.score.home
         audit.reference_score.away = step.state.score.away
     end
-    for _, events in ipairs({ step.match_events, step.lifecycle_events }) do
+    for _, events in ipairs({
+        step.match_events,
+        step.combat_events or {},
+        step.lifecycle_events,
+    }) do
         for _, event in ipairs(events) do
             local signature = event_signature(event)
             local previous = audit.reference_ids[event.id]
@@ -392,7 +396,11 @@ function rollback_validation.observe_impaired_step(audit, step)
     else
         audit.events.duplicate_confirmed = audit.events.duplicate_confirmed + 1
     end
-    for _, events in ipairs({ step.match_events, step.lifecycle_events }) do
+    for _, events in ipairs({
+        step.match_events,
+        step.combat_events or {},
+        step.lifecycle_events,
+    }) do
         for _, event in ipairs(events) do
             local signature = event_signature(event)
             local previous = audit.impaired_ids[event.id]

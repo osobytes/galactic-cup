@@ -101,7 +101,7 @@ return {
         p95_work_ms = 16.67,
         rollback_p999_ms = 33.3,
         snapshot_count = 31,
-        snapshot_bytes = 600 * 1024,
+        snapshot_bytes = 768 * 1024,
         history_bytes = 1024 * 1024,
         memory_growth_ratio = 0.10,
     },

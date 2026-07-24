@@ -65,7 +65,7 @@ its CPU timings diagnostically.
 | p95 combined client simulation plus rollback work | `< 16.67 ms` | runtime matrix |
 | nearest-rank p99.9 rollback wall duration | `< 33.3 ms` | runtime matrix |
 | retained snapshot boundaries | `<= 31` | every playable case |
-| canonical retained snapshot payload | `< 600 KiB` | every playable case |
+| canonical retained snapshot payload | `< 768 KiB` | every playable case |
 | exact accounted snapshot/input/output/event history | `< 1 MiB` | every playable case |
 | terminal forced-GC Lua heap, process-tree RSS, and Chrome JS-heap growth from warm-up | `<= 10%` | persistent soak |
 
@@ -119,6 +119,17 @@ full Lua collection before emitting the marker that triggers the external proces
 Lua heap, process-tree RSS, and Chrome JS heap all include the final fifth-fixture checkpoint.
 Native holds at that terminal marker until the evidence process acknowledges its RSS sample, so
 the runtime cannot exit between marker delivery and measurement.
+
+Issue #111 keeps that frozen soccer campaign on MatchSnapshot v5/InputTape v1
+and adds bounded composite combat coverage on MatchSnapshot v6/InputTape v2.
+The 768-KiB snapshot gate is an explicit revision from 600 KiB: the previous
+peak was 611,274 bytes, leaving only 3,126 bytes for 31 retained boundaries,
+while the authoritative combat companion necessarily exceeds that margin.
+The 31-boundary limit and exact 1-MiB total-history gate are unchanged. Direct
+phase-boundary restore/replay tests cover wind-up, active contact, guard,
+projectile flight/expiry, stagger, knockback, and immunity; a dense delayed
+authority campaign additionally proves composite convergence and confirmed
+combat-event equality without duplicating the hour-long cross-browser matrix.
 Browser evidence waits inside the page for newly appended console entries and returns only the
 delta at each marker. It does not poll and reserialize the cumulative console array through
 WebDriver every frame interval, because those protocol allocations would contaminate Chrome's

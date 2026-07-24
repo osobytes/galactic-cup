@@ -76,7 +76,7 @@ EXTERNAL_MEMORY_SAMPLES = SOAK_SAMPLES
 EXPECTED_PROFILE_DIGEST = "5fbf1e0d51a6f4d5"
 MAX_MEMORY_GROWTH_RATIO = 0.10
 MAX_SNAPSHOT_COUNT = 31
-MAX_SNAPSHOT_BYTES = 600 * 1024
+MAX_SNAPSHOT_BYTES = 768 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 MAX_P95_WORK_MS = 16.67
 MAX_ROLLBACK_P999_MS = 33.3
@@ -579,7 +579,7 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             if snapshot_count > MAX_SNAPSHOT_COUNT:
                 raise RuntimeError(f"{case_id} exceeded the 31-snapshot gate")
             if snapshot_bytes >= MAX_SNAPSHOT_BYTES:
-                raise RuntimeError(f"{case_id} exceeded the 600 KiB snapshot gate")
+                raise RuntimeError(f"{case_id} exceeded the 768 KiB snapshot gate")
             if history_bytes >= MAX_HISTORY_BYTES:
                 raise RuntimeError(f"{case_id} exceeded the 1 MiB history gate")
 

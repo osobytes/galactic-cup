@@ -414,8 +414,11 @@ t.describe("deterministic combat resolver", function()
         neutral_state.player_ids[5] = "wrong_player"
         t.is_true(not pcall(combat.prepare_inputs, state, neutral_state, {}))
 
-        local snapshot, err = combat.snapshot(combat_state)
-        t.eq(snapshot, nil)
-        t.is_true(assert(err):match("#111") ~= nil)
+        local snapshot = combat.snapshot(combat_state)
+        t.eq(snapshot.version, combat_state.version)
+        t.eq(snapshot.players[3].loadout_id, "loadout_vector_blade")
+        t.eq(snapshot.players[3].family_id, "light_melee")
+        snapshot.players[3].phase = "active"
+        t.eq(combat_state.players[3].phase, "ready")
     end)
 end)

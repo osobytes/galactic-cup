@@ -1,6 +1,7 @@
 local Vec2 = require("core.vec2")
 local combat = require("sim.combat")
 local fixed_clock = require("sim.fixed_clock")
+local input_frame = require("sim.input_frame")
 local match = require("sim.match")
 local match_snapshot = require("sim.match_snapshot")
 local slot_input = require("sim.slot_input")
@@ -455,5 +456,22 @@ t.describe("combat match integration", function()
 
         local legacy = new_match()
         t.is_true(pcall(match.step, legacy, 1 / 30, input()))
+    end)
+
+    t.it("keeps the combat boundary synchronized when full time consumes a frame", function()
+        local state = match.new({
+            home = teams.nebula,
+            away = teams.orion,
+            field = { w = 960, h = 540 },
+            duration = fixed_clock.TICK_SECONDS / 2,
+            seed = 20,
+            input_ownership = match.ownership_for_teams(teams.nebula, teams.orion),
+        })
+        local combat_state = combat.new_state(state)
+        match.step(state, fixed_clock.TICK_SECONDS, assert(input_frame.neutral(0)), combat_state)
+        t.is_true(state.finished)
+        t.eq(state.input_tick, 1)
+        t.eq(combat_state.tick, 1)
+        t.eq(match_snapshot.capture(state, combat_state).version, match_snapshot.COMBAT_VERSION)
     end)
 end)

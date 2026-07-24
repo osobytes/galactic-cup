@@ -1,5 +1,6 @@
 local t = require("spec.support.runner")
 local Vec2 = require("core.vec2")
+local combat = require("sim.combat")
 local input_frame = require("sim.input_frame")
 local match = require("sim.match")
 local match_snapshot = require("sim.match_snapshot")
@@ -143,6 +144,67 @@ local function preventable_goal_fixture()
 end
 
 t.describe("rollback session", function()
+    t.it("restores and resimulates combat state atomically from the earliest edge", function()
+        local state = new_state({ duration = 4, seed = 707 })
+        state.kickoff_hold = 0
+        local combat_state = combat.new_state(state)
+        local source_player = nil
+        for index, runtime in ipairs(combat_state.players) do
+            if runtime.family_id == "ranged" then
+                source_player = index
+                break
+            end
+        end
+        source_player = assert(source_player, "fixture requires one ranged player")
+        local source_slot =
+            assert(state.slot_for_player[source_player], "ranged player requires an input slot")
+        local initial = match_snapshot.capture(state, combat_state)
+        local predicted = rollback_session.new(initial, sources())
+        local predicted_output = assert(rollback_session.step(predicted))
+        t.eq(predicted_output.combat_events and #predicted_output.combat_events or 0, 0)
+
+        local pressed = sample({
+            held = input_frame.HELD_BITS.equipment,
+            edges = input_frame.EDGE_BITS.equipment_pressed,
+        })
+        for slot_index = 1, input_frame.SLOT_COUNT do
+            assert(
+                rollback_session.add_authoritative(
+                    predicted,
+                    0,
+                    slot_index,
+                    slot_index == source_slot and pressed or sample()
+                )
+            )
+        end
+        local reconciled = rollback_session.reconcile(predicted, true)
+        t.is_true(reconciled.changed)
+        t.eq(reconciled.causal_tick, 0)
+        t.eq(#reconciled.corrected_outputs, 1)
+        local corrected_events =
+            assert(reconciled.corrected_outputs[1].combat_events, "combat events are missing")
+        t.eq(corrected_events[1].kind, "commit")
+
+        local expected = rollback_session.new(initial, sources())
+        for slot_index = 1, input_frame.SLOT_COUNT do
+            assert(
+                rollback_session.add_authoritative(
+                    expected,
+                    0,
+                    slot_index,
+                    slot_index == source_slot and pressed or sample()
+                )
+            )
+        end
+        assert(rollback_session.step(expected))
+        local comparison =
+            rollback_session.compare(predicted, rollback_session.current_snapshot(expected), 0)
+        t.is_true(comparison.matched)
+        local final = rollback_session.current_snapshot(predicted)
+        t.eq(assert(final.combat).players[source_player].phase, "windup")
+        t.eq(final.combat.next_source_sequence, 2)
+    end)
+
     t.it("keeps measured operations under session ownership", function()
         local fabricated = rollback_session.new(
             initial_snapshot(),

@@ -92,12 +92,13 @@ end
 ---@param source InputTape
 ---@param first_boundary integer
 ---@return MatchState
+---@return CombatMatchState?
 local function state_at(source, first_boundary)
-    local state = match_snapshot.restore(source.initial)
+    local state, combat_state = match_snapshot.restore(source.initial)
     for index = 1, first_boundary do
-        match.step(state, fixed_clock.TICK_SECONDS, source.frames[index])
+        match.step(state, fixed_clock.TICK_SECONDS, source.frames[index], combat_state)
     end
-    return state
+    return state, combat_state
 end
 
 ---@param source InputTape
@@ -110,10 +111,14 @@ local function normalized_window(source, first_boundary, last_boundary, scenario
         first_boundary >= 0 and last_boundary > first_boundary and last_boundary <= #source.frames,
         "rollback validation window is outside the frozen tape"
     )
-    local state = state_at(source, first_boundary)
+    local state, combat_state = state_at(source, first_boundary)
     state.input_tick = 0
     state.events = {}
-    local initial = match_snapshot.capture(state)
+    if combat_state then
+        combat_state.tick = 0
+        combat_state.events = {}
+    end
+    local initial = match_snapshot.capture(state, combat_state)
     local frames = {}
     for boundary = first_boundary, last_boundary - 1 do
         local frame = assert(input_frame.copy(source.frames[boundary + 1]))
