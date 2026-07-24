@@ -48,6 +48,22 @@ local function option(id, score, kind)
     }
 end
 
+---@param player_index integer
+---@param granted_at number
+---@param expires_at number
+---@return RunSlot
+local function run_slot(player_index, granted_at, expires_at)
+    return {
+        player_index = player_index,
+        run_type = "come_short",
+        score = 1,
+        target_x = 450,
+        target_y = 270,
+        granted_at = granted_at,
+        expires_at = expires_at,
+    }
+end
+
 t.describe("brain.phase", function()
     t.it("returns ordinary phases without an active transition", function()
         t.eq(brain.phase(phase_context()), "attack")
@@ -116,6 +132,18 @@ t.describe("brain.refresh_interval", function()
         t.near(brain.refresh_interval(2, 0.45, 0.15), 0.15)
         t.near(brain.refresh_interval(0 / 0, 0.45, 0.15), 0.45)
         t.near(brain.refresh_interval(math.huge, 0.45, 0.15), 0.15)
+    end)
+
+    t.it("accepts an equal fixed interval", function()
+        t.near(brain.refresh_interval(0, 0.3, 0.3), 0.3)
+        t.near(brain.refresh_interval(1, 0.3, 0.3), 0.3)
+    end)
+
+    t.it("rejects semantically reversed interval endpoints", function()
+        local ok = pcall(function()
+            brain.refresh_interval(0.5, 0.15, 0.45)
+        end)
+        t.is_true(not ok)
     end)
 end)
 
@@ -252,6 +280,32 @@ t.describe("brain run arbitration", function()
         t.eq(slots[1].granted_at, 10)
         t.eq(slots[1].expires_at, 11.8)
     end)
+
+    t.it("returns no slots when the configured maximum is zero", function()
+        local slots = brain.grant_runs({
+            {
+                player_index = 2,
+                run_type = "in_behind",
+                score = 9,
+                target_x = 900,
+                target_y = 200,
+                duration = 1.8,
+            },
+        }, { run_slot(4, 8, 12) }, 0, 10)
+        t.eq(#slots, 0)
+    end)
+
+    t.it("preserves the earliest grants when active slots exceed a lowered cap", function()
+        local active = {
+            run_slot(4, 7, 20),
+            run_slot(3, 5, 20),
+            run_slot(2, 6, 20),
+        }
+        local slots = brain.grant_runs({}, active, 2, 10)
+        t.eq(#slots, 2)
+        t.eq(slots[1].player_index, 3)
+        t.eq(slots[2].player_index, 2)
+    end)
 end)
 
 t.describe("brain.press_mode", function()
@@ -277,6 +331,15 @@ t.describe("brain.press_mode", function()
 
     t.it("contains without a commit trigger", function()
         local mode, reason = brain.press_mode(press_context())
+        t.eq(mode, "contain")
+        t.eq(reason, "no_trigger")
+    end)
+
+    t.it("contains at the low-discipline threshold boundary", function()
+        local mode, reason = brain.press_mode(press_context({
+            press_discipline = 0.35,
+            low_discipline_threshold = 0.35,
+        }))
         t.eq(mode, "contain")
         t.eq(reason, "no_trigger")
     end)
@@ -343,6 +406,15 @@ t.describe("brain scored option selection", function()
         t.eq(first_state, second_state)
     end)
 
+    t.it("treats delimiter-like kind and id bytes as distinct identity fields", function()
+        local selected = brain.select_scored_option({
+            option("c", 2, "a\0b"),
+            option("b\0c", 1, "a"),
+        }, 0, rng.seed(1))
+        t.eq(selected.kind, "a\0b")
+        t.eq(selected.id, "c")
+    end)
+
     t.it("keeps the generic selector open to non-soccer kinds and payloads", function()
         local selected = brain.select_scored_option({
             {
@@ -375,6 +447,28 @@ t.describe("brain scored option selection", function()
         }, 0, 1, 2, state)
         t.is_true(next_state ~= state)
         local expected_state = rng.roll(state)
+        t.eq(next_state, expected_state)
+    end)
+
+    t.it("uses uniform seeded selection for direct positive-infinite temperature", function()
+        local state = rng.seed(1)
+        local selected, next_state = brain.select_scored_option({
+            option("a_low", -100),
+            option("z_best", 100),
+        }, math.huge, state)
+        local expected_state = rng.roll(state)
+        t.eq(selected.id, "a_low")
+        t.eq(next_state, expected_state)
+    end)
+
+    t.it("uses uniform seeded selection when finite carrier temperature overflows", function()
+        local state = rng.seed(1)
+        local selected, next_state = brain.decide_carrier({
+            option("a_low", -100),
+            option("z_best", 100),
+        }, 0, 1, 1e308, state)
+        local expected_state = rng.roll(state)
+        t.eq(selected.id, "a_low")
         t.eq(next_state, expected_state)
     end)
 end)

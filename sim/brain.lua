@@ -174,6 +174,10 @@ function brain.refresh_interval(scan_rate, slow_seconds, fast_seconds)
     assert(slow_seconds >= 0, "slow refresh interval must be non-negative")
     assert_finite(fast_seconds, "fast refresh interval")
     assert(fast_seconds >= 0, "fast refresh interval must be non-negative")
+    assert(
+        slow_seconds >= fast_seconds,
+        "slow refresh interval must not be shorter than fast refresh interval"
+    )
     local rate = clamp_unit(scan_rate)
     return slow_seconds + (fast_seconds - slow_seconds) * rate
 end
@@ -382,6 +386,8 @@ function brain.grant_runs(candidates, active, maximum, now)
         end
         return RUN_TYPE_ORDER[a.run_type] < RUN_TYPE_ORDER[b.run_type]
     end)
+    -- A lowered cap cannot preserve every prior slot. Earlier grants remain
+    -- authoritative and later grants yield deterministically.
     while #kept > maximum do
         kept[#kept] = nil
     end
@@ -462,7 +468,8 @@ end
 ---@return BrainScoredOption[]
 local function canonical_options(options)
     local ordered = {}
-    local keys = {}
+    ---@type table<string, table<string, boolean>>
+    local ids_by_kind = {}
     for index, option in ipairs(options) do
         assert(
             type(option.id) == "string" and option.id ~= "",
@@ -473,9 +480,13 @@ local function canonical_options(options)
             "option " .. index .. " needs a kind"
         )
         assert_finite(option.score, "option " .. index .. " score")
-        local key = option.kind .. "\0" .. option.id
-        assert(not keys[key], "option kind and id pairs must be unique")
-        keys[key] = true
+        local kind_ids = ids_by_kind[option.kind]
+        if not kind_ids then
+            kind_ids = {}
+            ids_by_kind[option.kind] = kind_ids
+        end
+        assert(not kind_ids[option.id], "option kind and id pairs must be unique")
+        kind_ids[option.id] = true
         ordered[#ordered + 1] = option
     end
     assert(#ordered > 0, "scored option selection needs at least one option")
@@ -502,7 +513,10 @@ end
 function brain.select_scored_option(options, temperature, rng_state)
     local ordered = canonical_options(options)
     assert_rng_state(rng_state)
-    local effective_temperature = is_finite(temperature) and math.max(0, temperature) or 0
+    local effective_temperature = temperature
+    if temperature ~= temperature or temperature < 0 then
+        effective_temperature = 0
+    end
 
     local maximum = ordered[1].score
     for index = 2, #ordered do
@@ -519,7 +533,8 @@ function brain.select_scored_option(options, temperature, rng_state)
     local weights = {}
     local total = 0
     for index, option in ipairs(ordered) do
-        local weight = math.exp((option.score - maximum) / effective_temperature)
+        local weight = effective_temperature == math.huge and 1
+            or math.exp((option.score - maximum) / effective_temperature)
         weights[index] = weight
         total = total + weight
     end
@@ -547,8 +562,11 @@ end
 function brain.decide_carrier(options, composure, pressure, base_temperature, rng_state)
     local calm = clamp_unit(composure)
     local danger = clamp_unit(pressure)
-    local base = is_finite(base_temperature) and math.max(0, base_temperature) or 0
-    local temperature = base * (1 - calm) * (1 + danger)
+    local base = base_temperature
+    if base_temperature ~= base_temperature or base_temperature < 0 then
+        base = 0
+    end
+    local temperature = calm == 1 and 0 or base * (1 - calm) * (1 + danger)
     return brain.select_scored_option(options, temperature, rng_state)
 end
 
