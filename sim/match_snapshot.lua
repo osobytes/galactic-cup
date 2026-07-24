@@ -23,6 +23,23 @@ local match_snapshot = {}
 
 match_snapshot.VERSION = 5
 
+---@type table<MatchState, string>
+local unsupported_states = setmetatable({}, { __mode = "k" })
+
+---@param state MatchState
+---@param reason string
+function match_snapshot.mark_unsupported(state, reason)
+    assert(type(state) == "table", "match state is required")
+    assert(type(reason) == "string" and reason ~= "", "snapshot rejection reason is required")
+    unsupported_states[state] = reason
+end
+
+---@param state MatchState
+local function assert_snapshot_supported(state)
+    local reason = unsupported_states[state]
+    assert(reason == nil, reason)
+end
+
 match_snapshot.MATCH_FIELDS = {
     "field",
     "goal_home",
@@ -640,6 +657,7 @@ end
 ---@param state MatchState
 ---@return MatchSnapshot
 function match_snapshot.capture(state)
+    assert_snapshot_supported(state)
     return {
         version = match_snapshot.VERSION,
         state = copy_state(state, "state", false),
@@ -653,6 +671,7 @@ end
 ---@return MatchSnapshot
 function match_snapshot.capture_owned(state)
     assert(type(state) == "table", "owned match state is required")
+    assert_snapshot_supported(state)
     return {
         version = match_snapshot.VERSION,
         state = copy_owned_state(state, false),
