@@ -92,14 +92,15 @@ maxima of 24.18--29.16 ms. These isolated maxima are consistent with external sc
 but do not prove its cause; rerunning until a favorable maximum appears would create selection
 bias rather than stronger evidence.
 
-`gate_contract=3` makes the revised statistic explicit. Each case emits the quantized raw
-integer-microsecond rollback samples separately from its logical marker. The Python evidence
-validator independently recomputes nearest-rank p99.9, the maximum, and the count at or above
-33.3 ms, and rejects count drift against both the measured rollback calls and the logical
-rollback count. The raw maximum and all over-threshold samples remain visible in the artifact.
-Runtime-matrix playable cases emit `cpu_gate_applied=1`; soak cases emit
-`cpu_gate_applied=0` and `cpu_gate=not_applied`, retaining CPU data diagnostically while storage,
-memory, provenance, teardown, and orphan gates remain active.
+`gate_contract=4` makes the timing-evidence ownership explicit and supersedes the contract-3
+calibration format without changing its p99.9 statistic. Runtime-matrix cases emit the quantized
+raw integer-microsecond rollback samples separately from their logical markers. The Python
+evidence validator independently recomputes nearest-rank p99.9, the maximum, and the count at or
+above 33.3 ms, and rejects count drift against both the measured rollback calls and the logical
+rollback count. The raw maximum and all over-threshold matrix samples remain visible in the
+artifact. Runtime-matrix playable cases emit `cpu_gate_applied=1`; soak cases emit
+`cpu_gate_applied=0`, `cpu_gate=not_applied`, and aggregate CPU diagnostics without transporting
+raw timing arrays. Storage, memory, provenance, teardown, and orphan gates remain active.
 
 `stress` is diagnostic: it must converge or reach the explicit over-window terminal, but it is
 not a 60 Hz acceptance profile. Numeric measurements are emitted as
@@ -123,7 +124,17 @@ delta at each marker. It does not poll and reserialize the cumulative console ar
 WebDriver every frame interval, because those protocol allocations would contaminate Chrome's
 forced-GC JS-heap samples instead of measuring the game runtime. The in-page async deadline,
 WebDriver script timeout, and Selenium command-channel read timeout share the same bounded suite
-budget, with a ten-second transport cushion on the latter two.
+budget, with a ten-second transport cushion on the latter two. For the same reason, the soak
+records aggregate timing diagnostics but does not return its large raw timing arrays through
+WebDriver. Contract-3 calibration run `30056665626` exposed a strong instrumentation correlation:
+Chrome Lua heap and process-tree RSS passed at 0.001488% and 1.011661% terminal growth, while JS
+heap grew 19.368760% in a near-linear sequence as five raw timing payloads were returned. The
+runtime matrix remains the owner of independently recomputed raw CPU evidence. The async observer
+also waits one browser-task turn after the first appended row so rows printed by the same
+validation update are copied and scrubbed as one delta rather than creating extra WebDriver
+round trips. Before each Chrome forced-GC checkpoint, the sampler invokes CDP
+`Runtime.discardConsoleEntries` and then `HeapProfiler.collectGarbage`. Each checkpoint records
+whether console entries were discarded and JavaScript GC was forced.
 
 The memory gate measures retained terminal growth: the forced-GC `final` checkpoint must be no
 more than 10% above `warmup`. Intermediate maxima remain recorded as `peak_bytes`, `peak_sample`,
@@ -209,10 +220,10 @@ remain unconditional.
 
 Evidence records source and artifact hashes,
 executable/browser/driver identity, profile/tape hashes, every logical marker, timing totals and
-percentiles, raw quantized rollback durations, retained-byte breakdowns, memory checkpoints, and
-bounded teardown/orphan status. Raw rollback durations are excluded from logical hashes and fresh
-determinism comparisons, because timing is evidence about the runtime rather than simulation
-identity.
+percentiles, raw quantized runtime-matrix rollback durations, retained-byte breakdowns, memory
+checkpoints, and bounded teardown/orphan status. Raw rollback durations are excluded from logical
+hashes and fresh determinism comparisons, because timing is evidence about the runtime rather
+than simulation identity.
 Browser teardown combines descendant tracking with a pre-launch/post-run executable census so an
 early-detached driver, browser, or crash helper cannot evade the orphan gate.
 The browser harness keeps the configured timeout for each single-fixture or short scenario run and

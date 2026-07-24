@@ -324,7 +324,7 @@ if has_flag("--rollback-validation") then
         runtime_failed = runtime_failed or not passed
 
         local logical = rollback_validation.case_marker(completed)
-            .. "|gate_contract=3"
+            .. "|gate_contract=4"
             .. "|cpu_gate="
             .. (cpu_gate_applied and (cpu_gate and "1" or "0") or "not_applied")
             .. "|cpu_gate_applied="
@@ -347,6 +347,7 @@ if has_flag("--rollback-validation") then
             "rollback_over_33_3_count=" .. rollback_over_budget_count,
             "rollback_percentile=0.999",
             "rollback_percentile_method=nearest_rank",
+            "rollback_timing_evidence=" .. (suite == "soak" and "aggregate_diagnostic" or "raw"),
             ("p95_update_wall_ms=%.6f"):format(p95_update_wall_ms),
             ("max_update_wall_ms=%.6f"):format(max_update_wall_ms),
             ("simulation_ms=%.6f"):format(active_timing.tick.seconds * 1000),
@@ -364,7 +365,7 @@ if has_flag("--rollback-validation") then
             "peak_history_bytes=" .. result.metrics.peaks.history_bytes,
         }, "|")
         local timings = nil
-        if #active_timing.rollback_microseconds > 0 then
+        if suite ~= "soak" and #active_timing.rollback_microseconds > 0 then
             local samples = {}
             for index, microseconds in ipairs(active_timing.rollback_microseconds) do
                 samples[index] = tostring(microseconds)
@@ -372,7 +373,7 @@ if has_flag("--rollback-validation") then
             timings = table.concat({
                 "GC_ROLLBACK_TIMINGS",
                 "case",
-                "gate_contract=3",
+                "gate_contract=4",
                 "case=" .. completed.id,
                 "sample_count=" .. #samples,
                 "unit=microseconds",
@@ -395,7 +396,7 @@ if has_flag("--rollback-validation") then
             "runtime",
             "love=" .. major .. "." .. minor .. "." .. revision,
             "suite=" .. suite,
-            "gate_contract=3",
+            "gate_contract=4",
             "profile_digest=" .. rollback_validation.profile_digest(),
             "input_version=1",
             "snapshot_version=5",

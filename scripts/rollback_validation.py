@@ -115,7 +115,8 @@ if (entries.length > cursor) {
 } else {
   const originalPush = entries.push;
   let finished = false;
-  let timer = null;
+  let deadlineTimer = null;
+  let settleTimer = null;
   function finish(timedOut) {
     if (finished) {
       return;
@@ -124,18 +125,23 @@ if (entries.length > cursor) {
     if (entries.push === observedPush) {
       entries.push = originalPush;
     }
-    if (timer !== null) {
-      window.clearTimeout(timer);
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+    }
+    if (settleTimer !== null) {
+      window.clearTimeout(settleTimer);
     }
     done(result(timedOut));
   }
   function observedPush() {
     const pushed = originalPush.apply(entries, arguments);
-    finish(false);
+    if (settleTimer === null) {
+      settleTimer = window.setTimeout(() => finish(false), 0);
+    }
     return pushed;
   }
   entries.push = observedPush;
-  timer = window.setTimeout(() => finish(true), timeoutMs);
+  deadlineTimer = window.setTimeout(() => finish(true), timeoutMs);
 }
 """
 
@@ -270,7 +276,7 @@ def parse_rollback_timings(line: str) -> RollbackTimingSeries:
     missing = sorted(required.difference(fields))
     if missing:
         raise RuntimeError(f"rollback timing series omits fields: {', '.join(missing)}")
-    if fields["gate_contract"] != "3":
+    if fields["gate_contract"] != "4":
         raise RuntimeError("rollback timing series uses a stale gate contract")
     if fields["unit"] != "microseconds":
         raise RuntimeError("rollback timing series uses an unsupported unit")
@@ -525,7 +531,7 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             raise RuntimeError(f"{case_id} did not cover its declared scenario")
         if fields["hidden_progress"] != "0":
             raise RuntimeError(f"{case_id} made hidden progress after a terminal result")
-        if fields["gate_contract"] != "3":
+        if fields["gate_contract"] != "4":
             raise RuntimeError(
                 f"{case_id} reports gate_contract={fields['gate_contract']!r}"
             )
@@ -607,7 +613,7 @@ def validate_runtime_metrics(
     runtime = runtimes[0].fields
     expected_runtime = {
         "input_version": "1",
-        "gate_contract": "3",
+        "gate_contract": "4",
         "love": "11.5.0",
         "snapshot_version": "5",
         "suite": suite,
@@ -681,6 +687,7 @@ def validate_runtime_metrics(
                 *count_fields,
                 "rollback_percentile",
                 "rollback_percentile_method",
+                "rollback_timing_evidence",
                 "work_samples",
             )
             if fields.get(name) in {None, ""}
@@ -704,8 +711,50 @@ def validate_runtime_metrics(
             raise RuntimeError(f"{case_id} reports an unsupported rollback percentile")
         if fields["rollback_percentile_method"] != "nearest_rank":
             raise RuntimeError(f"{case_id} reports an unsupported percentile method")
+        expected_timing_evidence = (
+            "aggregate_diagnostic" if suite == "soak" else "raw"
+        )
+        if fields["rollback_timing_evidence"] != expected_timing_evidence:
+            raise RuntimeError(
+                f"{case_id} reports rollback_timing_evidence="
+                f"{fields['rollback_timing_evidence']!r}, expected "
+                f"{expected_timing_evidence!r}"
+            )
         if counts["rollback_sample_count"] != counts["rollback_calls"]:
             raise RuntimeError(f"{case_id} rollback sample count differs from call count")
+        sample_count = counts["rollback_sample_count"]
+        over_count = counts["rollback_over_33_3_count"]
+        if values["max_rollback_ms"] < values["rollback_p999_ms"]:
+            raise RuntimeError(f"{case_id} rollback maximum is below p99.9")
+        if over_count > sample_count:
+            raise RuntimeError(f"{case_id} over-budget count exceeds its sample count")
+        if sample_count == 0:
+            if (
+                values["rollback_p999_ms"] != 0
+                or values["max_rollback_ms"] != 0
+                or over_count != 0
+            ):
+                raise RuntimeError(f"{case_id} reports a nonzero empty rollback diagnostic")
+        else:
+            maximum_reaches_threshold = (
+                values["max_rollback_ms"] >= MAX_ROLLBACK_P999_MS
+            )
+            if maximum_reaches_threshold != (over_count > 0):
+                raise RuntimeError(
+                    f"{case_id} rollback maximum disagrees with its over-budget count"
+                )
+            p999_tail_slots = (
+                sample_count
+                - math.ceil(sample_count * ROLLBACK_PERCENTILE)
+                + 1
+            )
+            p999_reaches_threshold = (
+                values["rollback_p999_ms"] >= MAX_ROLLBACK_P999_MS
+            )
+            if p999_reaches_threshold != (over_count >= p999_tail_slots):
+                raise RuntimeError(
+                    f"{case_id} rollback p99.9 disagrees with its over-budget count"
+                )
         logical_rollbacks = non_negative_integer(
             case.fields.get("rollbacks", ""),
             f"{case_id} logical rollbacks",
@@ -713,35 +762,42 @@ def validate_runtime_metrics(
         if counts["rollback_calls"] != logical_rollbacks:
             raise RuntimeError(f"{case_id} timing calls differ from logical rollbacks")
         series = timing_by_case.pop(case_id, None)
-        if counts["rollback_calls"] == 0:
+        if suite == "soak":
+            if series is not None:
+                raise RuntimeError(f"{case_id} soak emitted raw rollback timings")
+            samples_us: tuple[int, ...] = ()
+        elif counts["rollback_calls"] == 0:
             if series is not None:
                 raise RuntimeError(f"{case_id} emitted timings without rollback calls")
-            samples_us: tuple[int, ...] = ()
+            samples_us = ()
         else:
             if series is None:
                 raise RuntimeError(f"{case_id} omitted raw rollback timings")
             samples_us = series.samples_us
             if len(samples_us) != counts["rollback_calls"]:
                 raise RuntimeError(f"{case_id} raw timing count differs from rollback calls")
-        p999_ms = nearest_rank_integer(samples_us, ROLLBACK_PERCENTILE) / 1000
-        maximum_ms = nearest_rank_integer(samples_us, 1) / 1000
-        over_count = sum(sample >= MAX_ROLLBACK_P999_US for sample in samples_us)
-        if not math.isclose(
-            values["rollback_p999_ms"],
-            p999_ms,
-            rel_tol=0.0,
-            abs_tol=0.0000001,
-        ):
-            raise RuntimeError(f"{case_id} reported p99.9 differs from raw timings")
-        if not math.isclose(
-            values["max_rollback_ms"],
-            maximum_ms,
-            rel_tol=0.0,
-            abs_tol=0.0000001,
-        ):
-            raise RuntimeError(f"{case_id} reported maximum differs from raw timings")
-        if counts["rollback_over_33_3_count"] != over_count:
-            raise RuntimeError(f"{case_id} over-budget count differs from raw timings")
+        if suite != "soak":
+            p999_ms = nearest_rank_integer(samples_us, ROLLBACK_PERCENTILE) / 1000
+            maximum_ms = nearest_rank_integer(samples_us, 1) / 1000
+            recomputed_over_count = sum(
+                sample >= MAX_ROLLBACK_P999_US for sample in samples_us
+            )
+            if not math.isclose(
+                values["rollback_p999_ms"],
+                p999_ms,
+                rel_tol=0.0,
+                abs_tol=0.0000001,
+            ):
+                raise RuntimeError(f"{case_id} reported p99.9 differs from raw timings")
+            if not math.isclose(
+                values["max_rollback_ms"],
+                maximum_ms,
+                rel_tol=0.0,
+                abs_tol=0.0000001,
+            ):
+                raise RuntimeError(f"{case_id} reported maximum differs from raw timings")
+            if counts["rollback_over_33_3_count"] != recomputed_over_count:
+                raise RuntimeError(f"{case_id} over-budget count differs from raw timings")
         expected_applied = cpu_gate_applies(suite, case.fields["profile"])
         if (case.fields["cpu_gate_applied"] == "1") != expected_applied:
             raise RuntimeError(
@@ -1703,10 +1759,17 @@ def browser_checkpoint(
     label: str,
     force_js_gc: bool = False,
 ) -> dict[str, Any]:
+    console_entries_discarded = False
+    js_gc_forced = False
     if force_js_gc and browser_name == "chrome":
+        driver.execute_cdp_cmd("Runtime.discardConsoleEntries", {})
+        console_entries_discarded = True
         driver.execute_cdp_cmd("HeapProfiler.collectGarbage", {})
+        js_gc_forced = True
     row = sampler.checkpoint(label)
     row["js_heap"] = browser_js_heap(driver, browser_name)
+    row["js_console_entries_discarded"] = console_entries_discarded
+    row["js_gc_forced"] = js_gc_forced
     return row
 
 
@@ -2203,6 +2266,8 @@ def run_self_test() -> None:
             scrub_position = script.find('entry.message = "";')
             if delta_position < 0 or scrub_position <= delta_position:
                 raise RuntimeError("browser console wait scrubs messages before copying its delta")
+            if "settleTimer = window.setTimeout(() => finish(false), 0);" not in script:
+                raise RuntimeError("browser console wait does not batch synchronous marker rows")
             return {
                 "cursor": cursor + 2,
                 "entries": ["one", "two"],
@@ -2218,6 +2283,50 @@ def run_self_test() -> None:
         "timed_out": False,
     }:
         raise RuntimeError("browser console wait result self-test failed")
+
+    class FakeCheckpointSampler:
+        def checkpoint(self, label: str) -> dict[str, Any]:
+            return {"label": label}
+
+    class FakeCheckpointDriver:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def execute_cdp_cmd(
+            self,
+            method: str,
+            _params: dict[str, Any],
+        ) -> dict[str, Any]:
+            self.calls.append(method)
+            if method == "Performance.getMetrics":
+                return {
+                    "metrics": [
+                        {"name": "JSHeapTotalSize", "value": 2000},
+                        {"name": "JSHeapUsedSize", "value": 1000},
+                    ]
+                }
+            return {}
+
+    fake_checkpoint_driver = FakeCheckpointDriver()
+    forced_checkpoint = browser_checkpoint(
+        FakeCheckpointSampler(),  # type: ignore[arg-type]
+        fake_checkpoint_driver,
+        "chrome",
+        "forced",
+        force_js_gc=True,
+    )
+    if fake_checkpoint_driver.calls != [
+        "Runtime.discardConsoleEntries",
+        "HeapProfiler.collectGarbage",
+        "Performance.getMetrics",
+    ]:
+        raise RuntimeError("Chrome forced-GC checkpoint ordering self-test failed")
+    if (
+        forced_checkpoint["js_heap"] != {"total_bytes": 2000, "used_bytes": 1000}
+        or forced_checkpoint["js_console_entries_discarded"] is not True
+        or forced_checkpoint["js_gc_forced"] is not True
+    ):
+        raise RuntimeError("Chrome forced-GC checkpoint evidence self-test failed")
 
     class FakeClientConfig:
         timeout = 120.0
@@ -2270,7 +2379,7 @@ def run_self_test() -> None:
     integrity_case = parse_marker(
         f"{MARKER_PREFIX}|case|schema=1|case=integrity|profile=playable|success=1|"
         "lab_success=1|expected_failure=0|hidden_progress=0|scenario_pass=1|"
-        "gate_contract=3|cpu_gate=1|cpu_gate_applied=1|snapshot_gate=1|"
+        "gate_contract=4|cpu_gate=1|cpu_gate_applied=1|snapshot_gate=1|"
         "history_gate=1|game_gate=1|rollbacks=6903|"
         "reference_hash=abcd|client_hash=abcd|event_reference_digest=ef01|"
         "event_confirmed_digest=ef01|event_residue=0|peak_snapshots=31|"
@@ -2286,9 +2395,9 @@ def run_self_test() -> None:
         raise RuntimeError(f"{description} passed self-test")
 
     expect_integrity_failure(
-        integrity_case.raw.replace("gate_contract=3", "gate_contract=2"),
+        integrity_case.raw.replace("gate_contract=4", "gate_contract=3"),
         "native",
-        "contract-2 case",
+        "contract-3 case",
     )
     expect_integrity_failure(
         integrity_case.raw.replace("peak_snapshots=31", "peak_snapshots=32"),
@@ -2320,7 +2429,7 @@ def run_self_test() -> None:
                 (
                     TIMINGS_PREFIX,
                     "case",
-                    "gate_contract=3",
+                    "gate_contract=4",
                     f"case={case_id}",
                     f"sample_count={len(samples_us)}",
                     "unit=microseconds",
@@ -2332,6 +2441,7 @@ def run_self_test() -> None:
     def metric_for_samples(
         samples_us: tuple[int, ...],
         p95_work_ms: str = "1.25",
+        timing_evidence: str = "raw",
     ) -> RuntimeMetric:
         p999_ms = nearest_rank_integer(samples_us, ROLLBACK_PERCENTILE) / 1000
         maximum_ms = nearest_rank_integer(samples_us, 1) / 1000
@@ -2343,6 +2453,7 @@ def run_self_test() -> None:
             f"rollback_sample_count={len(samples_us)}|"
             f"rollback_over_33_3_count={over_count}|"
             "rollback_percentile=0.999|rollback_percentile_method=nearest_rank|"
+            f"rollback_timing_evidence={timing_evidence}|"
             "p95_update_wall_ms=3|max_update_wall_ms=4|simulation_ms=5|"
             "capture_ms=6|restore_ms=7|resimulation_ms=8|rollback_ms=9|"
             "capture_calls=10|simulation_calls=11|restore_calls=12|"
@@ -2351,7 +2462,7 @@ def run_self_test() -> None:
 
     runtime_provenance = parse_runtime_metric(
         f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
-        f"gate_contract=3|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
+        f"gate_contract=4|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
         "snapshot_version=5|tick_rate=60"
     )
     passing_samples = (10000,) * 6897 + (33301, 33400, 34000, 35000, 40000, 46040)
@@ -2411,7 +2522,7 @@ def run_self_test() -> None:
 
     malformed_timing_lines = (
         passing_timing.raw.replace("|unit=microseconds", ""),
-        passing_timing.raw.replace("gate_contract=3", "gate_contract=2"),
+        passing_timing.raw.replace("gate_contract=4", "gate_contract=3"),
         passing_timing.raw.replace("samples=10000", "samples=bad", 1),
         passing_timing.raw.replace("samples=10000", "samples=-1", 1),
         passing_timing.raw.replace("sample_count=6903", "sample_count=6902"),
@@ -2497,16 +2608,16 @@ def run_self_test() -> None:
             description,
         )
 
-    contract_2_runtime = parse_runtime_metric(
-        runtime_provenance.raw.replace("gate_contract=3", "gate_contract=2")
+    contract_3_runtime = parse_runtime_metric(
+        runtime_provenance.raw.replace("gate_contract=4", "gate_contract=3")
     )
     expect_runtime_failure(
-        contract_2_runtime,
+        contract_3_runtime,
         passing_metric,
         [passing_timing],
         integrity_case,
         "native",
-        "contract-2 runtime provenance",
+        "contract-3 runtime provenance",
     )
     stale_profile = parse_runtime_metric(
         runtime_provenance.raw.replace(EXPECTED_PROFILE_DIGEST, "0000000000000000")
@@ -2531,12 +2642,69 @@ def run_self_test() -> None:
     soak_provenance = parse_runtime_metric(
         runtime_provenance.raw.replace("suite=native", "suite=soak")
     )
+    soak_metric = metric_for_samples(
+        threshold_samples,
+        timing_evidence="aggregate_diagnostic",
+    )
     validate_runtime_metrics(
-        [soak_provenance, threshold_metric],
-        [threshold_timing],
+        [soak_provenance, soak_metric],
+        [],
         [soak_case],
         "soak",
     )
+    expect_runtime_failure(
+        soak_provenance,
+        soak_metric,
+        [threshold_timing],
+        soak_case,
+        "soak",
+        "soak raw rollback timing series",
+    )
+    expect_runtime_failure(
+        soak_provenance,
+        threshold_metric,
+        [],
+        soak_case,
+        "soak",
+        "soak raw timing evidence ownership",
+    )
+    for inconsistent_soak, description in (
+        (
+            parse_runtime_metric(
+                soak_metric.raw.replace(
+                    "max_rollback_ms=46.040000",
+                    "max_rollback_ms=33.299000",
+                )
+            ),
+            "soak maximum below p99.9",
+        ),
+        (
+            parse_runtime_metric(
+                soak_metric.raw.replace(
+                    "rollback_over_33_3_count=7",
+                    "rollback_over_33_3_count=0",
+                )
+            ),
+            "soak maximum and over-budget count disagreement",
+        ),
+        (
+            parse_runtime_metric(
+                soak_metric.raw.replace(
+                    "rollback_p999_ms=33.300000",
+                    "rollback_p999_ms=10.000000",
+                )
+            ),
+            "soak p99.9 and over-budget count disagreement",
+        ),
+    ):
+        expect_runtime_failure(
+            soak_provenance,
+            inconsistent_soak,
+            [],
+            soak_case,
+            "soak",
+            description,
+        )
 
     soak_cases = [
         parse_marker(
@@ -2742,7 +2910,7 @@ def main() -> int:
     evidence: dict[str, Any] = {
         "generated_at": utc_now(),
         "campaign": args.campaign,
-        "gate_contract": 3,
+        "gate_contract": 4,
         "mode": args.mode,
         "pass": False,
         "schema": 1,
