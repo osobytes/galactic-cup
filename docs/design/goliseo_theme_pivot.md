@@ -452,11 +452,14 @@ project-compatible asset license.
 ## Documentation migration ledger
 
 The pivot does not authorize a blind rename. This ledger classifies every
-committed document found by the 2026-07-23 audit to contain Galactic Cup,
-species-first, planetary, or intergalactic assumptions:
+committed Markdown document found by the 2026-07-23 repository-wide audit to
+contain Galactic Cup, species-first, planetary, or intergalactic assumptions:
 
 | Document | Classification | Treatment |
 | --- | --- | --- |
+| `README.md` | **retain** | Remains the public entry point for the active Galactic Cup showcase and its current run, license, and release-status claims. Replace its title and pitch only through an explicit product/release migration. |
+| `CONTRIBUTING.md` | **retain** | Remains the contributor contract for the active showcase. Its repository name and showcase priorities change with the public product migration, not ahead of it. |
+| `AGENTS.md` | **retain** | Remains the engineering constitution. Its title and `PlayerData` example describe the current repository; update them alongside the implemented schema migration without weakening its architecture or workflow rules. |
 | `docs/vision.md` | **replace** | Replaced in this decision with the GOLISEO product identity and proof gates. |
 | `docs/data_model.md` | **generalize** | Keeps implemented showcase fields and records the post-showcase player/presentation separation. Runtime migration belongs to milestone 11. |
 | `docs/showcase_release.md` | **retain** | Remains the active Galactic Cup showcase boundary. Its teams, species, arena, and public title are intentionally unchanged until explicit rescheduling. |
@@ -469,9 +472,9 @@ species-first, planetary, or intergalactic assumptions:
 | `docs/online/input_frame.md` | **generalize** | Keep the shipped v1 contract. Milestone 11 will version content identity for presentation/loadout data rather than edit a historical protocol in place. |
 | `docs/online/omp1_determinism.md` | **historical record** | Preserve `nebula-orion` fixture and content ids because they identify reproducible evidence. |
 
-All other committed documents were audited and contained no product-name or
-species-first assumption requiring classification. Completed online evidence,
-fixture ids, and hashes must never be silently renamed.
+All other committed Markdown documents were audited and contained no
+product-name or species-first assumption requiring classification. Completed
+online evidence, fixture ids, and hashes must never be silently renamed.
 
 The obsolete four-species production issue [#103][issue-103] is closed as not
 planned. Its replacement work is explicitly scoped to the six accepted

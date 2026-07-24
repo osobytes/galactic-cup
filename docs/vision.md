@@ -63,13 +63,17 @@ The accepted post-showcase proof sequence asks:
    establish one coherent art language before the remaining initial themes
    enter production?
 
+These three questions run through two proof streams. Milestone 10 evaluates
+rigged-3D performance and three-theme presentation coherence; milestone 11
+evaluates fixed-loadout combat within the deterministic soccer match.
+
 The authoritative direction is in `docs/design/goliseo_theme_pivot.md`. The
 bounded three-theme character, equipment, and animation content contract is in
 `docs/design/prototype_theme_roster.md`.
 
 ## Long-term direction
 
-If the two proofs succeed, GOLISEO can deepen in this order:
+If both proof streams succeed, GOLISEO can deepen in this order:
 
 1. A small original roster drawing from the six initial themes and shared
    equipment families.
