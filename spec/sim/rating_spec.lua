@@ -9,9 +9,8 @@ local function player(id, position, value)
     return {
         id = id,
         name = id,
-        planet = "Test",
+        number = 1,
         position = position,
-        species = "neutral",
         stats = {
             pace = value,
             strength = value,
@@ -19,7 +18,9 @@ local function player(id, position, value)
             stamina = value,
             mental = value,
         },
-        trait = "test",
+        presentation_id = "test",
+        cosmetic_variant_id = nil,
+        loadout_id = position == "keeper" and nil or "test",
     }
 end
 

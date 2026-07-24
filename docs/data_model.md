@@ -20,13 +20,19 @@ declarations live next to their data; this file is the human-readable overview.
 ---@class PlayerData
 ---@field id string          -- stable unique key
 ---@field name string
----@field planet string       -- current showcase identity copy
+---@field number integer
 ---@field position Position
----@field species string      -- current showcase mechanical id; neutral in shipped content
----@field presentation_species string? -- current showcase UI/pitch identity
 ---@field stats StatBlock
----@field trait string       -- reserved post-showcase trait id
+---@field presentation_id string
+---@field cosmetic_variant_id string?
+---@field loadout_id string? -- nil for protected keepers
 ```
+
+Galactic Cup's `planet`, neutral mechanical `species`,
+`presentation_species`, and reserved `trait` values live in
+`data/showcase_player_compatibility.lua`. That explicit compatibility table
+keeps the shipped showcase presentation and simulation seam intact without
+making its theme fields part of persistent GOLISEO player identity.
 
 ### Derived quantities (`sim/stats.lua`)
 
@@ -66,11 +72,10 @@ A `Layout` is an ordered `Widget[]` (`id, rect, kind, text, selected, data`). Pu
 (`game/screens/squad|formation|tactic.lua`) build a Layout from state; `game/ui/draw.lua`
 renders it; `hit.at`/`hit.find` do pure hit-testing. See AGENTS.md §9.
 
-## Post-showcase GOLISEO identity separation
+## GOLISEO identity and content separation
 
-The current showcase keeps presentation species directly on `PlayerData`.
-Post-showcase GOLISEO work will generalize this without coupling stats to a
-specific model:
+`PlayerData` owns persistent identity and authored match attributes without
+coupling them to a specific model or item appearance:
 
 ```text
 PlayerData
@@ -85,21 +90,35 @@ Ten persistent players may therefore reference six reusable presentation
 packages while retaining different names, positions, stats, and loadouts.
 Presentation choice never grants stats or a theme passive.
 
-The first combat and rendering proofs use authored player records. A later
-roster generator may create them from a deterministic seed, but it must
+The reusable tables are:
+
+- `data/character_presentations.lua` — six semantic character/rig packages;
+- `data/cosmetic_variants.lua` — material, head, and safe-accessory ids;
+- `data/equipment_presentations.lua` — six item appearances mapped to family ids;
+- `data/action_families.lua` — the four shared mechanical tuning records;
+- `data/loadouts.lua` — fixed family/equipment pairs; and
+- `sim/content_validation.lua` — pure programmer-error validation for catalogs
+  and the default one-of-each fixture.
+
+Tournament Sword, Vector Blade, and Foam Champion all resolve through the same
+`light_melee` table. Equipment and character presentation records contain no
+stats or copied action tuning.
+
+The first combat and rendering proofs use the existing authored player ids and
+stats. A later roster generator may create them from a deterministic seed, but it must
 materialize and persist the resolved values. Stats, names, or cosmetics do not
 reroll per match or per load. Generated stat profiles use bounded budgets and
 position-weighted archetypes rather than five independent random values.
 
-This separation is authoritative direction but not an implemented
-`PlayerData` change. The prototype content contract and randomness guardrails
-live in `docs/design/prototype_theme_roster.md`.
+The prototype content contract and randomness guardrails live in
+`docs/design/prototype_theme_roster.md`. Runtime combat state, content identity
+in snapshots/replays, and asset loading remain downstream work.
 
 ## Parked after the showcase
 
 - `data/traits.lua` — `TraitData` (id, name, trigger, effect)
 - RPG fields layered onto a runtime `PlayerState` (xp, level, morale, fatigue) — kept separate
   from immutable `PlayerData`.
-- Deterministic generated-roster materialization and cosmetic variant fields.
+- Deterministic generated-roster materialization.
 
 These shapes are not part of the active showcase scope. See `docs/showcase_release.md`.
