@@ -1,0 +1,496 @@
+{
+  "schema": 1,
+  "status": "pass",
+  "recorded_at": "2026-07-24T02:51:41.581927+00:00",
+  "source_commit": "78076d9d005a6e2a1a68a4ac155c4d49b67bc530",
+  "source_dirty": false,
+  "gate_contract": 4,
+  "github_actions": {
+    "run_id": 30060058593,
+    "run_url": "https://github.com/osobytes/galactic-cup/actions/runs/30060058593",
+    "conclusion": "success",
+    "jobs": {
+      "native": "success",
+      "chrome_matrix": "success",
+      "firefox_matrix": "success",
+      "chrome_soak": "success",
+      "firefox_soak": "success",
+      "stable_aggregate": "success"
+    }
+  },
+  "simulation_contract": {
+    "fixture": "omp1-nebula-orion-eight-streams-v1",
+    "simulation_seed": 19,
+    "network_seeds": [
+      2001,
+      2002,
+      2003
+    ],
+    "input_version": 1,
+    "snapshot_version": 5,
+    "tick_rate": 60,
+    "fixture_ticks": 7201,
+    "final_authoritative_hash": "9a71cd09b246d6f6",
+    "sequence_digest": "623e771bb00362e1",
+    "rollback_tape_digest": "881917e3ba798703",
+    "network_profile_digest": "5fbf1e0d51a6f4d5"
+  },
+  "budgets": {
+    "playable_p95_work_ms_exclusive_max": 16.67,
+    "playable_rollback_p999_ms_exclusive_max": 33.3,
+    "rollback_percentile": 0.999,
+    "rollback_percentile_method": "nearest_rank",
+    "retained_snapshot_boundaries_max": 31,
+    "canonical_snapshot_bytes_exclusive_max": 614400,
+    "accounted_history_bytes_exclusive_max": 1048576,
+    "terminal_memory_growth_percent_max": 10.0,
+    "memory_measurement": "final_vs_warmup"
+  },
+  "platform": {
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "Linux 6.17.0-1020-azure x86_64",
+    "python": {
+      "version": "3.12.3",
+      "sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+    },
+    "selenium": "4.43.0",
+    "native_love": {
+      "version": "LOVE 11.5 (Mysterious Mysteries)",
+      "launcher_sha256": "f5064deed237926b64c446429fa5da5f7f4454d0339e273c4a2f1b650cfd9268"
+    },
+    "love_js": {
+      "repository": "https://github.com/2dengine/love.js",
+      "commit": "495c5eb7eb55b54aaadfc21405c58f50a6d819c4",
+      "archive_sha256": "89b56e7953935d6cb06c454d0ee0c0d8903e433b9a94d1d6d501fb8b516f5ff6",
+      "manifest_sha256": "c1646f229a5dc90ce1b365ef8107a9eefcf5ac1460a612d39043b057a47935ff",
+      "game_package_sha256": "380abfc7b1d98d867844af25fd6623270abb9823d92f7bdd8d3cfd0e366c8472"
+    },
+    "chrome": {
+      "version": "Google Chrome for Testing 151.0.7922.47",
+      "binary_sha256": "3b0be9872ea937893cb1e1523fde071d38c1ed4ef866b3f7976240094a868c93",
+      "driver": "ChromeDriver 151.0.7922.47",
+      "driver_sha256": "f9bf92b10a62cc4db336007abb428b2b07db3a35f27d6a80431447c27f35fadd"
+    },
+    "firefox": {
+      "version": "Mozilla Firefox 153.0",
+      "binary_sha256": "6bb37294762261ca7edb51c77a9778c15d468b5fb05de1bb3b0f97d40acbbbd0",
+      "driver": "geckodriver 0.37.0 (253b85235865 2026-06-02 09:23 +0000)",
+      "driver_sha256": "04cbbfc94032017dfde16490940dbc1ccfdfe5c02079fd07948542fb512a4f2d"
+    }
+  },
+  "native_determinism": {
+    "fresh_runs_agree": true,
+    "logical_marker_sha256": "e50b824556900475adfbdbe14c185980d67d2afa4d55b27a13489f9b89c63aee",
+    "executions": [
+      {
+        "run": 1,
+        "duration_seconds": 1361.526033,
+        "shards": 15,
+        "cases": 39
+      },
+      {
+        "run": 2,
+        "duration_seconds": 1365.37962,
+        "shards": 15,
+        "cases": 39
+      }
+    ]
+  },
+  "playable_performance": [
+    {
+      "runtime": "native",
+      "execution": 1,
+      "network_seed": 2001,
+      "p95_work_ms": 4.051642,
+      "rollback_p999_ms": 11.064,
+      "max_rollback_ms": 12.35,
+      "rollback_samples": 6903,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "native",
+      "execution": 1,
+      "network_seed": 2002,
+      "p95_work_ms": 3.508039,
+      "rollback_p999_ms": 11.795,
+      "max_rollback_ms": 13.445,
+      "rollback_samples": 6893,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "native",
+      "execution": 1,
+      "network_seed": 2003,
+      "p95_work_ms": 3.664581,
+      "rollback_p999_ms": 11.373,
+      "max_rollback_ms": 15.466,
+      "rollback_samples": 6878,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "native",
+      "execution": 2,
+      "network_seed": 2001,
+      "p95_work_ms": 4.116604,
+      "rollback_p999_ms": 14.476,
+      "max_rollback_ms": 20.238,
+      "rollback_samples": 6903,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "native",
+      "execution": 2,
+      "network_seed": 2002,
+      "p95_work_ms": 4.634018,
+      "rollback_p999_ms": 12.033,
+      "max_rollback_ms": 16.649,
+      "rollback_samples": 6893,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "native",
+      "execution": 2,
+      "network_seed": 2003,
+      "p95_work_ms": 3.619086,
+      "rollback_p999_ms": 12.174,
+      "max_rollback_ms": 17.939,
+      "rollback_samples": 6878,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "chrome",
+      "network_seed": 2001,
+      "p95_work_ms": 13.74,
+      "rollback_p999_ms": 21.97,
+      "max_rollback_ms": 23.525,
+      "rollback_samples": 6903,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "chrome",
+      "network_seed": 2002,
+      "p95_work_ms": 13.65,
+      "rollback_p999_ms": 22.395,
+      "max_rollback_ms": 24.7,
+      "rollback_samples": 6893,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "chrome",
+      "network_seed": 2003,
+      "p95_work_ms": 13.475,
+      "rollback_p999_ms": 22.135,
+      "max_rollback_ms": 25.25,
+      "rollback_samples": 6878,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "firefox",
+      "network_seed": 2001,
+      "p95_work_ms": 13.32,
+      "rollback_p999_ms": 22.62,
+      "max_rollback_ms": 23.5,
+      "rollback_samples": 6903,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "firefox",
+      "network_seed": 2002,
+      "p95_work_ms": 13.82,
+      "rollback_p999_ms": 24.8,
+      "max_rollback_ms": 30.92,
+      "rollback_samples": 6893,
+      "samples_at_or_above_33_3_ms": 0
+    },
+    {
+      "runtime": "firefox",
+      "network_seed": 2003,
+      "p95_work_ms": 13.52,
+      "rollback_p999_ms": 23.52,
+      "max_rollback_ms": 28.34,
+      "rollback_samples": 6878,
+      "samples_at_or_above_33_3_ms": 0
+    }
+  ],
+  "soak_cpu_diagnostics": {
+    "timing_evidence": "aggregate_diagnostic",
+    "raw_timing_arrays_retained": false,
+    "native": [
+      {
+        "network_seed": 2001,
+        "p95_work_ms": 4.206852,
+        "rollback_p999_ms": 12.407,
+        "max_rollback_ms": 14.046
+      },
+      {
+        "network_seed": 2002,
+        "p95_work_ms": 3.802518,
+        "rollback_p999_ms": 13.758,
+        "max_rollback_ms": 19.179
+      },
+      {
+        "network_seed": 2003,
+        "p95_work_ms": 3.824349,
+        "rollback_p999_ms": 12.415,
+        "max_rollback_ms": 17.615
+      },
+      {
+        "network_seed": 2001,
+        "p95_work_ms": 4.579086,
+        "rollback_p999_ms": 17.234,
+        "max_rollback_ms": 20.675
+      },
+      {
+        "network_seed": 2002,
+        "p95_work_ms": 4.033269,
+        "rollback_p999_ms": 11.825,
+        "max_rollback_ms": 13.709
+      }
+    ],
+    "chrome": [
+      {
+        "network_seed": 2001,
+        "p95_work_ms": 8.195,
+        "rollback_p999_ms": 17.16,
+        "max_rollback_ms": 22.61
+      },
+      {
+        "network_seed": 2002,
+        "p95_work_ms": 8.18,
+        "rollback_p999_ms": 17.585,
+        "max_rollback_ms": 18.475
+      },
+      {
+        "network_seed": 2003,
+        "p95_work_ms": 8.18,
+        "rollback_p999_ms": 16.65,
+        "max_rollback_ms": 22.27
+      },
+      {
+        "network_seed": 2001,
+        "p95_work_ms": 8.145,
+        "rollback_p999_ms": 16.785,
+        "max_rollback_ms": 22.045
+      },
+      {
+        "network_seed": 2002,
+        "p95_work_ms": 8.03,
+        "rollback_p999_ms": 16.85,
+        "max_rollback_ms": 22.26
+      }
+    ],
+    "firefox": [
+      {
+        "network_seed": 2001,
+        "p95_work_ms": 15.5,
+        "rollback_p999_ms": 23.68,
+        "max_rollback_ms": 25.98
+      },
+      {
+        "network_seed": 2002,
+        "p95_work_ms": 15.16,
+        "rollback_p999_ms": 23.16,
+        "max_rollback_ms": 25.84
+      },
+      {
+        "network_seed": 2003,
+        "p95_work_ms": 14.72,
+        "rollback_p999_ms": 22.56,
+        "max_rollback_ms": 28.22
+      },
+      {
+        "network_seed": 2001,
+        "p95_work_ms": 14.5,
+        "rollback_p999_ms": 23.0,
+        "max_rollback_ms": 26.34
+      },
+      {
+        "network_seed": 2002,
+        "p95_work_ms": 14.48,
+        "rollback_p999_ms": 23.08,
+        "max_rollback_ms": 26.44
+      }
+    ]
+  },
+  "memory": {
+    "native": {
+      "lua_heap": {
+        "baseline_bytes": 21505634,
+        "terminal_bytes": 19568262,
+        "growth_percent": 0.0,
+        "peak_bytes": 21726606,
+        "peak_growth_percent": 1.027507,
+        "pass": true
+      },
+      "process_rss": {
+        "baseline_bytes": 158154752,
+        "terminal_bytes": 162648064,
+        "growth_percent": 2.841086,
+        "peak_bytes": 162791424,
+        "peak_growth_percent": 2.931731,
+        "pass": true
+      }
+    },
+    "chrome": {
+      "lua_heap": {
+        "baseline_bytes": 21032228,
+        "terminal_bytes": 21032532,
+        "growth_percent": 0.001445,
+        "peak_bytes": 21032532,
+        "peak_growth_percent": 0.001445,
+        "pass": true
+      },
+      "process_rss": {
+        "baseline_bytes": 1483030528,
+        "terminal_bytes": 1485275136,
+        "growth_percent": 0.151353,
+        "peak_bytes": 1489260544,
+        "peak_growth_percent": 0.420087,
+        "pass": true
+      },
+      "js_heap": {
+        "baseline_bytes": 2289076,
+        "terminal_bytes": 2392848,
+        "growth_percent": 4.533358,
+        "peak_bytes": 2392848,
+        "peak_growth_percent": 4.533358,
+        "pass": true
+      }
+    },
+    "firefox": {
+      "lua_heap": {
+        "baseline_bytes": 21032232,
+        "terminal_bytes": 21032536,
+        "growth_percent": 0.001445,
+        "peak_bytes": 21032536,
+        "peak_growth_percent": 0.001445,
+        "pass": true
+      },
+      "process_rss": {
+        "baseline_bytes": 1394102272,
+        "terminal_bytes": 1408765952,
+        "growth_percent": 1.051837,
+        "peak_bytes": 1412861952,
+        "peak_growth_percent": 1.345646,
+        "pass": true
+      }
+    }
+  },
+  "correctness": {
+    "scenario_failures": [],
+    "native_case_outcomes": {
+      "converged": 84,
+      "late_input_unrecoverable": 1
+    },
+    "chrome_matrix_converged_cases": 33,
+    "firefox_matrix_converged_cases": 33,
+    "chrome_soak_converged_cases": 5,
+    "firefox_soak_converged_cases": 5,
+    "late_window": [
+      {
+        "delay_ticks": 30,
+        "status": "converged",
+        "max_correction_depth": 30,
+        "hidden_progress": false
+      },
+      {
+        "delay_ticks": 31,
+        "status": "late_input_unrecoverable",
+        "expected_failure": true,
+        "late_tick": 0,
+        "hidden_progress": false
+      }
+    ],
+    "worst_observed_playable_correction_depth": 9,
+    "worst_observed_required_campaign_correction_depth": 30,
+    "retained_storage_maxima": {
+      "snapshot_boundaries": 31,
+      "canonical_snapshot_bytes": 611274,
+      "accounted_history_bytes": 677037
+    },
+    "all_event_game_snapshot_history_gates_passed": true
+  },
+  "timing_evidence_audit": {
+    "status": "pass",
+    "matrix_and_late_window_raw_cases": 146,
+    "raw_rollback_samples_recomputed": 166812,
+    "samples_at_or_above_33_3_ms": 0,
+    "sample_counts_match_rollback_calls": true,
+    "p999_and_maxima_recomputed_from_raw_microseconds": true,
+    "soak_raw_timing_series_count": 0
+  },
+  "teardown": {
+    "all_52_process_runs_orphan_free": true,
+    "remaining_processes": 0,
+    "detached_remaining_processes": 0,
+    "chrome_soak_fallback": false,
+    "firefox_soak_fallback": true,
+    "firefox_soak_signal": "TERM",
+    "firefox_soak_service_exit_code": 0
+  },
+  "artifacts": [
+    {
+      "name": "omp2-rollback-native",
+      "archive_sha256": "73dc7a1632daeae5e084285cca8190c0ce45da5e762c859bf77e4b9070aee645",
+      "size_bytes": 660769,
+      "normalized_json_sha256": "e60c09b2b4e381f2c0deb3e0a26285dc681212c8e6b2ef2a95de12ebafed578d"
+    },
+    {
+      "name": "omp2-rollback-chrome-matrix",
+      "archive_sha256": "11f74b347c2d6dabafe68bd7fcf1d987d52579c8b897415eb0b4be739cbf0da3",
+      "size_bytes": 234885,
+      "normalized_json_sha256": "d73e348f5e5f9121b5816779b4333c412ae37d2a110652d2622f19b7e4f686ad"
+    },
+    {
+      "name": "omp2-rollback-firefox-matrix",
+      "archive_sha256": "1f441cd76228c51cfde856a1e9ee244f56c5b3f7ce9cc53bd8b5874721ea059a",
+      "size_bytes": 126950,
+      "normalized_json_sha256": "118e2f4cca494790b086eaa8133c20c95dc1bd9201e5c3bcaebc830a2c2b8398"
+    },
+    {
+      "name": "omp2-rollback-chrome-soak",
+      "archive_sha256": "3a2d75732ed473b2fb137c0dc64765bfa6cc84efeaae4253900c251244d924ab",
+      "size_bytes": 15420,
+      "normalized_json_sha256": "2326888d7ef4a86b5d43f5bad43b3f1704790aae5b102a0b2edc0dea5916b48c"
+    },
+    {
+      "name": "omp2-rollback-firefox-soak",
+      "archive_sha256": "dba37b537a2467faff98af4d5cb38325654f6f4fd33001c1b3a869b96aea6454",
+      "size_bytes": 9097,
+      "normalized_json_sha256": "a330d2c0aae4043001663d4d93df3b6e0d7de5d0d20c294042cb92e2dbbffeec"
+    }
+  ],
+  "omp3_inputs": {
+    "prediction_and_rollback_window_ticks": 30,
+    "prediction_and_rollback_window_ms": 500,
+    "redundant_prior_input_rows": 6,
+    "late_input_policy": "terminal late_input_unrecoverable beyond the retained floor",
+    "delivery_batching": "apply all envelopes at one transport tick before one reconciliation",
+    "input_identity": [
+      "source_slot",
+      "input_tick"
+    ],
+    "playable_profile": {
+      "base_delay_ticks": 3,
+      "jitter_ticks": [
+        -2,
+        2
+      ],
+      "independent_loss_percent": 1.0,
+      "duplication_percent": 0.25,
+      "burst_start_percent": 0.25,
+      "burst_length_ticks": 3
+    },
+    "remaining_transport_risks": [
+      "WebRTC scheduling and backpressure",
+      "cross-peer clock drift",
+      "signaling and room lifecycle",
+      "reconnect and resynchronization",
+      "relay behavior",
+      "MTU and fragmentation",
+      "mobile and background-tab throttling",
+      "hostile or malformed peers",
+      "production telemetry"
+    ]
+  }
+}

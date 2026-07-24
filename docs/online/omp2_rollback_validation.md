@@ -231,6 +231,28 @@ allows at least 5,400 seconds for the persistent five-fixture soak. CI therefore
 seconds per ordinary browser run and 5,400 seconds for the soak, while the browser job retains its
 180-minute hard limit.
 
+## Final pinned evidence
+
+GitHub Actions run
+[`30060058593`](https://github.com/osobytes/galactic-cup/actions/runs/30060058593)
+passed the native campaign, Chrome and Firefox runtime matrices, Chrome and Firefox persistent
+soaks, and the stable aggregate gate on exact clean source
+`78076d9d005a6e2a1a68a4ac155c4d49b67bc530`.
+
+The six browser `playable` p95 work measurements were 13.32--13.82 ms and their independently
+recomputed nearest-rank p99.9 rollback measurements were 21.97--24.80 ms. The largest raw browser
+rollback was 30.92 ms, with no sample at or above 33.3 ms. Terminal memory growth was at most
+2.841086% natively, 4.533358% in Chrome's JavaScript heap, 0.151353% in Chrome's process-tree RSS,
+and 1.051837% in Firefox's process-tree RSS. All runs were orphan-free, all correctness and
+retained-storage gates passed, the 30-tick correction converged, and the 31-tick correction
+entered the required terminal state without hidden progress.
+
+The immutable normalized record, including exact runtime and artifact identities, every acceptance
+measurement, soak diagnostics, raw-artifact digests, teardown results, and OMP-3 inputs, is
+[`evidence/omp2_rollback_linux_2026-07-24.json`](evidence/omp2_rollback_linux_2026-07-24.json).
+Its audit independently recomputed 166,812 raw matrix/late-window rollback samples rather than
+trusting the emitted percentiles.
+
 ## OMP-3 transport inputs
 
 OMP-3 should begin with the following contract, subject to the checked-in measurements:
