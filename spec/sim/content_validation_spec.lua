@@ -111,6 +111,16 @@ t.describe("prototype content validation", function()
         t.is_true(fixture_is_valid(repeated, nil, nil, { allow_repeated_families = true }))
     end)
 
+    t.it("rejects sparse squads and players eligible for both teams", function()
+        local sparse_home = deep_copy(teams.nebula)
+        sparse_home.squad[7] = nil
+        t.is_true(not fixture_is_valid(catalog(), sparse_home))
+
+        local shared_home = deep_copy(teams.nebula)
+        shared_home.squad[#shared_home.squad + 1] = teams.orion.roster[1]
+        t.is_true(not fixture_is_valid(catalog(), shared_home))
+    end)
+
     t.it("rejects out-of-bounds family data and presentation-owned mechanics", function()
         local long_interrupt = catalog()
         long_interrupt.action_families.light_melee.unguarded_outcome.interruption_ticks = 31

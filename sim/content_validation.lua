@@ -158,12 +158,16 @@ end
 ---@param label string
 local function assert_dense_array(value, label)
     assert(type(value) == "table", label .. " must be an array")
-    local count = #value
+    local count = 0
     for key in pairs(value) do
         assert(
-            type(key) == "number" and is_integer(key) and key >= 1 and key <= count,
+            type(key) == "number" and is_integer(key) and key >= 1,
             label .. " must be a dense array"
         )
+        count = count + 1
+    end
+    for index = 1, count do
+        assert(rawget(value, index) ~= nil, label .. " must be a dense array")
     end
 end
 
@@ -465,8 +469,16 @@ end
 ---@param players table<string, PlayerData>
 ---@param catalog PrototypeContentCatalog
 ---@param fixture_players table<string, boolean>
+---@param eligible_players table<string, boolean>
 ---@param allow_repeated_families boolean
-local function validate_team(team, players, catalog, fixture_players, allow_repeated_families)
+local function validate_team(
+    team,
+    players,
+    catalog,
+    fixture_players,
+    eligible_players,
+    allow_repeated_families
+)
     local label = "team." .. tostring(team.id)
     assert_fields(team, TEAM_FIELDS, label)
     assert_nonempty_string(team.id, label .. ".id")
@@ -515,26 +527,30 @@ local function validate_team(team, players, catalog, fixture_players, allow_repe
         end
     end
 
+    local eligible_ids = team.squad or team.roster
     if team.squad then
-        assert_dense_array(team.squad, label .. ".squad")
-        local squad_players = {}
-        local squad_numbers = {}
-        for _, player_id in ipairs(team.squad) do
-            local squad_player = assert(
-                players[player_id],
-                label .. " squad has unknown player " .. tostring(player_id)
-            )
-            assert(not squad_players[player_id], label .. " squad contains duplicate player")
-            assert(
-                not squad_numbers[squad_player.number],
-                label .. " squad duplicates shirt number " .. tostring(squad_player.number)
-            )
-            squad_players[player_id] = true
-            squad_numbers[squad_player.number] = true
-        end
-        for player_id in pairs(team_players) do
-            assert(squad_players[player_id], label .. " starter is missing from the squad")
-        end
+        assert_dense_array(eligible_ids, label .. ".squad")
+    end
+    local squad_players = {}
+    local squad_numbers = {}
+    for _, player_id in ipairs(eligible_ids) do
+        local squad_player =
+            assert(players[player_id], label .. " squad has unknown player " .. tostring(player_id))
+        assert(not squad_players[player_id], label .. " squad contains duplicate player")
+        assert(
+            not eligible_players[player_id],
+            "fixture contains eligible player on both teams: " .. player_id
+        )
+        assert(
+            not squad_numbers[squad_player.number],
+            label .. " squad duplicates shirt number " .. tostring(squad_player.number)
+        )
+        squad_players[player_id] = true
+        eligible_players[player_id] = true
+        squad_numbers[squad_player.number] = true
+    end
+    for player_id in pairs(team_players) do
+        assert(squad_players[player_id], label .. " starter is missing from the squad")
     end
 end
 
@@ -548,9 +564,24 @@ function content_validation.validate_fixture(catalog, home, away, policy)
     assert(home ~= away, "fixture teams must be distinct records")
     local players = players_by_id(catalog)
     local fixture_players = {}
+    local eligible_players = {}
     local allow_repeated_families = policy and policy.allow_repeated_families == true or false
-    validate_team(home, players, catalog, fixture_players, allow_repeated_families)
-    validate_team(away, players, catalog, fixture_players, allow_repeated_families)
+    validate_team(
+        home,
+        players,
+        catalog,
+        fixture_players,
+        eligible_players,
+        allow_repeated_families
+    )
+    validate_team(
+        away,
+        players,
+        catalog,
+        fixture_players,
+        eligible_players,
+        allow_repeated_families
+    )
 
     local fixture_count = 0
     local presentation_ids = {}
