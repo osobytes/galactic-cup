@@ -41,8 +41,9 @@ function help.layout(state)
         {
             id = "hint",
             kind = "label",
-            text = "ACTION — shoot / tackle     PLAY — pass / switch     *COMBAT PROTOTYPE ONLY\nHOLD ACTION OR PLAY TO CHARGE · RELEASE TO COMMIT     EQUIPMENT: HOLD / TAP",
-            rect = { x = 90, y = 420, w = 780, h = 42 },
+            text = "ACTION — shoot / tackle     PLAY — pass / switch     *COMBAT PROTOTYPE ONLY\nHOLD ACTION OR PLAY TO CHARGE · RELEASE TO COMMIT     EQUIPMENT: HOLD / TAP"
+                .. "\nKEEPER: PLAY THROWS · ACTION PUNTS",
+            rect = { x = 90, y = 414, w = 780, h = 54 },
             data = { align = "center", tone = "muted" },
         },
         {
@@ -50,7 +51,7 @@ function help.layout(state)
             kind = "button",
             text = "BACK",
             focused = state.focus == "back",
-            rect = { x = 380, y = 474, w = 200, h = 42 },
+            rect = { x = 380, y = 486, w = 200, h = 42 },
         },
     }
 end

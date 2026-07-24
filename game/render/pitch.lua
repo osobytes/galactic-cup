@@ -310,7 +310,7 @@ function pitch.draw(s, vp, opts)
     -- Ball trail sits on the ground, under the entities.
     effects.draw_trail(project)
     if opts.combat then
-        combat_render.draw_under(opts.combat, project)
+        combat_render.draw_under(opts.combat, project, render_pose)
     end
 
     -- Depth-sorted drawables (far first).
