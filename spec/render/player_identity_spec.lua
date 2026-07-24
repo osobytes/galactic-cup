@@ -1,6 +1,7 @@
 local identity = require("game.presentation.identity")
 local player_renderer = require("game.render.player_renderer")
 local players = require("data.players")
+local showcase_players = require("data.showcase_player_compatibility")
 local t = require("spec.support.runner")
 
 t.describe("pitch presentation identity", function()
@@ -8,7 +9,7 @@ t.describe("pitch presentation identity", function()
         local seen = {}
         for _, player in ipairs(players) do
             local presentation = assert(identity.for_player(player.id))
-            t.eq(player.species, "neutral")
+            t.eq(assert(showcase_players[player.id]).species, "neutral")
             t.is_true(#presentation.palette == 3)
             seen[presentation.shape] = true
         end

@@ -1,7 +1,7 @@
 local focus = require("game.ui.focus")
+local identity = require("game.presentation.identity")
 local formations = require("data.formations")
 local player_pool = require("data.players")
-local species_pool = require("data.species")
 
 ---@class FormationScreenContext
 ---@field selected string
@@ -81,14 +81,13 @@ function formation.layout(state)
     local lineup_names = {}
     for _, id in ipairs(state.starter_ids) do
         local player = by_id[id]
-        local species_id = player and (player.presentation_species or player.species)
-        local species = species_id and species_pool[species_id]
+        local presentation = identity.for_player(id)
         if player then
             lineup_names[#lineup_names + 1] = player.name:upper()
         end
         markers[#markers + 1] = {
-            color = species and species.palette or { 0.8, 0.9, 1 },
-            shape = species and species.shape or "round",
+            color = presentation and presentation.palette or { 0.8, 0.9, 1 },
+            shape = presentation and presentation.shape or "round",
             name = player and player.name or id,
         }
     end

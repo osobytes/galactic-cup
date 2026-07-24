@@ -1,4 +1,5 @@
 local players = require("data.players")
+local showcase_players = require("data.showcase_player_compatibility")
 local species = require("data.species")
 local t = require("spec.support.runner")
 
@@ -34,13 +35,18 @@ t.describe("showcase species data", function()
             for _, player in ipairs(players) do
                 t.is_true(not player_ids[player.id])
                 player_ids[player.id] = true
-                t.eq(player.species, "neutral")
-                local presentation = assert(player.presentation_species)
+                local showcase = assert(showcase_players[player.id])
+                t.eq(showcase.player_id, player.id)
+                t.eq(showcase.species, "neutral")
+                local presentation = assert(showcase.presentation_species)
                 t.is_true(species[presentation] ~= nil)
                 seen[presentation] = true
                 for _, value in pairs(player.stats) do
                     t.is_true(value >= 0 and value <= 10)
                 end
+            end
+            for player_id in pairs(showcase_players) do
+                t.is_true(player_ids[player_id], "compatibility row has no persistent player")
             end
             t.is_true(seen.terran and seen.gravling and seen.voltari and seen.myceloid)
         end

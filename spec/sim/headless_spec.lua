@@ -173,11 +173,12 @@ t.describe("headless.run_match", function()
             by_id.gax_oru = {
                 id = keeper.id,
                 name = "Harness Gax",
-                planet = keeper.planet,
+                number = keeper.number,
                 position = keeper.position,
-                species = keeper.species,
                 stats = keeper.stats,
-                trait = keeper.trait,
+                presentation_id = keeper.presentation_id,
+                cosmetic_variant_id = keeper.cosmetic_variant_id,
+                loadout_id = keeper.loadout_id,
             }
 
             local original_new = match.new

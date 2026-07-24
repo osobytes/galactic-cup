@@ -4,6 +4,7 @@ local match = require("sim.match")
 local species = require("sim.species")
 local stats = require("sim.stats")
 local player_pool = require("data.players")
+local showcase_pool = require("data.showcase_player_compatibility")
 local species_pool = require("data.species")
 local teams = require("data.teams")
 
@@ -21,18 +22,34 @@ local function test_species()
     return { neutral = species_pool.neutral, swift_fixture = SWIFT }
 end
 
----@param overrides table<string, string>?
 ---@return table<string, PlayerData>
-local function players_by_id(overrides)
+local function players_by_id()
     local by_id = {}
     for _, player in ipairs(player_pool) do
         by_id[player.id] = {
             id = player.id,
             name = player.name,
-            planet = player.planet,
+            number = player.number,
             position = player.position,
-            species = (overrides and overrides[player.id]) or player.species,
             stats = player.stats,
+            presentation_id = player.presentation_id,
+            cosmetic_variant_id = player.cosmetic_variant_id,
+            loadout_id = player.loadout_id,
+        }
+    end
+    return by_id
+end
+
+---@param overrides table<string, string>?
+---@return table<string, ShowcasePlayerCompatibilityData>
+local function showcase_by_id(overrides)
+    local by_id = {}
+    for id, player in pairs(showcase_pool) do
+        by_id[id] = {
+            player_id = id,
+            planet = player.planet,
+            species = (overrides and overrides[id]) or player.species,
+            presentation_species = player.presentation_species,
             trait = player.trait,
         }
     end
@@ -55,14 +72,16 @@ local function player_named(players, id)
 end
 
 ---@param by_id table<string, PlayerData>
+---@param showcase table<string, ShowcasePlayerCompatibilityData>
 ---@return MatchState
-local function new_match(by_id)
+local function new_match(by_id, showcase)
     return match.new({
         home = teams.nebula,
         away = teams.orion,
         field = { w = 960, h = 540 },
         players_by_id = by_id,
         species_by_id = test_species(),
+        showcase_players_by_id = showcase,
         seed = 11,
         duration = 30,
     })
@@ -123,10 +142,14 @@ t.describe("sim.species", function()
 
     t.it("applies the modifier exactly once for controlled and match-AI slots", function()
         local neutral_by_id = players_by_id()
-        local neutral_match = new_match(neutral_by_id)
+        local neutral_match = new_match(neutral_by_id, showcase_by_id())
         local controlled_id = neutral_match.players[neutral_match.controlled].id
-        local swift_by_id = players_by_id({ [controlled_id] = SWIFT.id, tox_vren = SWIFT.id })
-        local swift_match = new_match(swift_by_id)
+        local swift_by_id = players_by_id()
+        local swift_showcase = showcase_by_id({
+            [controlled_id] = SWIFT.id,
+            tox_vren = SWIFT.id,
+        })
+        local swift_match = new_match(swift_by_id, swift_showcase)
         local neutral_home = player_named(neutral_match.players, controlled_id)
         local swift_home = player_named(swift_match.players, controlled_id)
         local neutral_away = player_named(neutral_match.players, "tox_vren")
@@ -148,9 +171,10 @@ t.describe("sim.species", function()
     end)
 
     t.it("makes a pace modifier visible as distance covered in the same match", function()
-        local neutral_match = new_match(players_by_id())
+        local neutral_match = new_match(players_by_id(), showcase_by_id())
         local controlled_id = neutral_match.players[neutral_match.controlled].id
-        local swift_match = new_match(players_by_id({ [controlled_id] = SWIFT.id }))
+        local swift_match =
+            new_match(players_by_id(), showcase_by_id({ [controlled_id] = SWIFT.id }))
         local neutral_player = player_named(neutral_match.players, controlled_id)
         local swift_player = player_named(swift_match.players, controlled_id)
         local neutral_start = neutral_player.pos.x
