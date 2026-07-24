@@ -245,12 +245,48 @@ uploads normalized JSON plus raw logs. The four browser workers run in parallel 
 independently, so a performance failure does not discard a successful hour-long memory soak and a
 memory failure does not rerun the runtime matrix. Pull requests run those long jobs only when their
 cumulative diff touches the workflow, runtime entry points, `core/`, `data/`, `game/`, `sim/`, or
-the rollback/browser build and validation scripts. Manual workflow dispatches always run them,
-and missing or invalid comparison history fails open by running them. A stable
-`OMP-2 rollback gate` job succeeds immediately for an unaffected change or requires native plus
-both browser job matrices for an affected change, so a required-check policy never depends on a
-skipped matrix job. The ordinary quality, browser artifact smoke, and OMP-1 browser determinism jobs
-remain unconditional.
+the rollback/browser build and validation scripts. That cumulative base-to-head decision remains
+the anti-bypass boundary: a later docs commit cannot conceal an earlier relevant change.
+
+The first head for a relevant content fingerprint runs native, both browser matrices, and both
+browser soaks. GitHub's completed run, attempt-specific job/step history, and five uploaded
+artifacts are the reusable record; CI publishes no separate cache entry or mutable pointer.
+
+A later head in the same active pull request may reuse a prior run only when the rollback-relevant
+tracked content is byte-for-byte unchanged. The fingerprint covers committed modes, paths, and
+blob identities for the full cumulative path manifest, including this workflow and the
+fingerprint/validation script itself.
+
+Before skipping any long job, the impact filter scans prior completed-success runs of this
+workflow and head branch from newest to oldest. A candidate is reusable only when the GitHub
+Actions API establishes all of the following:
+
+- the producer is a different, completed-success, first-attempt `pull_request` run of this
+  repository and workflow;
+- its active pull-request linkage exactly matches the current pull-request number, repository,
+  head repository and ref, and base repository, ref, and revision by immutable repository IDs;
+- its revision is an ancestor of the current head and independently recomputes to the same
+  relevant-content fingerprint;
+- the impact filter, stable aggregate, five long jobs, each actual campaign step, and each
+  artifact-upload step all completed successfully on attempt one on the pinned Linux runner; and
+- the exact five artifacts still exist uniquely, are unexpired and nonempty, remain within the
+  evidence-size bound, and expose SHA-256 digests.
+
+This check deliberately validates GitHub's run, attempt-specific job/step, and artifact metadata;
+it does not download and re-audit the five ZIP bodies on every docs follow-up. Any network, API,
+pagination, ancestry, schema, fingerprint, job, step, artifact, digest, expiry, or provenance
+uncertainty fails open by running all five jobs. A run that reused evidence has skipped long jobs
+and therefore cannot become a producer for another reuse; discovery rejects it and may continue
+to an older complete fresh run. Partial, failed, cancelled, expired, or rerun-to-green campaigns
+cannot be assembled into reusable evidence.
+
+Manual workflow dispatches always run fresh, and pushes to `main` never reuse aggregate evidence;
+an unrelated push may still scope-skip the long campaign. Missing or invalid comparison history
+fails open by running fresh. A stable `OMP-2 rollback gate` job succeeds immediately for an
+unaffected change, independently revalidates an exact aggregate reuse, or requires native plus
+both browser job matrices for an affected change, so required-check policy never depends on a
+skipped matrix job. The ordinary quality, browser artifact smoke, and OMP-1 browser determinism
+jobs remain unconditional.
 
 Evidence records source and artifact hashes,
 executable/browser/driver identity, profile/tape hashes, every logical marker, timing totals and
