@@ -85,11 +85,12 @@ diagnostically.
 `gate_contract=5` supersedes contract 4 for newly generated evidence. An individual browser
 playable case records `cpu_gate_mode=normalized_deferred`; it cannot fail solely because its
 absolute p95 work or p99.9 rollback time crosses the product budget. The validator first collects
-the three unique clean controls and three unique playable cases, matches their browser,
-browser-version, profile, and seed metadata, requires a finite positive clean p95 denominator,
-and then evaluates every pair with strict `<` comparisons. Missing, duplicate, malformed, or
-mismatched controls fail closed. The normalized evidence records every pair, both ratios, the
-thresholds, all violations, and the absolute p95, p99.9, maximum, and over-33.3-ms count.
+six unique clean controls and six unique playable cases per browser (`complete_fixture` and
+`combat` across three seeds). It validates exact browser, browser-version, scenario, profile, and
+seed identity, requires a finite positive clean p95 denominator, and then evaluates every
+scenario/seed pair with strict `<` comparisons. Missing, duplicate, malformed, or mismatched
+controls fail closed. The normalized evidence records every pair, both ratios, the thresholds, all
+violations, and the absolute p95, p99.9, maximum, and over-33.3-ms count.
 Each clean control runs immediately before its matching playable seed. This interleaving reduces
 temporal shared-runner drift without adding a case or weakening exact seed pairing.
 

@@ -3556,6 +3556,58 @@ def run_self_test() -> None:
         for reason in non_string_marker["reasons"]
     ):
         raise RuntimeError("non-string browser CPU marker passed normalization")
+    malformed_metric_run = {
+        **complete_controls[0],
+        "runtime_metrics": {
+            **complete_controls[0]["runtime_metrics"],
+            "rows": [
+                *complete_controls[0]["runtime_metrics"]["rows"],
+                {"kind": "case"},
+            ],
+        },
+    }
+    malformed_metric = browser_cpu_acceptance(
+        [malformed_metric_run, *complete_controls[1:]],
+        "firefox",
+    )
+    if (
+        malformed_metric["pass"]
+        or "firefox browser-full run 1 runtime metric row 4 has malformed schema"
+        not in malformed_metric["reasons"]
+    ):
+        raise RuntimeError("malformed extra browser CPU metric passed normalization")
+    mismatched_logical_digest_run = {
+        **complete_controls[0],
+        "logical_marker_sha256": "0" * 64,
+    }
+    mismatched_logical_digest = browser_cpu_acceptance(
+        [mismatched_logical_digest_run, *complete_controls[1:]],
+        "firefox",
+    )
+    if (
+        mismatched_logical_digest["pass"]
+        or "firefox browser-full run 1 logical marker digest is missing or mismatched"
+        not in mismatched_logical_digest["reasons"]
+    ):
+        raise RuntimeError("mismatched browser logical marker digest passed normalization")
+    mismatched_metric_digest_run = {
+        **complete_controls[0],
+        "runtime_metrics": {
+            **complete_controls[0]["runtime_metrics"],
+            "marker_sha256": "0" * 64,
+        },
+    }
+    mismatched_metric_digest = browser_cpu_acceptance(
+        [mismatched_metric_digest_run, *complete_controls[1:]],
+        "firefox",
+    )
+    if (
+        mismatched_metric_digest["pass"]
+        or "firefox browser-full run 1 runtime metric digest is missing or mismatched"
+        not in mismatched_metric_digest["reasons"]
+    ):
+        raise RuntimeError("mismatched browser runtime metric digest passed normalization")
+
     def metric_record(rows: list[dict[str, Any]]) -> dict[str, Any]:
         payload = ("\n".join(row["marker"] for row in rows) + "\n").encode()
         return {"marker_sha256": sha256_bytes(payload), "rows": rows}
