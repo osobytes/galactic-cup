@@ -316,8 +316,11 @@ end
 ---@param identity InputTapeIdentity
 ---@param initial MatchSnapshot
 ---@param frames InputFrame[]
----@return InputTape
-function input_tape.new(identity, initial, frames)
+---@return InputTapeIdentity
+---@return MatchState
+---@return MatchSnapshot
+---@return InputFrame[]
+local function copy_components(identity, initial, frames)
     local copied_identity = input_tape.copy_identity(identity)
     assert(
         copied_identity.tuning == tuning.serialize(),
@@ -357,6 +360,16 @@ function input_tape.new(identity, initial, frames)
         copied_frames[index] = frame
     end
     local normalized_initial = match_snapshot.capture(initial_state)
+    return copied_identity, initial_state, normalized_initial, copied_frames
+end
+
+---@param identity InputTapeIdentity
+---@param initial MatchSnapshot
+---@param frames InputFrame[]
+---@return InputTape
+function input_tape.new(identity, initial, frames)
+    local copied_identity, _, normalized_initial, copied_frames =
+        copy_components(identity, initial, frames)
     local boundary_hashes = { match_snapshot.hash(normalized_initial) }
     local replay_state = match_snapshot.restore(normalized_initial)
     for index = 1, #copied_frames do
@@ -373,9 +386,43 @@ function input_tape.new(identity, initial, frames)
     }
 end
 
+-- Construct a tape from a checked-in recording whose complete boundary-hash
+-- sequence is verified independently. This validates/copies every structural
+-- input but deliberately avoids replaying the full match during startup.
+---@param identity InputTapeIdentity
+---@param initial MatchSnapshot
+---@param frames InputFrame[]
+---@param boundary_hashes string[]
+---@return InputTape
+function input_tape.from_frozen_recording(identity, initial, frames, boundary_hashes)
+    local copied_identity, _, normalized_initial, copied_frames =
+        copy_components(identity, initial, frames)
+    assert_array(boundary_hashes, "boundary_hashes", #copied_frames + 1)
+    local copied_hashes = {}
+    for index = 1, #boundary_hashes do
+        local hash = boundary_hashes[index]
+        assert(
+            type(hash) == "string" and hash:match("^[0-9a-f]+$") and #hash == 16,
+            "frozen input tape boundary hash is malformed"
+        )
+        copied_hashes[index] = hash
+    end
+    assert(
+        copied_hashes[1] == match_snapshot.hash(normalized_initial),
+        "frozen input tape initial boundary hash disagrees with its snapshot"
+    )
+    return {
+        version = input_tape.VERSION,
+        identity = copied_identity,
+        initial = normalized_initial,
+        frames = copied_frames,
+        boundary_hashes = copied_hashes,
+    }
+end
+
 ---@param tape InputTape
 ---@return boolean
-function input_tape.validate(tape)
+function input_tape.validate_structure(tape)
     assert_fields(tape, TAPE_FIELD_SET, "tape")
     assert(tape.version == input_tape.VERSION, "unsupported input tape version")
     input_tape.copy_identity(tape.identity)
@@ -395,9 +442,10 @@ function input_tape.validate(tape)
     assert_array(tape.boundary_hashes, "tape.boundary_hashes", #tape.frames + 1)
     for index = 1, #tape.frames do
         assert(input_frame.validate(tape.frames[index]))
-        assert(tape.frames[index].tick == state.input_tick, "input tape frames are not contiguous")
-        assert(not state.finished, "input tape contains a frame after the match finished")
-        match.step(state, fixed_clock.TICK_SECONDS, tape.frames[index])
+        assert(
+            tape.frames[index].tick == state.input_tick + index - 1,
+            "input tape frames are not contiguous"
+        )
     end
     for index = 1, #tape.boundary_hashes do
         assert(
@@ -406,6 +454,22 @@ function input_tape.validate(tape)
                 and #tape.boundary_hashes[index] == 16,
             "input tape boundary hash is malformed"
         )
+    end
+    assert(
+        tape.boundary_hashes[1] == match_snapshot.hash(tape.initial),
+        "input tape initial boundary hash disagrees with its snapshot"
+    )
+    return true
+end
+
+---@param tape InputTape
+---@return boolean
+function input_tape.validate(tape)
+    assert(input_tape.validate_structure(tape))
+    local state = match_snapshot.restore(tape.initial)
+    for index = 1, #tape.frames do
+        assert(not state.finished, "input tape contains a frame after the match finished")
+        match.step(state, fixed_clock.TICK_SECONDS, tape.frames[index])
     end
     return true
 end

@@ -135,6 +135,38 @@ t.describe("input tape replay", function()
         t.is_true(copied.identity.config ~= "changed")
     end)
 
+    t.it("accepts and owns independently verified frozen boundary recordings", function()
+        local tape, identity = short_match_tape.make()
+        local frames = copy_frames(tape)
+        local hashes = {}
+        for index, hash in ipairs(tape.boundary_hashes) do
+            hashes[index] = hash
+        end
+        local frozen = input_tape.from_frozen_recording(identity, tape.initial, frames, hashes)
+        t.is_true(input_tape.validate_structure(frozen))
+        t.eq(frozen.boundary_hashes[#frozen.boundary_hashes], hashes[#hashes])
+
+        hashes[1] = "0000000000000000"
+        frames[1].slots[1].move_x = frozen.frames[1].slots[1].move_x == -127 and 127 or -127
+        t.is_true(frozen.boundary_hashes[1] ~= hashes[1])
+        t.is_true(frozen.frames[1].slots[1].move_x ~= frames[1].slots[1].move_x)
+
+        local malformed = {}
+        for index, hash in ipairs(frozen.boundary_hashes) do
+            malformed[index] = hash
+        end
+        malformed[1] = "0000000000000000"
+        t.is_true(
+            not pcall(
+                input_tape.from_frozen_recording,
+                identity,
+                tape.initial,
+                copy_frames(tape),
+                malformed
+            )
+        )
+    end)
+
     t.it("rejects identity and active tuning mismatches separately", function()
         local tape, identity = short_match_tape.make()
         local wrong = input_tape.copy_identity(identity)

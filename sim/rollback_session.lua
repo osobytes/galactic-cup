@@ -60,8 +60,8 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field restored_boundary integer
 ---@field old_present_boundary integer
 ---@field new_present_boundary integer
----@field old_present_hash string
----@field new_present_hash string
+---@field old_present_hash string?
+---@field new_present_hash string?
 ---@field first_difference MatchSnapshotDifference?
 
 ---@class RollbackSessionDiagnostics
@@ -82,7 +82,13 @@ local rollback_snapshot_history = require("sim.rollback_snapshot_history")
 ---@field input_history RollbackInputHistoryDiagnostics
 ---@field snapshot_history RollbackSnapshotHistoryDiagnostics
 
----@alias RollbackSessionMeasureLabel "capture"|"restore"|"resimulation"|"rollback"
+---@class RollbackSessionAccounting
+---@field input RollbackInputHistoryAccounting
+---@field output_bytes integer
+---@field snapshot_bytes integer
+---@field total_bytes integer
+
+---@alias RollbackSessionMeasureLabel "tick"|"capture"|"restore"|"resimulation"|"rollback"
 ---@alias RollbackSessionMeasure fun(label: RollbackSessionMeasureLabel, operation: fun(): any): any
 
 ---@class RollbackSession
@@ -208,6 +214,38 @@ local function copy_events(events)
     return result
 end
 
+---@param value any
+---@return string
+local function canonical_payload(value)
+    local kind = type(value)
+    if kind == "nil" then
+        return "n"
+    elseif kind == "boolean" then
+        return value and "b1" or "b0"
+    elseif kind == "number" then
+        local payload = match_snapshot.number_bytes(value)
+        return "d" .. #payload .. ":" .. payload
+    elseif kind == "string" then
+        return "s" .. #value .. ":" .. value
+    elseif kind == "table" then
+        local keys = {}
+        for key in pairs(value) do
+            keys[#keys + 1] = key
+        end
+        table.sort(keys, function(left, right)
+            return type(left) .. ":" .. tostring(left) < type(right) .. ":" .. tostring(right)
+        end)
+        local parts = { "t", tostring(#keys), ":" }
+        for _, key in ipairs(keys) do
+            parts[#parts + 1] = canonical_payload(key)
+            parts[#parts + 1] = canonical_payload(value[key])
+        end
+        return table.concat(parts)
+    end
+    assert(false, "rollback session accounting cannot encode " .. kind)
+    return ""
+end
+
 ---@param record RollbackInputTickRecord
 ---@return RollbackInputTickRecord
 local function copy_input_record(record)
@@ -316,16 +354,16 @@ local function execute_tick(session, tick)
     count_predictions(session, record)
     match.step(session._state, fixed_clock.TICK_SECONDS, frame)
     local boundary = measured(session, "capture", function()
-        return match_snapshot.capture(session._state)
+        return match_snapshot.capture_owned(session._state)
     end)
     ---@cast boundary MatchSnapshot
     assert(
         boundary.state.input_tick == tick + 1,
         "rollback session step did not advance one boundary"
     )
-    assert(rollback_snapshot_history.store(session._snapshot_history, boundary))
+    assert(rollback_snapshot_history.store_owned(session._snapshot_history, boundary))
     local output = make_output(tick, record, boundary)
-    session._outputs[tick] = copy_output(output)
+    session._outputs[tick] = output
     return output
 end
 
@@ -354,11 +392,11 @@ function rollback_session.new(initial_snapshot, sources, max_rollback_ticks, mea
     assert(state.slot_mode, "rollback session requires a slot-mode match snapshot")
     assert(state.input_tick == 0, "rollback session requires the tick-zero boundary")
     assert(not state.finished, "rollback session tick-zero boundary must be active")
-    local canonical = match_snapshot.capture(state)
+    local canonical = match_snapshot.capture_owned(state)
     local snapshots = rollback_snapshot_history.new(max_rollback_ticks)
-    assert(rollback_snapshot_history.store(snapshots, canonical))
+    assert(rollback_snapshot_history.store_owned(snapshots, canonical))
     return {
-        _state = match_snapshot.restore(canonical),
+        _state = state,
         _input_history = rollback_input_history.new(sources),
         _snapshot_history = snapshots,
         _outputs = {},
@@ -424,7 +462,10 @@ function rollback_session.step(session)
         session._status = "finished"
         return nil, "rollback session cannot simulate after full time", "match_finished"
     end
-    local output = execute_tick(session, session._state.input_tick)
+    local output = measured(session, "tick", function()
+        return execute_tick(session, session._state.input_tick)
+    end)
+    ---@cast output RollbackTickOutput
     session._status = session._state.finished and "finished" or "active"
     prune_retained_outputs(session)
     return copy_output(output)
@@ -457,35 +498,40 @@ end
 
 ---@param session RollbackSession
 ---@param causal_tick integer
+---@param detailed_diagnostics boolean
 ---@return RollbackReconcileResult
-local function reconcile_changed(session, causal_tick)
+local function reconcile_changed(session, causal_tick, detailed_diagnostics)
     local old_present = session._state.input_tick
-    local lookup = rollback_snapshot_history.lookup(session._snapshot_history, causal_tick)
-    if lookup.status == "outside_window" then
+    local restore_status = rollback_snapshot_history.status(session._snapshot_history, causal_tick)
+    if restore_status == "outside_window" then
         session._status = "late_input_unrecoverable"
         session._late_window_failures = session._late_window_failures + 1
         session._late_input_tick = causal_tick
-        return unchanged_reconcile_result(session, causal_tick, lookup.status)
+        return unchanged_reconcile_result(session, causal_tick, restore_status)
     end
     assert(
-        lookup.status ~= "missing",
+        restore_status ~= "missing",
         ("rollback snapshot invariant: boundary %d is missing before correction of present %d"):format(
             causal_tick,
             old_present
         )
     )
-    local restored_snapshot = assert(lookup.snapshot, "rollback restore snapshot is missing")
-    local old_snapshot = measured(session, "capture", function()
-        return match_snapshot.capture(session._state)
-    end)
-    ---@cast old_snapshot MatchSnapshot
-    local old_hash = match_snapshot.hash(old_snapshot)
+    ---@type MatchSnapshot?
+    local old_snapshot = nil
+    local old_hash = nil
+    if detailed_diagnostics then
+        old_snapshot = measured(session, "capture", function()
+            return match_snapshot.capture_owned(session._state)
+        end)
+        old_hash =
+            assert(rollback_snapshot_history.boundary_hash(session._snapshot_history, old_present))
+    end
     assert(
         rollback_input_history.consume_earliest_divergence(session._input_history) == causal_tick,
         "rollback divergence changed before restore"
     )
     local restored = measured(session, "restore", function()
-        return match_snapshot.restore(restored_snapshot)
+        return assert(rollback_snapshot_history.restore(session._snapshot_history, causal_tick))
     end)
     ---@cast restored MatchState
     session._state = restored
@@ -513,14 +559,18 @@ local function reconcile_changed(session, causal_tick)
     end
     prune_retained_outputs(session)
 
-    local new_snapshot = measured(session, "capture", function()
-        return match_snapshot.capture(session._state)
-    end)
-    ---@cast new_snapshot MatchSnapshot
-    local new_hash = match_snapshot.hash(new_snapshot)
+    local new_hash = nil
     local first_difference = nil
-    if old_hash ~= new_hash then
-        first_difference = match_snapshot.first_difference(old_snapshot, new_snapshot)
+    if detailed_diagnostics then
+        new_hash =
+            assert(rollback_snapshot_history.boundary_hash(session._snapshot_history, new_present))
+        if old_hash ~= new_hash then
+            first_difference = rollback_snapshot_history.first_difference(
+                session._snapshot_history,
+                new_present,
+                assert(old_snapshot)
+            )
+        end
     end
     local depth = old_present - causal_tick
     session._rollback_count = session._rollback_count + 1
@@ -541,7 +591,7 @@ local function reconcile_changed(session, causal_tick)
         status = session._status,
         causal_tick = causal_tick,
         restored_boundary = causal_tick,
-        restore_status = lookup.status,
+        restore_status = restore_status,
         old_present_boundary = old_present,
         new_present_boundary = new_present,
         corrected_from_tick = #corrected_outputs > 0 and causal_tick or nil,
@@ -556,9 +606,14 @@ local function reconcile_changed(session, causal_tick)
 end
 
 ---@param session RollbackSession
+---@param detailed_diagnostics boolean? Compute predicted-versus-corrected hashes and difference.
 ---@return RollbackReconcileResult
-function rollback_session.reconcile(session)
+function rollback_session.reconcile(session, detailed_diagnostics)
     assert_session(session)
+    assert(
+        detailed_diagnostics == nil or type(detailed_diagnostics) == "boolean",
+        "rollback detailed diagnostics flag must be boolean"
+    )
     if session._status == "late_input_unrecoverable" then
         local late_tick = assert(
             session._late_input_tick,
@@ -571,7 +626,7 @@ function rollback_session.reconcile(session)
         return unchanged_reconcile_result(session, nil, nil)
     end
     local result = measured(session, "rollback", function()
-        return reconcile_changed(session, causal_tick)
+        return reconcile_changed(session, causal_tick, detailed_diagnostics == true)
     end)
     ---@cast result RollbackReconcileResult
     return result
@@ -581,7 +636,7 @@ end
 ---@return MatchSnapshot
 function rollback_session.current_snapshot(session)
     assert_session(session)
-    return match_snapshot.capture(session._state)
+    return match_snapshot.capture_owned(session._state)
 end
 
 ---@param session RollbackSession
@@ -590,6 +645,15 @@ end
 function rollback_session.snapshot(session, boundary_tick)
     assert_session(session)
     return rollback_snapshot_history.lookup(session._snapshot_history, boundary_tick)
+end
+
+---@param session RollbackSession
+---@param expected RollbackSnapshotHistory
+---@param boundary_tick integer
+---@return RollbackSnapshotHistoryComparison
+function rollback_session.compare_retained(session, expected, boundary_tick)
+    assert_session(session)
+    return rollback_snapshot_history.compare(expected, session._snapshot_history, boundary_tick)
 end
 
 ---@param session RollbackSession
@@ -607,7 +671,7 @@ end
 ---@return RollbackComparison
 function rollback_session.compare(session, expected, causal_tick)
     assert_session(session)
-    local actual = match_snapshot.capture(session._state)
+    local actual = match_snapshot.capture_owned(session._state)
     local actual_hash = match_snapshot.hash(actual)
     local expected_hash = match_snapshot.hash(expected)
     local matched = actual_hash == expected_hash
@@ -654,6 +718,28 @@ function rollback_session.diagnostics(session)
             or nil,
         input_history = rollback_input_history.diagnostics(session._input_history),
         snapshot_history = rollback_snapshot_history.diagnostics(session._snapshot_history),
+    }
+end
+
+-- Exact logical payload retained by the rollback coordinator. Snapshot bytes
+-- use MatchSnapshot v5 canonical encoding; input/output bytes use the versioned
+-- canonical encodings owned by their respective modules.
+---@param session RollbackSession
+---@return RollbackSessionAccounting
+function rollback_session.accounting(session)
+    assert_session(session)
+    local input = rollback_input_history.accounting(session._input_history)
+    local output_bytes = 0
+    for _, output in pairs(session._outputs) do
+        output_bytes = output_bytes + #canonical_payload(output)
+    end
+    local snapshot_bytes =
+        rollback_snapshot_history.diagnostics(session._snapshot_history).canonical_bytes
+    return {
+        input = input,
+        output_bytes = output_bytes,
+        snapshot_bytes = snapshot_bytes,
+        total_bytes = input.total_bytes + output_bytes + snapshot_bytes,
     }
 end
 

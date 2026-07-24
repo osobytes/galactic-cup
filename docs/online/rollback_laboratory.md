@@ -158,6 +158,12 @@ network impairment counters, and drain/late-window status.
 `rollback_lab.summary(result)` provides the corresponding human-readable
 report.
 
+The OMP-2 exit campaign, acceptance gates, browser matrix, and OMP-3 decisions
+are recorded in
+[`omp2_rollback_validation.md`](omp2_rollback_validation.md). Run the complete
+campaign with `./scripts/check_rollback.sh --full`; use `--self-test` for the
+fast harness-only check included in the ordinary project validation.
+
 Intentional corruption changes one client-only input sample. The reference
 continues to consume the original tape. The failed result names the causal
 input tick, expected and actual boundary hashes, and the first differing

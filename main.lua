@@ -4,6 +4,7 @@
 --   love . --sim [n]          -> play n unattended matches, print fun-proxy metrics, exit
 --   love . --snapshot-measure [n] -> measure canonical snapshot operations n times
 --   love . --rollback-lab [profile] [seed] [corrupt] -> run the OMP-2 lab
+--   love . --rollback-validation SUITE [profile] [seed] -> gate OMP-2 evidence
 --   love . --determinism      -> verify the frozen OMP-1 complete-match evidence
 --   love . --determinism-refresh -> deliberately replace the frozen OMP-1 recording
 --   love . --rate-validate [n] -> validate frozen squad ratings over n paired seeds, exit
@@ -132,6 +133,366 @@ if has_flag("--snapshot-measure") then
             )
         )
         os.exit(0)
+    end
+    return
+end
+
+if has_flag("--rollback-validation") then
+    local rollback_validation = require("sim.rollback_validation")
+    local game_validation = require("game.rollback_validation")
+    local match_snapshot = require("sim.match_snapshot")
+    local validation_config = rollback_validation.config()
+    local suite_arg, profile_arg, seed_arg = args_after("--rollback-validation")
+    local suite = suite_arg or "native"
+    local external_sample_ack = has_flag("--external-sample-ack")
+    ---@cast suite RollbackValidationSuite
+    local network_seed = nil
+    if seed_arg ~= nil then
+        network_seed = tonumber(seed_arg)
+        assert(
+            network_seed
+                and network_seed == math.floor(network_seed)
+                and network_seed == network_seed
+                and network_seed ~= math.huge
+                and network_seed ~= -math.huge,
+            "--rollback-validation network seed must be a finite integer"
+        )
+        ---@cast network_seed integer
+    end
+
+    ---@class RuntimeTimingRow
+    ---@field seconds number
+    ---@field calls integer
+    ---@field maximum number
+
+    ---@class RuntimeCaseTiming
+    ---@field tick RuntimeTimingRow
+    ---@field capture RuntimeTimingRow
+    ---@field restore RuntimeTimingRow
+    ---@field resimulation RuntimeTimingRow
+    ---@field rollback RuntimeTimingRow
+    ---@field rollback_microseconds integer[]
+    ---@field work_seconds number[]
+    ---@field update_wall_seconds number[]
+
+    ---@return RuntimeCaseTiming
+    local function new_case_timing()
+        return {
+            tick = { seconds = 0, calls = 0, maximum = 0 },
+            capture = { seconds = 0, calls = 0, maximum = 0 },
+            restore = { seconds = 0, calls = 0, maximum = 0 },
+            resimulation = { seconds = 0, calls = 0, maximum = 0 },
+            rollback = { seconds = 0, calls = 0, maximum = 0 },
+            rollback_microseconds = {},
+            work_seconds = {},
+            update_wall_seconds = {},
+        }
+    end
+
+    local active_timing = new_case_timing()
+    local current_work_seconds = 0
+
+    ---@param label RollbackSessionMeasureLabel
+    ---@param operation fun(): any
+    ---@return any
+    local function measure(label, operation)
+        local started = love.timer.getTime()
+        local value = operation()
+        local elapsed = love.timer.getTime() - started
+        local row = active_timing[label]
+        row.seconds = row.seconds + elapsed
+        row.calls = row.calls + 1
+        row.maximum = math.max(row.maximum, elapsed)
+        if label == "rollback" then
+            active_timing.rollback_microseconds[#active_timing.rollback_microseconds + 1] =
+                math.floor(elapsed * 1000000 + 0.5)
+        end
+        if label == "tick" or label == "rollback" then
+            current_work_seconds = current_work_seconds + elapsed
+        end
+        return value
+    end
+
+    local campaign = rollback_validation.new_campaign(suite, {
+        profile_name = profile_arg,
+        network_seed = network_seed,
+        measure = measure,
+    })
+    local runtime_failed = false
+
+    ---@param values number[]
+    ---@param percentile number
+    ---@return number
+    local function nearest_rank(values, percentile)
+        if #values == 0 then
+            return 0
+        end
+        local copied = {}
+        for index, value in ipairs(values) do
+            copied[index] = value
+        end
+        table.sort(copied)
+        return copied[math.max(1, math.ceil(#copied * percentile))]
+    end
+
+    ---@param scenario string
+    ---@return RollbackValidationScenario[]
+    local function required_game_scenarios(scenario)
+        if scenario == "complete_fixture" then
+            return { "possession", "tackle", "shot", "aerial", "keeper", "full_time" }
+        end
+        local mapped = {
+            possession_change = "possession",
+            tackle = "tackle",
+            shot = "shot",
+            goal = "goal",
+            kickoff = "kickoff",
+            aerial = "aerial",
+            keeper_action = "keeper",
+            full_time = "full_time",
+        }
+        local value = mapped[scenario]
+        return value and { value } or {}
+    end
+
+    ---@param completed RollbackValidationCompletedCase
+    ---@return string
+    ---@return string
+    ---@return string?
+    ---@return boolean
+    local function complete_case(completed)
+        local result = completed.result
+        local game_pass = completed.expected_failure
+        if not completed.expected_failure then
+            local initial = match_snapshot.restore(completed.initial_snapshot)
+            local reference_final_state = match_snapshot.restore(result.reference_final_snapshot)
+            local impaired_final_state = match_snapshot.restore(result.client_final_snapshot)
+            local report = game_validation.run(initial, result.event_trace, {
+                home_team_id = "nebula",
+                away_team_id = "orion",
+                reference_final_state = reference_final_state,
+                impaired_final_state = impaired_final_state,
+                seed = result.fixture_seed,
+                expected_replay_boundaries = game_validation.expected_replay_boundaries(
+                    result.reference_final_boundary
+                ),
+                expected_replay_samples = {
+                    {
+                        boundary = result.reference_final_boundary,
+                        ball_x = reference_final_state.ball.x,
+                        ball_y = reference_final_state.ball.y,
+                        score_home = reference_final_state.score.home,
+                        score_away = reference_final_state.score.away,
+                    },
+                },
+                expected_replay_truncate_count = result.metrics.rollback_count,
+                required_scenarios = required_game_scenarios(completed.scenario),
+            })
+            game_pass = report.passed
+        end
+
+        local p95_work_ms = nearest_rank(active_timing.work_seconds, 0.95) * 1000
+        local p95_update_wall_ms = nearest_rank(active_timing.update_wall_seconds, 0.95) * 1000
+        local max_update_wall_ms = 0
+        for _, value in ipairs(active_timing.update_wall_seconds) do
+            max_update_wall_ms = math.max(max_update_wall_ms, value * 1000)
+        end
+        local rollback_p999_ms = nearest_rank(active_timing.rollback_microseconds, 0.999) / 1000
+        local max_rollback_ms = nearest_rank(active_timing.rollback_microseconds, 1) / 1000
+        local rollback_over_budget_count = 0
+        for _, microseconds in ipairs(active_timing.rollback_microseconds) do
+            if microseconds >= validation_config.budgets.rollback_p999_ms * 1000 then
+                rollback_over_budget_count = rollback_over_budget_count + 1
+            end
+        end
+        local cpu_gate_applied = result.profile == "playable" and suite ~= "soak"
+        local cpu_gate = not cpu_gate_applied
+            or (
+                p95_work_ms < validation_config.budgets.p95_work_ms
+                and rollback_p999_ms < validation_config.budgets.rollback_p999_ms
+            )
+        local snapshot_gate = result.metrics.peaks.snapshot_count
+                <= validation_config.budgets.snapshot_count
+            and result.metrics.peaks.snapshot_bytes < validation_config.budgets.snapshot_bytes
+        local history_gate = result.metrics.peaks.history_bytes
+            < validation_config.budgets.history_bytes
+        local passed = completed.accepted
+            and game_pass
+            and cpu_gate
+            and snapshot_gate
+            and history_gate
+        runtime_failed = runtime_failed or not passed
+
+        local logical = rollback_validation.case_marker(completed)
+            .. "|gate_contract=4"
+            .. "|cpu_gate="
+            .. (cpu_gate_applied and (cpu_gate and "1" or "0") or "not_applied")
+            .. "|cpu_gate_applied="
+            .. (cpu_gate_applied and "1" or "0")
+            .. "|snapshot_gate="
+            .. (snapshot_gate and "1" or "0")
+            .. "|history_gate="
+            .. (history_gate and "1" or "0")
+            .. "|game_gate="
+            .. (game_pass and "1" or "0")
+        local metrics = table.concat({
+            "GC_ROLLBACK_METRICS",
+            "case",
+            "case=" .. completed.id,
+            "profile=" .. result.profile,
+            ("p95_work_ms=%.6f"):format(p95_work_ms),
+            ("rollback_p999_ms=%.6f"):format(rollback_p999_ms),
+            ("max_rollback_ms=%.6f"):format(max_rollback_ms),
+            "rollback_sample_count=" .. #active_timing.rollback_microseconds,
+            "rollback_over_33_3_count=" .. rollback_over_budget_count,
+            "rollback_percentile=0.999",
+            "rollback_percentile_method=nearest_rank",
+            "rollback_timing_evidence=" .. (suite == "soak" and "aggregate_diagnostic" or "raw"),
+            ("p95_update_wall_ms=%.6f"):format(p95_update_wall_ms),
+            ("max_update_wall_ms=%.6f"):format(max_update_wall_ms),
+            ("simulation_ms=%.6f"):format(active_timing.tick.seconds * 1000),
+            ("capture_ms=%.6f"):format(active_timing.capture.seconds * 1000),
+            ("restore_ms=%.6f"):format(active_timing.restore.seconds * 1000),
+            ("resimulation_ms=%.6f"):format(active_timing.resimulation.seconds * 1000),
+            ("rollback_ms=%.6f"):format(active_timing.rollback.seconds * 1000),
+            "capture_calls=" .. active_timing.capture.calls,
+            "simulation_calls=" .. active_timing.tick.calls,
+            "restore_calls=" .. active_timing.restore.calls,
+            "resimulation_calls=" .. active_timing.resimulation.calls,
+            "rollback_calls=" .. active_timing.rollback.calls,
+            "work_samples=" .. #active_timing.work_seconds,
+            "peak_snapshot_bytes=" .. result.metrics.peaks.snapshot_bytes,
+            "peak_history_bytes=" .. result.metrics.peaks.history_bytes,
+        }, "|")
+        local timings = nil
+        if suite ~= "soak" and #active_timing.rollback_microseconds > 0 then
+            local samples = {}
+            for index, microseconds in ipairs(active_timing.rollback_microseconds) do
+                samples[index] = tostring(microseconds)
+            end
+            timings = table.concat({
+                "GC_ROLLBACK_TIMINGS",
+                "case",
+                "gate_contract=4",
+                "case=" .. completed.id,
+                "sample_count=" .. #samples,
+                "unit=microseconds",
+                "samples=" .. table.concat(samples, ","),
+            }, "|")
+        end
+        return logical, metrics, timings, passed
+    end
+
+    local function flush_stdout()
+        if io.stdout and io.stdout.flush then
+            io.stdout:flush()
+        end
+    end
+
+    local function runtime_marker()
+        local major, minor, revision = love.getVersion()
+        print(table.concat({
+            "GC_ROLLBACK_METRICS",
+            "runtime",
+            "love=" .. major .. "." .. minor .. "." .. revision,
+            "suite=" .. suite,
+            "gate_contract=4",
+            "profile_digest=" .. rollback_validation.profile_digest(),
+            "input_version=1",
+            "snapshot_version=5",
+            "tick_rate=60",
+        }, "|"))
+        flush_stdout()
+    end
+
+    ---@return RollbackValidationResult?
+    local function advance()
+        current_work_seconds = 0
+        local started = love.timer.getTime()
+        local result, completed = rollback_validation.step_campaign(campaign, 1)
+        local wall_seconds = love.timer.getTime() - started
+        active_timing.work_seconds[#active_timing.work_seconds + 1] = current_work_seconds
+        active_timing.update_wall_seconds[#active_timing.update_wall_seconds + 1] = wall_seconds
+        if completed then
+            local logical, metrics, timings = complete_case(completed)
+            local sample = completed.sample
+            local soak_digest = completed.result.event_metrics.confirmed_digest
+            completed = nil
+            active_timing = new_case_timing()
+            if timings ~= nil then
+                print(timings)
+                timings = nil
+            end
+            if sample ~= nil then
+                collectgarbage("collect")
+                local heap_bytes = math.floor(collectgarbage("count") * 1024 + 0.5)
+                logical = logical
+                    .. "|forced_gc=1|lua_heap_bytes="
+                    .. heap_bytes
+                    .. "|logical_digest="
+                    .. soak_digest
+            end
+            print(logical)
+            print(metrics)
+            flush_stdout()
+            if sample == "final" and external_sample_ack then
+                assert(
+                    io.read("*l") == "GC_ROLLBACK_SAMPLE_ACK",
+                    "rollback validation did not receive its external sample acknowledgement"
+                )
+            end
+        end
+        return result
+    end
+
+    ---@param result RollbackValidationResult
+    local function finish(result)
+        local marker = rollback_validation.result_marker({
+            schema = result.schema,
+            suite = result.suite,
+            success = result.success and not runtime_failed,
+            case_count = result.case_count,
+            logical_digest = result.logical_digest,
+        })
+        print(marker)
+        flush_stdout()
+    end
+
+    if has_flag("--browser-runtime") then
+        function love.load()
+            runtime_marker()
+        end
+
+        function love.update()
+            local ok, result = pcall(advance)
+            if not ok then
+                print("GC_ROLLBACK_VALIDATION|failure|message=" .. tostring(result):gsub("|", "/"))
+                flush_stdout()
+                love.event.quit(1)
+            elseif result then
+                finish(result)
+                love.event.quit(result.success and not runtime_failed and 0 or 1)
+            end
+        end
+    else
+        function love.load()
+            runtime_marker()
+            local ok, result = pcall(function()
+                local completed_result = nil
+                while completed_result == nil do
+                    completed_result = advance()
+                end
+                return completed_result
+            end)
+            if not ok then
+                print("GC_ROLLBACK_VALIDATION|failure|message=" .. tostring(result):gsub("|", "/"))
+                flush_stdout()
+                os.exit(1)
+            end
+            ---@cast result RollbackValidationResult
+            finish(result)
+            os.exit(result.success and not runtime_failed and 0 or 1)
+        end
     end
     return
 end

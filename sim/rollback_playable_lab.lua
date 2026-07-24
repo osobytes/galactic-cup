@@ -45,8 +45,8 @@ local slot_input = require("sim.slot_input")
 ---@field replaced_through_tick integer
 ---@field corrected_from_tick integer
 ---@field corrected_through_tick integer
----@field old_present_hash string
----@field new_present_hash string
+---@field old_present_hash string?
+---@field new_present_hash string?
 ---@field first_difference MatchSnapshotDifference?
 
 ---@class RollbackPlayableConvergence
@@ -353,8 +353,8 @@ local function correction_view(result)
         replaced_through_tick = assert(result.replaced_through_tick),
         corrected_from_tick = assert(result.corrected_from_tick),
         corrected_through_tick = assert(result.corrected_through_tick),
-        old_present_hash = assert(result.old_present_hash),
-        new_present_hash = assert(result.new_present_hash),
+        old_present_hash = result.old_present_hash,
+        new_present_hash = result.new_present_hash,
         first_difference = copy_value(result.first_difference),
     }
 end
@@ -477,8 +477,8 @@ local function advance_reference(lab, local_sample)
     local base = assert(input_frame.new(lab._transport_tick, slots))
     local frame = slot_input.materialize(lab._producer, lab._reference, base)
     match.step(lab._reference, fixed_clock.TICK_SECONDS, frame)
-    local boundary = match_snapshot.capture(lab._reference)
-    assert(rollback_snapshot_history.store(lab._reference_history, boundary))
+    local boundary = match_snapshot.capture_owned(lab._reference)
+    assert(rollback_snapshot_history.store_owned(lab._reference_history, boundary))
 
     add_authority(lab, frame.tick, lab._local_slot, frame.slots[lab._local_slot])
     for slot = 1, input_frame.SLOT_COUNT do
@@ -522,7 +522,7 @@ local function finish_settlement_if_ready(lab)
     then
         return
     end
-    local expected = match_snapshot.capture(lab._reference)
+    local expected = match_snapshot.capture_owned(lab._reference)
     local comparison = rollback_session.compare(lab._session, expected, final_tick)
     lab._latest_convergence = {
         status = comparison.matched and "matched" or "diverged",
@@ -564,7 +564,7 @@ function rollback_playable_lab.new(initial_snapshot, options)
     local canonical = controlled_initial_snapshot(initial_snapshot, local_slot)
     local reference = match_snapshot.restore(canonical)
     local reference_history = rollback_snapshot_history.new(maximum)
-    assert(rollback_snapshot_history.store(reference_history, canonical))
+    assert(rollback_snapshot_history.store_owned(reference_history, canonical))
     local sources = new_sources(local_slot)
     local session = rollback_session.new(canonical, sources, maximum)
     local initial_hash = match_snapshot.hash(canonical)
@@ -658,7 +658,7 @@ end
 ---@param lab RollbackPlayableLab
 ---@return MatchSnapshot
 function rollback_playable_lab.reference_snapshot(lab)
-    return match_snapshot.capture(lab._reference)
+    return match_snapshot.capture_owned(lab._reference)
 end
 
 ---@param lab RollbackPlayableLab

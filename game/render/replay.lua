@@ -58,6 +58,11 @@ local function cap()
     return MAX_SECONDS * 60
 end
 
+---@return integer
+function replay.capacity()
+    return cap()
+end
+
 local function clamp(x, a, b)
     return math.max(a, math.min(b, x))
 end

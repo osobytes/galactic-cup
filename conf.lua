@@ -30,6 +30,7 @@ function love.conf(t)
     }
     if not has_flag("--browser-runtime") then
         headless_flags[#headless_flags + 1] = "--determinism"
+        headless_flags[#headless_flags + 1] = "--rollback-validation"
     end
     local headless = false
     for _, f in ipairs(headless_flags) do

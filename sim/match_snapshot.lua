@@ -478,6 +478,165 @@ local function copy_state(source, path, make_vec)
     return result
 end
 
+-- Rollback owns states that have already crossed capture/restore's validating
+-- boundary. These copies keep the same explicit schema and deep-ownership
+-- contract without repeating allowlist checks or constructing diagnostic paths
+-- at every predicted and resimulated boundary.
+---@param value Vec2
+---@param make_vec boolean
+---@return Vec2
+local function copy_owned_vec(value, make_vec)
+    if make_vec then
+        return Vec2.new(value.x, value.y)
+    end
+    return { x = value.x, y = value.y }
+end
+
+---@param source MatchPlayer
+---@param make_vec boolean
+---@return MatchPlayer
+local function copy_owned_player(source, make_vec)
+    local result = {}
+    for _, field in ipairs(match_snapshot.PLAYER_FIELDS) do
+        local value = source[field]
+        if VECTOR_FIELDS[field] then
+            result[field] = copy_owned_vec(value, make_vec)
+        elseif OPTIONAL_VECTOR_FIELDS[field] then
+            result[field] = value and copy_owned_vec(value, make_vec) or nil
+        elseif field == "windup_shot" then
+            if value then
+                result.windup_shot = {
+                    dir = copy_owned_vec(value.dir, make_vec),
+                    speed = value.speed,
+                    vz = value.vz,
+                    spin = value.spin,
+                    shot_type = value.shot_type,
+                }
+            end
+        else
+            result[field] = value
+        end
+    end
+    ---@cast result MatchPlayer
+    return result
+end
+
+---@param source MatchEvent
+---@return MatchEvent
+local function copy_owned_event(source)
+    local result = {}
+    for _, field in ipairs(EVENT_FIELDS) do
+        result[field] = source[field]
+    end
+    ---@cast result MatchEvent
+    return result
+end
+
+---@param source MarkingConfig
+---@return MarkingConfig
+local function copy_owned_marking(source)
+    local result = {}
+    for _, field in ipairs(MARKING_FIELDS) do
+        result[field] = source[field]
+    end
+    ---@cast result MarkingConfig
+    return result
+end
+
+---@param source InputOwnership
+---@return InputOwnership
+local function copy_owned_ownership(source)
+    local rosters = { home = {}, away = {} }
+    for _, team in ipairs({ "home", "away" }) do
+        for index = 1, input_frame.FIXTURE_TEAM_SIZE do
+            rosters[team][index] = source.rosters[team][index]
+        end
+    end
+    local slots = {}
+    for index = 1, input_frame.SLOT_COUNT do
+        local assignment = source.slots[index]
+        slots[index] = {
+            slot = assignment.slot,
+            team = assignment.team,
+            player_id = assignment.player_id,
+        }
+    end
+    return { version = source.version, rosters = rosters, slots = slots }
+end
+
+---@param source table<integer, integer>
+---@return table<integer, integer>
+local function copy_owned_sparse_indices(source)
+    local result = {}
+    for key, value in pairs(source) do
+        result[key] = value
+    end
+    return result
+end
+
+---@param source MatchState
+---@param make_vec boolean
+---@return MatchState
+local function copy_owned_state(source, make_vec)
+    local result = {
+        field = { w = source.field.w, h = source.field.h },
+        goal_home = {
+            x = source.goal_home.x,
+            y = source.goal_home.y,
+            w = source.goal_home.w,
+            h = source.goal_home.h,
+        },
+        goal_away = {
+            x = source.goal_away.x,
+            y = source.goal_away.y,
+            w = source.goal_away.w,
+            h = source.goal_away.h,
+        },
+        players = {},
+        ball = copy_owned_vec(source.ball, make_vec),
+        ball_vel = copy_owned_vec(source.ball_vel, make_vec),
+        ball_z = source.ball_z,
+        ball_vz = source.ball_vz,
+        owner = source.owner,
+        controlled = source.controlled,
+        human_controlled = source.human_controlled,
+        score = { home = source.score.home, away = source.score.away },
+        time_left = source.time_left,
+        max_goals = source.max_goals,
+        finished = source.finished,
+        pickup_cd = source.pickup_cd,
+        press = { home = source.press.home, away = source.press.away },
+        marking = {
+            home = copy_owned_marking(source.marking.home),
+            away = copy_owned_marking(source.marking.away),
+        },
+        marks = {
+            home = copy_owned_sparse_indices(source.marks.home),
+            away = copy_owned_sparse_indices(source.marks.away),
+        },
+        ball_spin = source.ball_spin,
+        rng = source.rng,
+        block_grace = source.block_grace,
+        aerial_lock = source.aerial_lock,
+        kickoff_hold = source.kickoff_hold,
+        events = {},
+        slot_mode = source.slot_mode,
+        input_ownership = source.input_ownership and copy_owned_ownership(source.input_ownership)
+            or nil,
+        slot_players = copy_owned_sparse_indices(source.slot_players),
+        slot_for_player = copy_owned_sparse_indices(source.slot_for_player),
+        input_tick = source.input_tick,
+    }
+    for index = 1, #source.players do
+        result.players[index] = copy_owned_player(source.players[index], make_vec)
+    end
+    for index = 1, #source.events do
+        result.events[index] = copy_owned_event(source.events[index])
+    end
+    ---@cast result MatchState
+    return result
+end
+
 ---@param state MatchState
 ---@return MatchSnapshot
 function match_snapshot.capture(state)
@@ -487,12 +646,36 @@ function match_snapshot.capture(state)
     }
 end
 
+-- Internal ownership-transfer copy for a MatchState previously produced by a
+-- validated snapshot or by sim.match. Arbitrary/external states must use
+-- capture() so schema drift and malformed values still fail loudly.
+---@param state MatchState
+---@return MatchSnapshot
+function match_snapshot.capture_owned(state)
+    assert(type(state) == "table", "owned match state is required")
+    return {
+        version = match_snapshot.VERSION,
+        state = copy_owned_state(state, false),
+    }
+end
+
 ---@param snapshot MatchSnapshot
 ---@return MatchState
 function match_snapshot.restore(snapshot)
     assert_fields(snapshot, SNAPSHOT_FIELD_SET, "snapshot")
     assert(snapshot.version == match_snapshot.VERSION, "unsupported match snapshot version")
     return copy_state(snapshot.state, "snapshot.state", true)
+end
+
+-- Internal restore for a canonical snapshot already owned by rollback. Public
+-- and external snapshots must use restore() for full validation.
+---@param snapshot MatchSnapshot
+---@return MatchState
+function match_snapshot.restore_owned(snapshot)
+    assert(type(snapshot) == "table", "owned match snapshot is required")
+    assert(snapshot.version == match_snapshot.VERSION, "unsupported owned match snapshot version")
+    assert(type(snapshot.state) == "table", "owned match snapshot state is required")
+    return copy_owned_state(snapshot.state, true)
 end
 
 ---@param number number
@@ -509,109 +692,278 @@ function match_snapshot.number_bytes(number)
     return sign .. ":" .. tostring(exponent) .. ":" .. tostring(high) .. ":" .. tostring(low)
 end
 
----@param output string[]
+---@param value integer
+---@return integer
+local function unsigned_decimal_bytes(value)
+    if value < 10 then
+        return 1
+    elseif value < 100 then
+        return 2
+    elseif value < 1000 then
+        return 3
+    elseif value < 10000 then
+        return 4
+    elseif value < 100000 then
+        return 5
+    elseif value < 1000000 then
+        return 6
+    elseif value < 10000000 then
+        return 7
+    elseif value < 100000000 then
+        return 8
+    elseif value < 1000000000 then
+        return 9
+    elseif value < 10000000000 then
+        return 10
+    elseif value < 100000000000 then
+        return 11
+    elseif value < 1000000000000 then
+        return 12
+    elseif value < 10000000000000 then
+        return 13
+    elseif value < 100000000000000 then
+        return 14
+    elseif value < 1000000000000000 then
+        return 15
+    end
+    return 16
+end
+
+---@param value integer
+---@return integer
+local function integer_decimal_bytes(value)
+    if value < 0 then
+        return unsigned_decimal_bytes(-value) + 1
+    end
+    return unsigned_decimal_bytes(value)
+end
+
+---@param number number
+---@return integer
+local function number_payload_bytes(number)
+    assert(is_finite_number(number), "canonical numbers must be finite")
+    if number == 0 then
+        return 1
+    end
+    local mantissa, exponent = math.frexp(math.abs(number))
+    ---@cast exponent integer
+    local high = math.floor(mantissa * 67108864)
+    local low = math.floor((mantissa * 67108864 - high) * 134217728 + 0.5)
+    return 4
+        + integer_decimal_bytes(exponent)
+        + unsigned_decimal_bytes(high)
+        + unsigned_decimal_bytes(low)
+end
+
+---@class MatchSnapshotEncoder
+---@field parts string[]?
+---@field bytes integer
+
+---@type table<string, string>
+local NAME_WIRES = {}
+
+---@param encoder MatchSnapshotEncoder
+---@param value string
+local function append_literal(encoder, value)
+    encoder.bytes = encoder.bytes + #value
+    local parts = encoder.parts
+    if parts then
+        parts[#parts + 1] = value
+    end
+end
+
+---@param encoder MatchSnapshotEncoder
 ---@param value any
-local function append_scalar(output, value)
+local function append_scalar(encoder, value)
     local kind = type(value)
     if value == nil then
-        output[#output + 1] = "z;"
+        append_literal(encoder, "z;")
     elseif kind == "boolean" then
-        output[#output + 1] = value and "b1;" or "b0;"
+        append_literal(encoder, value and "b1;" or "b0;")
     elseif kind == "number" then
-        output[#output + 1] = "n" .. match_snapshot.number_bytes(value) .. ";"
+        local parts = encoder.parts
+        if parts then
+            local payload = match_snapshot.number_bytes(value)
+            encoder.bytes = encoder.bytes + #payload + 2
+            parts[#parts + 1] = "n" .. payload .. ";"
+        else
+            encoder.bytes = encoder.bytes + number_payload_bytes(value) + 2
+        end
     elseif kind == "string" then
-        output[#output + 1] = "s" .. tostring(#value) .. ":" .. value .. ";"
+        local parts = encoder.parts
+        if parts then
+            local length = tostring(#value)
+            encoder.bytes = encoder.bytes + #length + #value + 3
+            parts[#parts + 1] = "s" .. length .. ":" .. value .. ";"
+        else
+            encoder.bytes = encoder.bytes + unsigned_decimal_bytes(#value) + #value + 3
+        end
     else
         assert(false, "unsupported canonical scalar")
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param name string
-local function append_name(output, name)
-    output[#output + 1] = "k" .. tostring(#name) .. ":" .. name .. ";"
+local function append_name(encoder, name)
+    local wire = NAME_WIRES[name]
+    if wire == nil then
+        wire = "k" .. tostring(#name) .. ":" .. name .. ";"
+        NAME_WIRES[name] = wire
+    end
+    append_literal(encoder, wire)
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param value Vec2
-local function append_vec(output, value)
-    append_scalar(output, value.x)
-    append_scalar(output, value.y)
+local function append_vec(encoder, value)
+    append_scalar(encoder, value.x)
+    append_scalar(encoder, value.y)
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param value MarkingConfig
-local function append_marking(output, value)
+local function append_marking(encoder, value)
     for _, field in ipairs(MARKING_FIELDS) do
-        append_name(output, field)
-        append_scalar(output, value[field])
+        append_name(encoder, field)
+        append_scalar(encoder, value[field])
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param value InputOwnership?
-local function append_ownership(output, value)
+local function append_ownership(encoder, value)
     if not value then
-        append_scalar(output, nil)
+        append_scalar(encoder, nil)
         return
     end
-    append_scalar(output, value.version)
+    append_scalar(encoder, value.version)
     for _, team in ipairs({ "home", "away" }) do
-        append_name(output, team)
+        append_name(encoder, team)
         for index = 1, input_frame.FIXTURE_TEAM_SIZE do
-            append_scalar(output, value.rosters[team][index])
+            append_scalar(encoder, value.rosters[team][index])
         end
     end
     for index = 1, input_frame.SLOT_COUNT do
         for _, field in ipairs(ASSIGNMENT_FIELDS) do
-            append_name(output, field)
-            append_scalar(output, value.slots[index][field])
+            append_name(encoder, field)
+            append_scalar(encoder, value.slots[index][field])
         end
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param player MatchPlayer
-local function append_player(output, player)
+local function append_player(encoder, player)
     for _, field in ipairs(match_snapshot.PLAYER_FIELDS) do
-        append_name(output, field)
+        append_name(encoder, field)
         local value = player[field]
         if VECTOR_FIELDS[field] then
-            append_vec(output, value)
+            append_vec(encoder, value)
         elseif OPTIONAL_VECTOR_FIELDS[field] then
             if value then
-                output[#output + 1] = "v;"
-                append_vec(output, value)
+                append_literal(encoder, "v;")
+                append_vec(encoder, value)
             else
-                append_scalar(output, nil)
+                append_scalar(encoder, nil)
             end
         elseif field == "windup_shot" then
             if value then
-                output[#output + 1] = "w;"
+                append_literal(encoder, "w;")
                 for _, windup_field in ipairs(WINDUP_FIELDS) do
-                    append_name(output, windup_field)
+                    append_name(encoder, windup_field)
                     if windup_field == "dir" then
-                        append_vec(output, value.dir)
+                        append_vec(encoder, value.dir)
                     else
-                        append_scalar(output, value[windup_field])
+                        append_scalar(encoder, value[windup_field])
                     end
                 end
             else
-                append_scalar(output, nil)
+                append_scalar(encoder, nil)
             end
         else
-            append_scalar(output, value)
+            append_scalar(encoder, value)
         end
     end
 end
 
----@param output string[]
+---@param encoder MatchSnapshotEncoder
 ---@param values table<integer, integer>
 ---@param count integer
-local function append_sparse_indices(output, values, count)
+local function append_sparse_indices(encoder, values, count)
     for index = 1, count do
-        append_scalar(output, values[index])
+        append_scalar(encoder, values[index])
     end
+end
+
+---@param encoder MatchSnapshotEncoder
+---@param version integer
+---@param state MatchState
+local function append_state(encoder, version, state)
+    append_literal(encoder, "GCMS;")
+    append_scalar(encoder, version)
+    for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
+        append_name(encoder, field)
+        local value = state[field]
+        if field == "field" then
+            append_scalar(encoder, value.w)
+            append_scalar(encoder, value.h)
+        elseif field == "goal_home" or field == "goal_away" then
+            for _, rect_field in ipairs({ "x", "y", "w", "h" }) do
+                append_scalar(encoder, value[rect_field])
+            end
+        elseif field == "players" then
+            append_scalar(encoder, #value)
+            for index = 1, #value do
+                append_player(encoder, value[index])
+            end
+        elseif field == "ball" or field == "ball_vel" then
+            append_vec(encoder, value)
+        elseif field == "score" or field == "press" then
+            append_scalar(encoder, value.home)
+            append_scalar(encoder, value.away)
+        elseif field == "marking" then
+            append_marking(encoder, value.home)
+            append_marking(encoder, value.away)
+        elseif field == "marks" then
+            append_sparse_indices(encoder, value.home, #state.players)
+            append_sparse_indices(encoder, value.away, #state.players)
+        elseif field == "events" then
+            append_scalar(encoder, #value)
+            for index = 1, #value do
+                for _, event_field in ipairs(EVENT_FIELDS) do
+                    append_name(encoder, event_field)
+                    append_scalar(encoder, value[index][event_field])
+                end
+            end
+        elseif field == "input_ownership" then
+            append_ownership(encoder, value)
+        elseif field == "slot_players" then
+            append_sparse_indices(encoder, value, input_frame.SLOT_COUNT)
+        elseif field == "slot_for_player" then
+            append_sparse_indices(encoder, value, #state.players)
+        else
+            append_scalar(encoder, value)
+        end
+    end
+end
+
+---@param version integer
+---@param state MatchState
+---@return string
+local function encode_state(version, state)
+    local encoder = { parts = {}, bytes = 0 }
+    append_state(encoder, version, state)
+    return table.concat(assert(encoder.parts))
+end
+
+---@param version integer
+---@param state MatchState
+---@return integer
+local function encoded_state_size(version, state)
+    local encoder = { parts = nil, bytes = 0 }
+    append_state(encoder, version, state)
+    return encoder.bytes
 end
 
 ---@param snapshot MatchSnapshot
@@ -620,59 +972,43 @@ function match_snapshot.encode(snapshot)
     -- Restore performs the full explicit allowlist/type validation and gives
     -- serialization a normalized independent source.
     local state = match_snapshot.restore(snapshot)
-    local output = { "GCMS;" }
-    append_scalar(output, snapshot.version)
-    for _, field in ipairs(match_snapshot.MATCH_FIELDS) do
-        append_name(output, field)
-        local value = state[field]
-        if field == "field" then
-            append_scalar(output, value.w)
-            append_scalar(output, value.h)
-        elseif field == "goal_home" or field == "goal_away" then
-            for _, rect_field in ipairs({ "x", "y", "w", "h" }) do
-                append_scalar(output, value[rect_field])
-            end
-        elseif field == "players" then
-            append_scalar(output, #value)
-            for index = 1, #value do
-                append_player(output, value[index])
-            end
-        elseif field == "ball" or field == "ball_vel" then
-            append_vec(output, value)
-        elseif field == "score" or field == "press" then
-            append_scalar(output, value.home)
-            append_scalar(output, value.away)
-        elseif field == "marking" then
-            append_marking(output, value.home)
-            append_marking(output, value.away)
-        elseif field == "marks" then
-            append_sparse_indices(output, value.home, #state.players)
-            append_sparse_indices(output, value.away, #state.players)
-        elseif field == "events" then
-            append_scalar(output, #value)
-            for index = 1, #value do
-                for _, event_field in ipairs(EVENT_FIELDS) do
-                    append_name(output, event_field)
-                    append_scalar(output, value[index][event_field])
-                end
-            end
-        elseif field == "input_ownership" then
-            append_ownership(output, value)
-        elseif field == "slot_players" then
-            append_sparse_indices(output, value, input_frame.SLOT_COUNT)
-        elseif field == "slot_for_player" then
-            append_sparse_indices(output, value, #state.players)
-        else
-            append_scalar(output, value)
-        end
-    end
-    return table.concat(output)
+    return encode_state(snapshot.version, state)
+end
+
+-- Encode a snapshot just returned by capture(), or an equally canonical
+-- owned copy, without repeating its full restore/validation pass.
+---@param snapshot MatchSnapshot
+---@return string
+function match_snapshot.encode_canonical(snapshot)
+    assert(type(snapshot) == "table", "canonical match snapshot is required")
+    assert(snapshot.version == match_snapshot.VERSION, "unsupported canonical snapshot version")
+    assert(type(snapshot.state) == "table", "canonical match snapshot state is required")
+    return encode_state(snapshot.version, snapshot.state)
+end
+
+-- Count the exact canonical wire bytes for an owned snapshot without
+-- materializing its wire string.
+---@param snapshot MatchSnapshot
+---@return integer
+function match_snapshot.encoded_size_canonical(snapshot)
+    assert(type(snapshot) == "table", "canonical match snapshot is required")
+    assert(snapshot.version == match_snapshot.VERSION, "unsupported canonical snapshot version")
+    assert(type(snapshot.state) == "table", "canonical match snapshot state is required")
+    return encoded_state_size(snapshot.version, snapshot.state)
 end
 
 ---@param snapshot MatchSnapshot
 ---@return string
 function match_snapshot.hash(snapshot)
     return fnv1a64.hash(match_snapshot.encode(snapshot))
+end
+
+-- Hash a snapshot already returned by capture(), or an equally canonical
+-- owned copy, without repeating its restore/validation pass.
+---@param snapshot MatchSnapshot
+---@return string
+function match_snapshot.hash_canonical(snapshot)
+    return fnv1a64.hash(match_snapshot.encode_canonical(snapshot))
 end
 
 ---@param left any
@@ -710,12 +1046,10 @@ local function compare_vec(path, left, right)
     return nil
 end
 
----@param left MatchSnapshot
----@param right MatchSnapshot
+---@param a MatchSnapshot
+---@param b MatchSnapshot
 ---@return MatchSnapshotDifference?
-function match_snapshot.first_difference(left, right)
-    local a = match_snapshot.capture(match_snapshot.restore(left))
-    local b = match_snapshot.capture(match_snapshot.restore(right))
+local function first_difference_canonical(a, b)
     if a.version ~= b.version then
         return difference("version", a.version, b.version)
     end
@@ -761,12 +1095,17 @@ function match_snapshot.first_difference(left, right)
                         if (ac == nil) ~= (bc == nil) then
                             return difference(child_path, ac, bc)
                         elseif ac then
-                            local found = compare_vec(child_path .. ".dir", ac.dir, bc.dir)
-                            if found then
-                                return found
-                            end
-                            for _, shot_field in ipairs({ "speed", "vz", "spin" }) do
-                                if not same_scalar(ac[shot_field], bc[shot_field]) then
+                            for _, shot_field in ipairs(WINDUP_FIELDS) do
+                                if shot_field == "dir" then
+                                    local found = compare_vec(
+                                        child_path .. "." .. shot_field,
+                                        ac[shot_field],
+                                        bc[shot_field]
+                                    )
+                                    if found then
+                                        return found
+                                    end
+                                elseif not same_scalar(ac[shot_field], bc[shot_field]) then
                                     return difference(
                                         child_path .. "." .. shot_field,
                                         ac[shot_field],
@@ -872,6 +1211,28 @@ function match_snapshot.first_difference(left, right)
         end
     end
     return nil
+end
+
+---@param left MatchSnapshot
+---@param right MatchSnapshot
+---@return MatchSnapshotDifference?
+function match_snapshot.first_difference(left, right)
+    local a = match_snapshot.capture(match_snapshot.restore(left))
+    local b = match_snapshot.capture(match_snapshot.restore(right))
+    return first_difference_canonical(a, b)
+end
+
+-- Compare snapshots already returned by capture(), or equally canonical owned
+-- copies, without repeating their full restore/capture validation pass.
+---@param left MatchSnapshot
+---@param right MatchSnapshot
+---@return MatchSnapshotDifference?
+function match_snapshot.first_difference_canonical(left, right)
+    assert(type(left) == "table", "left canonical match snapshot is required")
+    assert(type(right) == "table", "right canonical match snapshot is required")
+    assert(type(left.state) == "table", "left canonical match snapshot state is required")
+    assert(type(right.state) == "table", "right canonical match snapshot state is required")
+    return first_difference_canonical(left, right)
 end
 
 return match_snapshot

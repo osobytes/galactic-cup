@@ -14,6 +14,84 @@ concurrency:
     cancel-in-progress: true
 
 jobs:
+    rollback_scope:
+        name: OMP-2 rollback impact filter
+        runs-on: ubuntu-24.04
+        outputs:
+            run: ${{ steps.scope.outputs.run }}
+
+        steps:
+            - name: Check out source history
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  fetch-depth: 0
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+            - name: Detect rollback-impacting changes
+              id: scope
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  EVENT_BEFORE: ${{ github.event.before }}
+                  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              run: |
+                  rollback_paths=(
+                      .github/workflows/ci.yml
+                      conf.lua
+                      main.lua
+                      core
+                      data
+                      game
+                      sim
+                      scripts/browser_determinism.py
+                      scripts/browser_matrix.py
+                      scripts/browser_matrix-requirements.txt
+                      scripts/browser_storage_host.js
+                      scripts/check_rollback.sh
+                      scripts/rollback_validation.py
+                      scripts/web_build.py
+                      scripts/web_build.sh
+                      scripts/web_serve.py
+                      scripts/webrtc_proof_host.js
+                      scripts/webrtc_proof_runner.js
+                      scripts/webrtc_proof_suite.js
+                  )
+
+                  run=true
+                  range=""
+                  if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+                      if [ "$EVENT_NAME" = "pull_request" ]; then
+                          base="$PR_BASE_SHA"
+                          range="$base...HEAD"
+                      else
+                          base="$EVENT_BEFORE"
+                          range="$base..HEAD"
+                      fi
+
+                      if [ -n "$base" ] && ! [[ "$base" =~ ^0+$ ]] && \
+                          git cat-file -e "$base^{commit}" 2>/dev/null; then
+                          if git diff --quiet "$range" -- "${rollback_paths[@]}"; then
+                              run=false
+                          else
+                              status=$?
+                              if [ "$status" -gt 1 ]; then
+                                  echo "Change comparison failed; running rollback gates."
+                                  range=""
+                              fi
+                          fi
+                      else
+                          echo "Comparison commit unavailable; running rollback gates."
+                          range=""
+                      fi
+                  fi
+
+                  echo "run=$run" >> "$GITHUB_OUTPUT"
+                  echo "rollback_scope=$run range=${range:-manual}"
+                  if [ "$run" = "true" ] && [ -n "$range" ]; then
+                      if ! git diff --name-only "$range" -- "${rollback_paths[@]}"; then
+                          echo "Changed-path reporting failed after a fail-open decision."
+                      fi
+                  fi
+
     quality:
         name: Lua quality gate
         runs-on: ubuntu-24.04
@@ -21,6 +99,8 @@ jobs:
         steps:
             - name: Check out source
               uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
             - name: Install pinned toolchain
               env:
@@ -79,6 +159,9 @@ jobs:
                   ./scripts/check_determinism.sh --self-test
                   ./scripts/check_determinism.sh
 
+            - name: Check OMP-2 rollback orchestration
+              run: ./scripts/check_rollback.sh --self-test
+
     browser_artifact:
         name: Browser artifact smoke
         runs-on: ubuntu-24.04
@@ -86,6 +169,8 @@ jobs:
         steps:
             - name: Check out source
               uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
             - name: Build and smoke-test browser artifact
               run: ./scripts/web_smoke.sh
@@ -98,6 +183,8 @@ jobs:
         steps:
             - name: Check out source
               uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
             - name: Install pinned browser evidence dependencies
               run: |
@@ -125,3 +212,195 @@ jobs:
                           --browser firefox \
                           --browser chrome \
                           --output "$RUNNER_TEMP/omp1-browser-determinism.json"
+
+    rollback_native:
+        name: OMP-2 rollback native
+        needs: rollback_scope
+        if: needs.rollback_scope.outputs.run == 'true'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 180
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+            - name: Install pinned LÖVE 11.5
+              env:
+                  LOVE_VERSION: 11.5
+                  LOVE_SHA256: 65a673406431eff7167a15a032bf7a2e4ba50108e091eb7b176465831f9b5e00
+              run: |
+                  tool_dir="$RUNNER_TEMP/galactic-cup-love"
+                  mkdir -p "$tool_dir/bin" "$tool_dir/love"
+                  curl --fail --location --retry 3 --silent --show-error \
+                      --output "$tool_dir/love.AppImage" \
+                      "https://github.com/love2d/love/releases/download/${LOVE_VERSION}/love-${LOVE_VERSION}-x86_64.AppImage"
+                  echo "${LOVE_SHA256}  $tool_dir/love.AppImage" | sha256sum --check --status
+                  chmod +x "$tool_dir/love.AppImage"
+                  (
+                      cd "$tool_dir/love"
+                      "$tool_dir/love.AppImage" --appimage-extract >/dev/null
+                  )
+                  ln -s "$tool_dir/love/squashfs-root/AppRun" "$tool_dir/bin/love"
+                  "$tool_dir/bin/love" --version
+                  printf '%s\n' "$tool_dir/bin" >> "$GITHUB_PATH"
+
+            - name: Run isolated native matrix, late-window, and persistent soak
+              run: |
+                  ./scripts/check_rollback.sh \
+                      --native \
+                      --output "$RUNNER_TEMP/omp2-rollback-native.json" \
+                      --timeout-seconds 2700
+
+            - name: Upload native rollback evidence
+              if: always()
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+              with:
+                  name: omp2-rollback-native
+                  path: |
+                      ${{ runner.temp }}/omp2-rollback-native.json
+                      ${{ runner.temp }}/omp2-rollback-native-raw
+                  if-no-files-found: error
+                  retention-days: 14
+
+    rollback_browser_matrix:
+        name: OMP-2 rollback browser matrix (${{ matrix.browser }})
+        needs: rollback_scope
+        if: needs.rollback_scope.outputs.run == 'true'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 180
+        strategy:
+            fail-fast: false
+            matrix:
+                browser: [chrome, firefox]
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+            - name: Install pinned browser evidence dependencies
+              run: |
+                  python3 -m venv "$RUNNER_TEMP/browser-evidence"
+                  "$RUNNER_TEMP/browser-evidence/bin/pip" install \
+                      --require-hashes \
+                      --requirement scripts/browser_matrix-requirements.txt
+                  printf '%s\n' "$RUNNER_TEMP/browser-evidence/bin" >> "$GITHUB_PATH"
+
+            - name: Build the pinned love.js artifact
+              run: ./scripts/web_build.sh "$RUNNER_TEMP/omp2-web"
+
+            - name: Run complete and stress browser validation
+              env:
+                  GALLIUM_DRIVER: llvmpipe
+                  LIBGL_ALWAYS_SOFTWARE: "1"
+                  SE_CACHE_PATH: ${{ runner.temp }}/selenium
+              run: |
+                  xvfb-run -a \
+                      -s "-screen 0 1280x720x24 -nolisten tcp +extension GLX +render -noreset" \
+                      ./scripts/check_rollback.sh \
+                          --browser \
+                          --runtime-browser "${{ matrix.browser }}" \
+                          --campaign matrix \
+                          --artifact "$RUNNER_TEMP/omp2-web" \
+                          --output "$RUNNER_TEMP/omp2-rollback-${{ matrix.browser }}-matrix.json" \
+                          --timeout-seconds 1800
+
+            - name: Upload browser rollback evidence
+              if: always()
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+              with:
+                  name: omp2-rollback-${{ matrix.browser }}-matrix
+                  path: |
+                      ${{ runner.temp }}/omp2-rollback-${{ matrix.browser }}-matrix.json
+                      ${{ runner.temp }}/omp2-rollback-${{ matrix.browser }}-matrix-raw
+                  if-no-files-found: error
+                  retention-days: 14
+
+    rollback_browser_soak:
+        name: OMP-2 rollback browser soak (${{ matrix.browser }})
+        needs: rollback_scope
+        if: needs.rollback_scope.outputs.run == 'true'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 180
+        strategy:
+            fail-fast: false
+            matrix:
+                browser: [chrome, firefox]
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+              with:
+                  ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+            - name: Install pinned browser evidence dependencies
+              run: |
+                  python3 -m venv "$RUNNER_TEMP/browser-evidence"
+                  "$RUNNER_TEMP/browser-evidence/bin/pip" install \
+                      --require-hashes \
+                      --requirement scripts/browser_matrix-requirements.txt
+                  printf '%s\n' "$RUNNER_TEMP/browser-evidence/bin" >> "$GITHUB_PATH"
+
+            - name: Build the pinned love.js artifact
+              run: ./scripts/web_build.sh "$RUNNER_TEMP/omp2-web"
+
+            - name: Run persistent browser memory soak
+              env:
+                  GALLIUM_DRIVER: llvmpipe
+                  LIBGL_ALWAYS_SOFTWARE: "1"
+                  SE_CACHE_PATH: ${{ runner.temp }}/selenium
+              run: |
+                  xvfb-run -a \
+                      -s "-screen 0 1280x720x24 -nolisten tcp +extension GLX +render -noreset" \
+                      ./scripts/check_rollback.sh \
+                          --browser \
+                          --runtime-browser "${{ matrix.browser }}" \
+                          --campaign soak \
+                          --artifact "$RUNNER_TEMP/omp2-web" \
+                          --output "$RUNNER_TEMP/omp2-rollback-${{ matrix.browser }}-soak.json" \
+                          --timeout-seconds 1800
+
+            - name: Upload browser rollback evidence
+              if: always()
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+              with:
+                  name: omp2-rollback-${{ matrix.browser }}-soak
+                  path: |
+                      ${{ runner.temp }}/omp2-rollback-${{ matrix.browser }}-soak.json
+                      ${{ runner.temp }}/omp2-rollback-${{ matrix.browser }}-soak-raw
+                  if-no-files-found: error
+                  retention-days: 14
+
+    rollback_gate:
+        name: OMP-2 rollback gate
+        needs: [rollback_scope, rollback_native, rollback_browser_matrix, rollback_browser_soak]
+        if: always()
+        runs-on: ubuntu-24.04
+
+        steps:
+            - name: Require scoped rollback evidence
+              env:
+                  BROWSER_MATRIX_RESULT: ${{ needs.rollback_browser_matrix.result }}
+                  BROWSER_SOAK_RESULT: ${{ needs.rollback_browser_soak.result }}
+                  NATIVE_RESULT: ${{ needs.rollback_native.result }}
+                  RUN_ROLLBACK: ${{ needs.rollback_scope.outputs.run }}
+                  SCOPE_RESULT: ${{ needs.rollback_scope.result }}
+              run: |
+                  if [ "$SCOPE_RESULT" != "success" ]; then
+                      echo "Rollback impact detection did not succeed."
+                      exit 1
+                  fi
+                  if [ "$RUN_ROLLBACK" = "false" ]; then
+                      echo "No rollback-impacting changes; long evidence jobs were skipped."
+                      exit 0
+                  fi
+                  if [ "$NATIVE_RESULT" != "success" ] || \
+                      [ "$BROWSER_MATRIX_RESULT" != "success" ] || \
+                      [ "$BROWSER_SOAK_RESULT" != "success" ]; then
+                      echo "Rollback evidence failed: native=$NATIVE_RESULT matrix=$BROWSER_MATRIX_RESULT soak=$BROWSER_SOAK_RESULT"
+                      exit 1
+                  fi
+                  echo "Native plus Chrome/Firefox matrix and soak evidence passed."

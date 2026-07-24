@@ -187,8 +187,9 @@ end
 function determinism_evidence.fixture_tape()
     local identity = determinism_evidence.migration_identity(fixture.identity)
     local frames = fixture_frames()
+    local boundary_hashes = split_lines(fixture.boundary_hashes)
     local initial = match_snapshot.capture(new_state(identity))
-    return input_tape.new(identity, initial, frames)
+    return input_tape.from_frozen_recording(identity, initial, frames, boundary_hashes)
 end
 
 ---@param state MatchState
