@@ -45,7 +45,7 @@ offline adapter are documented in [`slot_match.md`](slot_match.md).
 
 ## One frame per simulation tick
 
-`InputFrame` version 1 contains a non-negative `tick` and one `InputSample`
+`InputFrame` version 2 contains a non-negative `tick` and one `InputSample`
 per canonical slot. The supported tick range is `0` through `2147483647`.
 The module constructs a neutral frame with:
 
@@ -98,6 +98,7 @@ from simulation-side history.
 | 16 | `lob` | Effective loft modifier intent for this tick. |
 | 32 | `aerial_strike` | First-time aerial intent currently down. |
 | 64 | `aerial_acrobatic` | Acrobatic aerial modifier currently down. |
+| 128 | `equipment` | Equipment action currently down. |
 
 | Mask | Edge action | Meaning |
 | --- | --- | --- |
@@ -106,12 +107,19 @@ from simulation-side history.
 | 4 | `switch` | Legacy offline switch press occurred during this tick. |
 | 8 | `dash` | Tackle/dash press occurred during this tick. |
 | 16 | `dodge` | Juke/dodge press occurred during this tick. |
+| 32 | `equipment_pressed` | Equipment changed to down during this tick. |
+| 64 | `equipment_released` | Equipment changed to up during this tick. |
 
 The edge names intentionally match existing match verbs. The `switch` edge
 remains encodable for legacy offline recordings, while slot-mode matches ignore
-it because their ownership is fixed. No action has implicit edge semantics:
-every recorder must set the applicable `edges` bit explicitly and clear it on
-the next frame.
+it because their ownership is fixed. Equipment has one canonical exception to
+independent mask validity: a press-only sample must be held, any release sample
+must not be held, and both edges mean press then release during the tick. Thus
+the valid equipment states are no edges with either held value, press plus
+held, release without held, or both edges without held. `pressed + released +
+held` and the other contradictory combinations are malformed. No edge is
+derived from adjacent frames: every recorder must set the applicable `edges`
+bit explicitly and clear it on the next frame.
 
 ## Canonical bounded wire form
 
@@ -123,11 +131,18 @@ version|tick|move_x,move_y,held,edges|... eight slot samples total
 
 The field count, slot count, slot order, number spelling, axis/mask bounds,
 and version are all strict. Integers have no leading zeroes (except `0`), and
-`-0` is invalid. Version 1 can never exceed 148 bytes, including the largest
+`-0` is invalid. Version 2 can never exceed 156 bytes, including the largest
 supported tick and all eight maximal samples. `decode` rejects a longer wire,
 noncanonical number spelling, unsupported versions, missing/extra fields, and
 out-of-range values. Encoding the same valid frame always produces the same
 bytes; decoding then encoding a valid canonical wire reproduces those bytes.
+
+Version 1 frames and ownership records are rejected with the typed
+`unsupported_version` failure. There is no general runtime coercion: callers
+must either produce version 2 or deliberately migrate a known artifact. The
+checked-in OMP-1 determinism fixture has one narrow migration that changes only
+its version header and identity while preserving every axis and legacy input
+mask.
 
 This is an input payload candidate only. If it is later placed in the OMP-0
 transport envelope, its `InputFrame.tick` must agree with that envelope's

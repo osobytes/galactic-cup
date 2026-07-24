@@ -19,7 +19,7 @@ t.describe("OMP-1 determinism evidence", function()
         t.is_true(not before({ idx = 2, d = 10 }, { idx = 9, d = 9 }))
     end)
 
-    t.it("validates a migration identity while changing only the snapshot version", function()
+    t.it("validates a current-input migration while changing only snapshot version", function()
         local prior = input_tape.copy_identity(fixture.identity)
         prior.snapshot_version = match_snapshot.VERSION - 1
         local migrated = determinism_evidence.migration_identity(prior)
@@ -42,6 +42,35 @@ t.describe("OMP-1 determinism evidence", function()
         rawset(malformed, "unexpected", nil)
         rawset(malformed.ownership.rosters.home, 1, false)
         t.is_true(not pcall(determinism_evidence.migration_identity, malformed))
+    end)
+
+    t.it("explicitly migrates only the frozen v1 fixture identity to input v2", function()
+        local legacy = input_tape.copy_identity(fixture.identity)
+        legacy.fixture = "omp1-nebula-orion-eight-streams-v1"
+        legacy.input_version = 1
+        legacy.ownership.version = 1
+
+        local migrated = determinism_evidence.migration_identity(legacy)
+        t.eq(migrated.fixture, "omp1-nebula-orion-eight-streams-v2")
+        t.eq(migrated.input_version, 2)
+        t.eq(migrated.ownership.version, 2)
+        t.eq(migrated.build, legacy.build)
+        t.eq(migrated.source, legacy.source)
+        t.eq(migrated.content, legacy.content)
+        t.eq(migrated.config, legacy.config)
+        t.eq(migrated.tuning, legacy.tuning)
+        t.eq(migrated.seed, legacy.seed)
+        t.eq(migrated.tick_rate, legacy.tick_rate)
+        for _, team in ipairs({ "home", "away" }) do
+            for index, player_id in ipairs(legacy.ownership.rosters[team]) do
+                t.eq(migrated.ownership.rosters[team][index], player_id)
+            end
+        end
+        for index, assignment in ipairs(legacy.ownership.slots) do
+            t.eq(migrated.ownership.slots[index].slot, assignment.slot)
+            t.eq(migrated.ownership.slots[index].team, assignment.team)
+            t.eq(migrated.ownership.slots[index].player_id, assignment.player_id)
+        end
     end)
 
     t.it("pins the full fixed-input match on the explicit evidence command", function()

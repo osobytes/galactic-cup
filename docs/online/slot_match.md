@@ -54,6 +54,12 @@ row uniformly and holds no source policy or bot RNG state. The effective frame
 is therefore the record/replay artifact, not an implementation detail hidden in
 the match.
 
+The conversion carries `equipment_held`, `equipment_pressed`, and
+`equipment_released` for every human, recorded, neutral, and bot row. Neutral
+and current deterministic bot producers emit all three as false; choosing when
+AI should use equipment remains downstream behavior work rather than an input
+schema decision.
+
 ## Offline showcase adapter
 
 The showcase product screen remains on its existing fixed-clock, legacy-input
@@ -68,7 +74,9 @@ later producer converts one of its tick `MatchInput`s with
 `slot_input.to_sample`, the canonical frame's `lob` held bit preserves the
 adapter's effective modifier intent: it may remain set on the shoot/pass release
 tick when the render-side latch pairs a just-released action with its preceding
-loft modifier. The simulation consumes that recorded tick value directly.
+loft modifier. The same conversion records equipment held, press, and release
+without deriving transitions from adjacent frames. The simulation consumes
+those recorded tick values directly.
 Offline switching, pass-follow control, cross/aerial assistance, and temporary
 human keeper distribution remain enabled only outside slot mode; those rules
 select which player's own action state the single legacy input drives.

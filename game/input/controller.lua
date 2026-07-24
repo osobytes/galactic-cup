@@ -4,27 +4,38 @@ local viewport = require("game.ui.viewport")
 ---@class RawGamepadEvent
 ---@field kind "gamepad"
 ---@field button string
+---@field pressed boolean?
 
 ---@class InputControllerModule
 local controller = {}
 
 ---@param event InputEvent|RawGamepadEvent
 ---@param transform ViewportTransform
+---@param in_match boolean?
 ---@return InputEvent?
-function controller.normalize(event, transform)
+function controller.normalize(event, transform, in_match)
+    local normalized = nil
     if event.kind == "action" then
-        return event
+        normalized = event
     elseif event.kind == "key" then
-        return actions.from_key(event.key)
+        normalized = actions.from_key(event.key, event.pressed)
     elseif event.kind == "gamepad" then
-        return actions.from_gamepad(event.button)
+        normalized = actions.from_gamepad(event.button, event.pressed, in_match)
     elseif event.kind == "click" then
         local x, y = viewport.to_virtual(transform, event.x, event.y)
         if x and y then
             return { kind = "click", x = x, y = y, button = event.button or 1 }
         end
     end
-    return nil
+    if
+        normalized
+        and normalized.kind == "action"
+        and normalized.pressed == false
+        and normalized.action ~= "equipment"
+    then
+        return nil
+    end
+    return normalized
 end
 
 return controller

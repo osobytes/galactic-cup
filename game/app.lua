@@ -244,7 +244,8 @@ end
 
 ---@param event InputEvent|RawGamepadEvent
 function App:event(event)
-    local normalized = controller.normalize(event, self.transform)
+    local route = self:current_route()
+    local normalized = controller.normalize(event, self.transform, route == "match")
     if not normalized then
         return
     end
@@ -259,7 +260,6 @@ function App:event(event)
         self:_set_settings(settings, true)
         return
     end
-    local route = self:current_route()
     if
         normalized.kind == "action"
         and route == "match"

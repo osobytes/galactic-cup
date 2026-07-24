@@ -16,6 +16,9 @@ local NO_INPUT = {
     lob = false,
     sprint = false,
     jockey = false,
+    equipment_held = false,
+    equipment_pressed = false,
+    equipment_released = false,
 }
 
 ---@return MatchState, integer, integer

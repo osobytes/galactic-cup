@@ -36,7 +36,10 @@ The current showcase path still has one locally controlled player, so
 `game.match_input_adapter` turns render-sampled controls into one legacy
 `MatchInput` per fixed tick. It retains release/action edges across zero-tick
 render updates, emits those edges only on the first tick of a catch-up batch,
-and keeps holds live on every tick.
+and keeps holds live on every tick. Equipment uses a held signal plus distinct
+press and release edges. The adapter folds render-rate button chatter into the
+six canonical transitions defined by the combat contract, including an ordered
+press-then-release pair for a complete tap between ticks.
 
 This is a compatibility bridge, not an ownership model. Issue #36 replaces it
 with the eight stable outfield streams in `InputFrame`; the fixed clock will

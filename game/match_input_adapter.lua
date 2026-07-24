@@ -21,10 +21,13 @@ local Vec2 = require("core.vec2")
 ---@field jockey boolean
 ---@field aerial_strike boolean
 ---@field aerial_acrobatic boolean
+---@field equipment_held boolean
 
 ---@class MatchInputAdapterState
 ---@field held MatchInputHeld
 ---@field pending MatchInputEdges
+---@field equipment_sampled_held boolean
+---@field equipment_transitioned boolean
 
 ---@class MatchInputAdapterModule
 local match_input_adapter = {}
@@ -52,6 +55,7 @@ local function neutral_held()
         jockey = false,
         aerial_strike = false,
         aerial_acrobatic = false,
+        equipment_held = false,
     }
 end
 
@@ -60,6 +64,8 @@ function match_input_adapter.new()
     return {
         held = neutral_held(),
         pending = no_edges(),
+        equipment_sampled_held = false,
+        equipment_transitioned = false,
     }
 end
 
@@ -68,6 +74,10 @@ end
 ---@param input MatchInput
 ---@return MatchInputAdapterState
 function match_input_adapter.sample(state, input)
+    local equipment_transitioned = state.equipment_transitioned
+        or input.equipment_pressed
+        or input.equipment_released
+        or state.held.equipment_held ~= input.equipment_held
     return {
         held = {
             move = input.move,
@@ -78,6 +88,7 @@ function match_input_adapter.sample(state, input)
             jockey = input.jockey,
             aerial_strike = input.aerial_strike == true,
             aerial_acrobatic = input.aerial_acrobatic == true,
+            equipment_held = input.equipment_held,
         },
         pending = {
             shoot = state.pending.shoot or input.shoot,
@@ -87,6 +98,8 @@ function match_input_adapter.sample(state, input)
             dodge = state.pending.dodge or input.dodge,
             lob = state.pending.lob or (input.lob and (input.shoot or input.pass)),
         },
+        equipment_sampled_held = state.equipment_sampled_held,
+        equipment_transitioned = equipment_transitioned,
     }
 end
 
@@ -98,9 +111,25 @@ end
 function match_input_adapter.next_tick(state)
     local held = state.held
     local pending = state.pending
+    local equipment_pressed = false
+    local equipment_released = false
+    if state.equipment_transitioned then
+        if state.equipment_sampled_held then
+            if held.equipment_held then
+                equipment_pressed = true
+            else
+                equipment_released = true
+            end
+        else
+            equipment_pressed = true
+            equipment_released = not held.equipment_held
+        end
+    end
     return {
         held = held,
         pending = no_edges(),
+        equipment_sampled_held = held.equipment_held,
+        equipment_transitioned = false,
     }, {
         move = held.move,
         shoot = pending.shoot,
@@ -115,6 +144,9 @@ function match_input_adapter.next_tick(state)
         jockey = held.jockey,
         aerial_strike = held.aerial_strike,
         aerial_acrobatic = held.aerial_acrobatic,
+        equipment_held = held.equipment_held,
+        equipment_pressed = equipment_pressed,
+        equipment_released = equipment_released,
     }
 end
 

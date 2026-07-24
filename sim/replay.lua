@@ -73,16 +73,27 @@ local function validate_context(tape, expected_identity)
     if type(tape) ~= "table" then
         return malformed("input tape must be a table")
     end
-    local tape_identity_ok, tape_identity = pcall(input_tape.copy_identity, tape.identity)
-    if not tape_identity_ok then
-        return malformed(tostring(tape_identity))
-    end
-    ---@cast tape_identity InputTapeIdentity
     local expected_ok, copied_expected = pcall(input_tape.copy_identity, expected_identity)
     if not expected_ok then
         return malformed(tostring(copied_expected))
     end
     ---@cast copied_expected InputTapeIdentity
+    if
+        type(tape.identity) == "table"
+        and type(tape.identity.input_version) == "number"
+        and tape.identity.input_version ~= copied_expected.input_version
+    then
+        return identity_failure(
+            "identity.input_version",
+            copied_expected.input_version,
+            tape.identity.input_version
+        )
+    end
+    local tape_identity_ok, tape_identity = pcall(input_tape.copy_identity, tape.identity)
+    if not tape_identity_ok then
+        return malformed(tostring(tape_identity))
+    end
+    ---@cast tape_identity InputTapeIdentity
     local difference = input_tape.identity_difference(copied_expected, tape_identity)
     if difference then
         return identity_failure(difference.path, difference.expected, difference.actual)

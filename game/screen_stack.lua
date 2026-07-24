@@ -7,7 +7,7 @@
 ---@field draw fun(self: Screen)?
 ---@field teardown fun(self: Screen)?
 
----@alias InputEvent ActionEvent | { kind: "key", key: string } | { kind: "click", x: number, y: number, button: number } | RawGamepadEvent
+---@alias InputEvent ActionEvent | { kind: "key", key: string, pressed: boolean? } | { kind: "click", x: number, y: number, button: number } | RawGamepadEvent
 
 ---@class ScreenStack
 ---@field screens Screen[]

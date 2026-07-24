@@ -551,7 +551,12 @@ end
 ---@param key string
 function love.keypressed(key)
     record_input("key_" .. key)
-    app:event({ kind = "key", key = key })
+    app:event({ kind = "key", key = key, pressed = true })
+end
+
+---@param key string
+function love.keyreleased(key)
+    app:event({ kind = "key", key = key, pressed = false })
 end
 
 ---@param x number
@@ -567,7 +572,14 @@ end
 function love.gamepadpressed(joystick, button)
     local _ = joystick
     record_input("gamepad_" .. button)
-    app:event({ kind = "gamepad", button = button })
+    app:event({ kind = "gamepad", button = button, pressed = true })
+end
+
+---@param joystick love.Joystick
+---@param button love.GamepadButton
+function love.gamepadreleased(joystick, button)
+    local _ = joystick
+    app:event({ kind = "gamepad", button = button, pressed = false })
 end
 
 ---@param width number

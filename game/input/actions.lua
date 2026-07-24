@@ -11,6 +11,7 @@
 ---|"sprint"
 ---|"lob"
 ---|"juke"
+---|"equipment"
 ---|"toggle_fullscreen"
 ---|"toggle_mute"
 
@@ -18,6 +19,7 @@
 ---@field kind "action"
 ---@field action ActionName
 ---@field pressed boolean?
+---@field source "keyboard"|"gamepad"?
 
 ---@class ActionsModule
 local actions = {}
@@ -42,6 +44,7 @@ local KEY_MAP = {
     rshift = "sprint",
     l = "lob",
     c = "juke",
+    j = "equipment",
     f11 = "toggle_fullscreen",
     m = "toggle_mute",
 }
@@ -62,23 +65,36 @@ local GAMEPAD_MAP = {
 }
 
 ---@param name ActionName
+---@param pressed boolean?
+---@param source "keyboard"|"gamepad"?
 ---@return ActionEvent
-function actions.event(name)
-    return { kind = "action", action = name, pressed = true }
+function actions.event(name, pressed, source)
+    return {
+        kind = "action",
+        action = name,
+        pressed = pressed == nil or pressed,
+        source = source,
+    }
 end
 
 ---@param key string
+---@param pressed boolean?
 ---@return ActionEvent?
-function actions.from_key(key)
+function actions.from_key(key, pressed)
     local action = KEY_MAP[key]
-    return action and actions.event(action) or nil
+    return action and actions.event(action, pressed, "keyboard") or nil
 end
 
 ---@param button string
+---@param pressed boolean?
+---@param in_match boolean?
 ---@return ActionEvent?
-function actions.from_gamepad(button)
+function actions.from_gamepad(button, pressed, in_match)
     local action = GAMEPAD_MAP[button]
-    return action and actions.event(action) or nil
+    if button == "b" and in_match then
+        action = "equipment"
+    end
+    return action and actions.event(action, pressed, "gamepad") or nil
 end
 
 return actions

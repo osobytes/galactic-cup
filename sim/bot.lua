@@ -251,6 +251,9 @@ function bot.input(b, s, dt)
                 jockey = false,
                 aerial_strike = false,
                 aerial_acrobatic = false,
+                equipment_held = false,
+                equipment_pressed = false,
+                equipment_released = false,
             }
         else
             b.decide_t = b.reaction -- shot away: give it a beat before reacting
@@ -268,6 +271,9 @@ function bot.input(b, s, dt)
                 jockey = false,
                 aerial_strike = false,
                 aerial_acrobatic = false,
+                equipment_held = false,
+                equipment_pressed = false,
+                equipment_released = false,
             }
         end
     end
@@ -294,6 +300,9 @@ function bot.input(b, s, dt)
                 jockey = false,
                 aerial_strike = false,
                 aerial_acrobatic = false,
+                equipment_held = false,
+                equipment_pressed = false,
+                equipment_released = false,
             }
         else
             b.decide_t = b.reaction
@@ -313,6 +322,9 @@ function bot.input(b, s, dt)
                 jockey = false,
                 aerial_strike = false,
                 aerial_acrobatic = false,
+                equipment_held = false,
+                equipment_pressed = false,
+                equipment_released = false,
             }
         end
     end
@@ -339,6 +351,9 @@ function bot.input(b, s, dt)
         jockey = b.jockey,
         aerial_strike = b.aerial_strike,
         aerial_acrobatic = b.aerial_acrobatic,
+        equipment_held = false,
+        equipment_pressed = false,
+        equipment_released = false,
     }
 end
 

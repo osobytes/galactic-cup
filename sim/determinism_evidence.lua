@@ -1,8 +1,9 @@
 -- OMP-1 full-match determinism recording, verification, and evidence report.
 --
 -- Verification decodes only the checked-in effective InputFrames. Refreshing
--- preserves those immutable wires and regenerates only state evidence; bot
--- policy is never allowed to rewrite the authoritative input contract.
+-- preserves their effective axes and action masks, with a narrow version-header
+-- migration when required, and regenerates state evidence. Bot policy is never
+-- allowed to rewrite the authoritative input contract.
 
 local fnv1a64 = require("core.fnv1a64")
 local fixture = require("data.omp1_determinism")
@@ -57,6 +58,9 @@ local tuning = require("sim.tuning")
 ---@class DeterminismEvidenceModule
 local determinism_evidence = {}
 
+local LEGACY_FIXTURE_ID = "omp1-nebula-orion-eight-streams-v1"
+local MIGRATED_FIXTURE_ID = "omp1-nebula-orion-eight-streams-v2"
+
 local REQUIRED_EVENT_KINDS = {
     tackle = "tackle",
     keeper = "catch",
@@ -66,12 +70,36 @@ local REQUIRED_EVENT_KINDS = {
 ---@param source InputTapeIdentity
 ---@return InputTapeIdentity
 function determinism_evidence.migration_identity(source)
-    local migrated = {}
-    for field, value in pairs(source) do
-        migrated[field] = value
+    assert(
+        source.input_version == 1 or source.input_version == input_frame.VERSION,
+        "unsupported fixture input version"
+    )
+    assert(type(source.ownership) == "table", "fixture identity ownership must be a table")
+    assert(
+        source.ownership.version == source.input_version,
+        "fixture ownership version disagrees with input version"
+    )
+    if source.input_version == 1 then
+        assert(source.fixture == LEGACY_FIXTURE_ID, "unsupported legacy fixture identity")
     end
-    migrated.snapshot_version = match_snapshot.VERSION
-    return input_tape.copy_identity(migrated)
+
+    local candidate = {}
+    for field, value in pairs(source) do
+        candidate[field] = value
+    end
+    local ownership = {}
+    for field, value in pairs(source.ownership) do
+        ownership[field] = value
+    end
+    ownership.version = input_frame.VERSION
+    candidate.input_version = input_frame.VERSION
+    candidate.snapshot_version = match_snapshot.VERSION
+    candidate.ownership = ownership
+    local migrated = input_tape.copy_identity(candidate)
+    if source.input_version == 1 then
+        migrated.fixture = MIGRATED_FIXTURE_ID
+    end
+    return migrated
 end
 
 ---@param identity InputTapeIdentity?
@@ -106,10 +134,16 @@ local function fixture_frames()
     assert(#wires == fixture.frame_count, "fixture frame count does not match its recording")
     local frames = {}
     for index, wire in ipairs(wires) do
-        local decoded, err = input_frame.decode(wire)
+        local canonical_wire = wire
+        if fixture.identity.input_version == 1 then
+            assert(wire:sub(1, 2) == "1|", "legacy fixture frame has an invalid version prefix")
+            canonical_wire = tostring(input_frame.VERSION) .. wire:sub(2)
+        end
+        local decoded, err = input_frame.decode(canonical_wire)
         assert(decoded, ("fixture frame %d is malformed: %s"):format(index - 1, tostring(err)))
         assert(decoded.tick == index - 1, "fixture frames are not contiguous from tick zero")
         frames[index] = decoded
+        wires[index] = canonical_wire
     end
     return frames, wires
 end
@@ -119,7 +153,7 @@ end
 -- state or the bots that originally produced the frozen frame wires.
 ---@return InputTape
 function determinism_evidence.fixture_tape()
-    local identity = input_tape.copy_identity(fixture.identity)
+    local identity = determinism_evidence.migration_identity(fixture.identity)
     local frames = fixture_frames()
     local initial = match_snapshot.capture(new_state(identity))
     return input_tape.new(identity, initial, frames)
@@ -203,10 +237,10 @@ end
 ---@return DeterminismCampaign
 function determinism_evidence.new_campaign(compare_fresh)
     assert(fixture.version == 1, "unsupported OMP-1 determinism fixture")
-    local identity = input_tape.copy_identity(fixture.identity)
+    local identity = determinism_evidence.migration_identity(fixture.identity)
     assert(identity.tick_rate == fixed_clock.TICK_RATE, "fixture tick rate drifted")
     assert(identity.tuning == tuning.serialize(), "fixture tuning identity drifted")
-    assert(identity.fixture == fixture.fixture_id, "fixture identity disagrees with fixture id")
+    assert(identity.fixture == MIGRATED_FIXTURE_ID, "fixture identity disagrees with fixture id")
     local frames, wires = fixture_frames()
     local expected_hashes = split_lines(fixture.boundary_hashes)
     assert(
@@ -382,12 +416,10 @@ end
 
 ---@return Omp1Recording
 function determinism_evidence.record()
-    local migrating = fixture.identity.snapshot_version ~= match_snapshot.VERSION
-    local identity = migrating and determinism_evidence.migration_identity(fixture.identity)
-        or input_tape.copy_identity(fixture.identity)
+    local identity = determinism_evidence.migration_identity(fixture.identity)
     assert(identity.tick_rate == fixed_clock.TICK_RATE, "fixture tick rate drifted")
     assert(identity.tuning == tuning.serialize(), "fixture tuning identity drifted")
-    assert(identity.fixture == fixture.fixture_id, "fixture identity disagrees with fixture id")
+    assert(identity.fixture == MIGRATED_FIXTURE_ID, "fixture identity disagrees with fixture id")
     local state = new_state(identity)
     local frozen_frames, frozen_wires = fixture_frames()
     local frame_wires = {}
@@ -576,7 +608,7 @@ function determinism_evidence.serialize_recording(recording)
         "--",
         "-- Generated only by `love . --determinism-refresh`. Normal verification",
         "-- decodes these effective frames and never invokes their source bots.",
-        "-- Every refresh preserves the prior fixture's exact input wires.",
+        "-- Refresh preserves effective axes/action masks; schema migration may update headers.",
         "",
         "---@class Omp1Window",
         "---@field name string",
@@ -604,7 +636,7 @@ function determinism_evidence.serialize_recording(recording)
         "---@type Omp1DeterminismFixture",
         "return {",
         "    version = 1,",
-        ("    fixture_id = %q,"):format(fixture.fixture_id),
+        ("    fixture_id = %q,"):format(identity.fixture),
         ("    duration_seconds = %d,"):format(fixture.duration_seconds),
         ("    frame_count = %d,"):format(#recording.frame_wires),
         ("    boundary_count = %d,"):format(#recording.boundary_hashes),

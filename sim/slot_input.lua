@@ -38,6 +38,9 @@ function slot_input.neutral_match_input()
         jockey = false,
         aerial_strike = false,
         aerial_acrobatic = false,
+        equipment_held = false,
+        equipment_pressed = false,
+        equipment_released = false,
     }
 end
 
@@ -60,6 +63,9 @@ function slot_input.to_match_input(sample)
         jockey = input_frame.is_held(sample, "jockey") == true,
         aerial_strike = input_frame.is_held(sample, "aerial_strike") == true,
         aerial_acrobatic = input_frame.is_held(sample, "aerial_acrobatic") == true,
+        equipment_held = input_frame.is_held(sample, "equipment") == true,
+        equipment_pressed = input_frame.has_edge(sample, "equipment_pressed") == true,
+        equipment_released = input_frame.has_edge(sample, "equipment_released") == true,
     }
 end
 
@@ -86,11 +92,14 @@ function slot_input.to_sample(input)
     held_bit(input.lob, "lob")
     held_bit(input.aerial_strike == true, "aerial_strike")
     held_bit(input.aerial_acrobatic == true, "aerial_acrobatic")
+    held_bit(input.equipment_held, "equipment")
     edge_bit(input.shoot, "shoot")
     edge_bit(input.pass, "pass")
     edge_bit(input.switch, "switch")
     edge_bit(input.dash, "dash")
     edge_bit(input.dodge, "dodge")
+    edge_bit(input.equipment_pressed, "equipment_pressed")
+    edge_bit(input.equipment_released, "equipment_released")
     return assert(input_frame.new_sample({
         move_x = move_x,
         move_y = move_y,
@@ -200,6 +209,9 @@ local function bot_input(state, player_idx, bot_state)
         jockey = false,
         aerial_strike = state.ball_z > 18 and player.pos:dist(state.ball) < 72,
         aerial_acrobatic = false,
+        equipment_held = false,
+        equipment_pressed = false,
+        equipment_released = false,
     }
 end
 

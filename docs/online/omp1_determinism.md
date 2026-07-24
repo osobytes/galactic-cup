@@ -21,8 +21,8 @@ the explicit refresh command is invoked.
 
 | Identity field | Frozen value |
 | --- | --- |
-| Fixture | `omp1-nebula-orion-eight-streams-v1` |
-| Tape / input / snapshot versions | `1 / 1 / 5` |
+| Fixture | `omp1-nebula-orion-eight-streams-v2` |
+| Tape / input / snapshot versions | `1 / 2 / 5` |
 | Build | `omp1-determinism-v1` |
 | Source | `issue-39-canonical-recording-v1` |
 | Content | `nebula-orion-showcase-content-v1` |
@@ -53,8 +53,8 @@ The authoritative values are:
 
 ```text
 boundaries=7202
-final_hash=9a71cd09b246d6f6
-sequence_digest=623e771bb00362e1
+final_hash=31162b19919e8777
+sequence_digest=1a11d2c705980a29
 score=0-0
 outcome=draw
 final_snapshot_bytes=19437
@@ -75,15 +75,25 @@ love . --determinism-refresh
 ```
 
 Refreshing the recording is a snapshot/state-evidence contract change. It
-replays and re-encodes every existing wire, asserts byte equality, and cannot
-invoke bot policy to replace the authoritative input contract. Review the
-identity, hashes, event counts, score, and restore windows before committing it.
+replays every existing effective sample and cannot invoke bot policy to replace
+the authoritative input contract. Review the identity, wires, hashes, event
+counts, score, and restore windows before committing it.
 
-When the checked-in snapshot version differs from the current schema, refresh
-validates a migration identity that changes only `snapshot_version`. Whether
-the schema changes or not, it decodes the frozen frame wires and consumes every
-one in order to regenerate snapshot hashes. Bot materialization is not part of
-the refresh path.
+The input-v2 migration is deliberately fixture-specific. It changes the frozen
+fixture and ownership identity from v1 to v2 and rewrites only each canonical
+wire's leading version field. All movement axes and existing held/edge masks
+remain unchanged. General runtime decode, replay, and ownership validation
+reject v1 with `unsupported_version`; this evidence seam is not a compatibility
+decoder. Snapshot-only refreshes continue to change only `snapshot_version`.
+In either case, refresh consumes every migrated frozen frame in order to
+regenerate snapshot hashes. Bot materialization is not part of the refresh
+path.
+
+The input-v2 migration retained all 7,201 effective input rows from the
+snapshot-v5/input-v1 fixture; only wire version headers and input/ownership
+identity changed. Because ownership version is canonical snapshot state, the
+boundary hashes and sequence digest were regenerated even though gameplay
+inputs and the 0-0 outcome did not change.
 
 The snapshot-v5 migration retained all 7,201 snapshot-v4 input wires
 byte-for-byte
