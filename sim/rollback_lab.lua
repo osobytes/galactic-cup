@@ -361,7 +361,9 @@ local function tape_digest(tape)
     }) do
         digest_segment(state, identity[field])
     end
-    digest_segment(state, identity.combat or "none")
+    if identity.combat then
+        digest_segment(state, identity.combat)
+    end
     digest_segment(state, match_snapshot.encode(tape.initial))
     for _, frame in ipairs(tape.frames) do
         digest_segment(state, assert(input_frame.encode(frame)))
