@@ -57,9 +57,10 @@ history at or before `N` and choose the greatest tick found:
 
 Future out-of-order arrivals are never used to predict an earlier tick.
 Predictions chain from the latest authoritative sample, not from another
-prediction. Discrete shoot, pass, switch, dash, and dodge edges therefore fire
-only when their authoritative tick is simulated; a lost or delayed edge can
-never become sticky or repeat across predicted ticks.
+prediction. Discrete shoot, pass, switch, dash, dodge, equipment-press, and
+equipment-release edges therefore fire only when their authoritative tick is
+simulated; a lost or delayed edge can never become sticky or repeat across
+predicted ticks. Equipment held intent repeats with the rest of the held mask.
 
 ## Confirmation
 

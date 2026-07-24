@@ -211,7 +211,7 @@ t.describe("OMP-2 deterministic network conditions", function()
             move_x = -127,
             move_y = 127,
             held = 127,
-            edges = 31,
+            edges = 127,
         }))
         local after_rollover = assert(input_frame.new_sample({
             move_x = -126,
@@ -223,12 +223,15 @@ t.describe("OMP-2 deterministic network conditions", function()
             move_x = 127,
             move_y = 127,
             held = 127,
-            edges = 31,
+            edges = 127,
         }))
         t.eq(assert(network_conditions.sample_key(minimum)), 0)
-        t.eq(assert(network_conditions.sample_key(before_rollover)), 255 * 128 * 32 - 1)
-        t.eq(assert(network_conditions.sample_key(after_rollover)), 255 * 128 * 32)
-        t.eq(assert(network_conditions.sample_key(maximum)), 255 * 255 * 128 * 32 - 1)
+        t.eq(assert(network_conditions.sample_key(before_rollover)), (254 * 256 + 127) * 128 + 127)
+        t.eq(assert(network_conditions.sample_key(after_rollover)), 255 * 256 * 128)
+        t.eq(
+            assert(network_conditions.sample_key(maximum)),
+            ((254 * 255 + 254) * 256 + 127) * 128 + 127
+        )
     end)
 
     t.it("hits both jitter bounds and reorders only by natural arrival", function()

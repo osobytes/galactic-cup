@@ -66,6 +66,28 @@ t.describe("fixed match input slots", function()
         t.is_true(not input.pass)
         t.is_true(not input.sprint)
         t.is_true(not input.aerial_strike)
+        t.is_true(not input.equipment_held)
+        t.is_true(not input.equipment_pressed)
+        t.is_true(not input.equipment_released)
+    end)
+
+    t.it("round trips canonical equipment held and edge intent", function()
+        local pressed = slot_input.neutral_match_input()
+        pressed.equipment_held = true
+        pressed.equipment_pressed = true
+        local pressed_sample = slot_input.to_sample(pressed)
+        local pressed_input = slot_input.to_match_input(pressed_sample)
+        t.is_true(pressed_input.equipment_held)
+        t.is_true(pressed_input.equipment_pressed)
+        t.is_true(not pressed_input.equipment_released)
+
+        local tapped = slot_input.neutral_match_input()
+        tapped.equipment_pressed = true
+        tapped.equipment_released = true
+        local tapped_input = slot_input.to_match_input(slot_input.to_sample(tapped))
+        t.is_true(not tapped_input.equipment_held)
+        t.is_true(tapped_input.equipment_pressed)
+        t.is_true(tapped_input.equipment_released)
     end)
 
     t.it("maps exactly four permanent outfield slots per side and excludes both keepers", function()
@@ -556,6 +578,9 @@ t.describe("fixed match input slots", function()
             lob = false,
             sprint = false,
             jockey = false,
+            equipment_held = false,
+            equipment_pressed = false,
+            equipment_released = false,
         }
         local ok = pcall(function()
             match.step(s, fixed_clock.TICK_SECONDS, legacy_input)

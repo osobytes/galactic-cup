@@ -14,6 +14,7 @@ without pausing play.
 | Sprint | Shift (hold) | LB (hold) |
 | Lob / chip modifier | L (hold) | Y (hold) |
 | Juke / dodge | C | L3 |
+| Equipment | J (hold/tap) | B (hold/tap) |
 | Pause | P or Esc | Start |
 | Skip replay / advance full time | Space or Enter | A |
 | Toggle mute | M | — |
@@ -94,6 +95,10 @@ Your **facing** follows your actual velocity so you can still aim while braking 
 to wherever you're pointing, not where you're running).
 Shooting is a discrete, edge-triggered event (queued on key press, consumed on the next
 simulation step), so taps don't get lost between frames.
+
+Equipment input likewise preserves held state plus distinct press and release edges at the
+fixed-tick boundary. A fast tap between ticks reaches the simulation as an ordered press and
+release on the next tick. Gamepad B remains the Back action outside a live match.
 
 ## Goal replays
 

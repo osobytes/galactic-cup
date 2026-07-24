@@ -374,6 +374,9 @@ local function neutral_input()
         jockey = false,
         aerial_strike = false,
         aerial_acrobatic = false,
+        equipment_held = false,
+        equipment_pressed = false,
+        equipment_released = false,
     }
 end
 

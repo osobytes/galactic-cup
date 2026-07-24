@@ -100,6 +100,9 @@ local MOVE_RIGHT = {
     lob = false,
     sprint = false,
     jockey = false,
+    equipment_held = false,
+    equipment_pressed = false,
+    equipment_released = false,
 }
 
 t.describe("sim.species", function()

@@ -73,6 +73,11 @@ local FIELD_H = 540
 ---@field _dash boolean
 ---@field _dodge boolean
 ---@field _space_held_prev boolean  -- tracks Space held off the ball for jockey stance
+---@field _equipment_keyboard_down boolean
+---@field _equipment_gamepad_down boolean
+---@field _equipment_abstract_down boolean
+---@field _equipment_pressed boolean
+---@field _equipment_released boolean
 ---@field _clock FixedClockState
 ---@field _input_adapter MatchInputAdapterState
 ---@field _frame_events MatchEvent[] -- Events produced by every simulation tick in the latest render update.
@@ -360,6 +365,11 @@ function Match:restart()
     self._pass_held_prev = false
     self._lob_latch = false
     self._space_held_prev = false
+    self._equipment_keyboard_down = false
+    self._equipment_gamepad_down = false
+    self._equipment_abstract_down = false
+    self._equipment_pressed = false
+    self._equipment_released = false
     self._clock = fixed_clock.new()
     self._input_adapter = match_input_adapter.new()
     self._frame_events = {}
@@ -411,6 +421,36 @@ function Match:result_completion_blocked()
     return self._rollback_lab ~= nil and replay.active()
 end
 
+---@param self MatchScreen
+---@return boolean
+local function equipment_down(self)
+    return self._equipment_keyboard_down
+        or self._equipment_gamepad_down
+        or self._equipment_abstract_down
+end
+
+---@param self MatchScreen
+---@param source "keyboard"|"gamepad"?
+---@param pressed boolean
+local function record_equipment_transition(self, source, pressed)
+    local before = equipment_down(self)
+    if source == "keyboard" then
+        self._equipment_keyboard_down = pressed
+    elseif source == "gamepad" then
+        self._equipment_gamepad_down = pressed
+    else
+        self._equipment_abstract_down = pressed
+    end
+    local after = equipment_down(self)
+    if before ~= after then
+        if after then
+            self._equipment_pressed = true
+        else
+            self._equipment_released = true
+        end
+    end
+end
+
 ---@param evt InputEvent
 function Match:event(evt)
     if evt.kind == "action" then
@@ -424,6 +464,10 @@ function Match:event(evt)
             if self._profile == "playtest" and evt.action == "confirm" then
                 self:restart()
             end
+            return
+        end
+        if evt.action == "equipment" then
+            record_equipment_transition(self, evt.source, evt.pressed ~= false)
             return
         end
         local carrying = self.state.owner == self.state.controlled
@@ -576,6 +620,17 @@ function Match:update(dt)
         return
     end
     self._kickoff_banner = math.max(0, self._kickoff_banner - dt)
+    local equipment_before_poll = equipment_down(self)
+    self._equipment_keyboard_down = love.keyboard.isDown("j")
+    self._equipment_gamepad_down = gamepad_down("b")
+    local equipment_held = equipment_down(self)
+    if equipment_before_poll ~= equipment_held then
+        if equipment_held then
+            self._equipment_pressed = true
+        else
+            self._equipment_released = true
+        end
+    end
     -- Space reads as "shoot" while carrying (hold to charge, release to fire);
     -- off the ball it is "jockey" while held and fires the poke on release
     -- — mirroring the on-ball hold/release pattern so muscle memory transfers.
@@ -615,11 +670,15 @@ function Match:update(dt)
         jockey = space_down_offball, -- hold Space off the ball: slow shadow stance
         aerial_strike = space_down_offball,
         aerial_acrobatic = space_down_offball and l_down,
+        equipment_held = equipment_held,
+        equipment_pressed = self._equipment_pressed,
+        equipment_released = self._equipment_released,
     }
     self._shoot_held_prev = held
     self._pass_held_prev = k_held
     self._space_held_prev = space_down_offball
     self._pass, self._switch, self._dash, self._dodge = false, false, false, false
+    self._equipment_pressed, self._equipment_released = false, false
 
     -- Render input is sampled every update, then the adapter holds one-shot
     -- edges until a canonical simulation tick consumes them. A fast display

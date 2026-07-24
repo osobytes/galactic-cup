@@ -1,5 +1,6 @@
 local determinism_evidence = require("sim.determinism_evidence")
 local fixture = require("data.omp1_determinism")
+local input_frame = require("sim.input_frame")
 local input_tape = require("sim.input_tape")
 local match_snapshot = require("sim.match_snapshot")
 local placement = require("sim.placement")
@@ -19,7 +20,7 @@ t.describe("OMP-1 determinism evidence", function()
         t.is_true(not before({ idx = 2, d = 10 }, { idx = 9, d = 9 }))
     end)
 
-    t.it("validates a migration identity while changing only the snapshot version", function()
+    t.it("validates a current-input migration while changing only snapshot version", function()
         local prior = input_tape.copy_identity(fixture.identity)
         prior.snapshot_version = match_snapshot.VERSION - 1
         local migrated = determinism_evidence.migration_identity(prior)
@@ -42,6 +43,50 @@ t.describe("OMP-1 determinism evidence", function()
         rawset(malformed, "unexpected", nil)
         rawset(malformed.ownership.rosters.home, 1, false)
         t.is_true(not pcall(determinism_evidence.migration_identity, malformed))
+    end)
+
+    t.it("explicitly migrates only the frozen v1 fixture identity to input v2", function()
+        local legacy = input_tape.copy_identity(fixture.identity)
+        legacy.fixture = "omp1-nebula-orion-eight-streams-v1"
+        legacy.input_version = 1
+        legacy.ownership.version = 1
+
+        local migrated = determinism_evidence.migration_identity(legacy)
+        t.eq(migrated.fixture, "omp1-nebula-orion-eight-streams-v2")
+        t.eq(migrated.input_version, 2)
+        t.eq(migrated.ownership.version, 2)
+        t.eq(migrated.build, legacy.build)
+        t.eq(migrated.source, legacy.source)
+        t.eq(migrated.content, legacy.content)
+        t.eq(migrated.config, legacy.config)
+        t.eq(migrated.tuning, legacy.tuning)
+        t.eq(migrated.seed, legacy.seed)
+        t.eq(migrated.tick_rate, legacy.tick_rate)
+        for _, team in ipairs({ "home", "away" }) do
+            for index, player_id in ipairs(legacy.ownership.rosters[team]) do
+                t.eq(migrated.ownership.rosters[team][index], player_id)
+            end
+        end
+        for index, assignment in ipairs(legacy.ownership.slots) do
+            t.eq(migrated.ownership.slots[index].slot, assignment.slot)
+            t.eq(migrated.ownership.slots[index].team, assignment.team)
+            t.eq(migrated.ownership.slots[index].player_id, assignment.player_id)
+        end
+    end)
+
+    t.it("migrates only wires that were canonical within the v1 bounds", function()
+        local current = assert(input_frame.encode(assert(input_frame.neutral(0))))
+        local legacy = "1" .. current:sub(2)
+        t.eq(determinism_evidence.migrate_legacy_fixture_wire(legacy), current)
+
+        local v2_only_held = legacy:gsub("0,0,0,0", "0,0,128,0", 1)
+        t.is_true(not pcall(determinism_evidence.migrate_legacy_fixture_wire, v2_only_held))
+
+        local v2_only_edge = legacy:gsub("0,0,0,0", "0,0,0,64", 1)
+        t.is_true(not pcall(determinism_evidence.migrate_legacy_fixture_wire, v2_only_edge))
+
+        local oversized = legacy .. string.rep("0", 149)
+        t.is_true(not pcall(determinism_evidence.migrate_legacy_fixture_wire, oversized))
     end)
 
     t.it("pins the full fixed-input match on the explicit evidence command", function()

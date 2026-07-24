@@ -27,7 +27,7 @@ RUNTIME_REPOSITORY = "https://github.com/2dengine/love.js"
 RUNTIME_ARCHIVE_SHA256 = "89b56e7953935d6cb06c454d0ee0c0d8903e433b9a94d1d6d501fb8b516f5ff6"
 REQUIRED_FIELDS = {
     "schema": "1",
-    "fixture": "omp1-nebula-orion-eight-streams-v1",
+    "fixture": "omp1-nebula-orion-eight-streams-v2",
     "build": "omp1-determinism-v1",
     "source": "issue-39-canonical-recording-v1",
     "content": "nebula-orion-showcase-content-v1",
@@ -38,8 +38,8 @@ REQUIRED_FIELDS = {
     "ticks": "7201",
     "boundaries": "7202",
     "hash": "fnv1a64-canonical-snapshot-v5",
-    "final_hash": "9a71cd09b246d6f6",
-    "sequence_digest": "623e771bb00362e1",
+    "final_hash": "31162b19919e8777",
+    "sequence_digest": "1a11d2c705980a29",
     "score": "0-0",
     "outcome": "draw",
     "snapshot_bytes": "19437",

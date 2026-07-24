@@ -54,6 +54,9 @@ t.describe("sim.tuning", function()
             lob = false,
             sprint = false,
             jockey = false,
+            equipment_held = false,
+            equipment_pressed = false,
+            equipment_released = false,
         }
         -- Zero the shot wind-up: a human shot must now release the same frame.
         tuning.reset()
@@ -73,6 +76,9 @@ t.describe("sim.tuning", function()
             lob = false,
             sprint = false,
             jockey = false,
+            equipment_held = false,
+            equipment_pressed = false,
+            equipment_released = false,
         })
         match.step(s, 0.016, NO_INPUT) -- windup_timer==0 resolution frame
         t.is_true(s.owner == nil, "with SHOT_WINDUP=0 the shot releases immediately")

@@ -235,6 +235,17 @@ t.describe("input tape replay", function()
     end)
 
     t.it("reports malformed and unsupported tape versions", function()
+        local legacy, current_identity = short_match_tape.make()
+        legacy.identity.input_version = 1
+        legacy.identity.ownership.version = 1
+        local legacy_result, legacy_failure = replay.run(legacy, current_identity)
+        t.eq(legacy_result, nil)
+        local incompatible = assert(legacy_failure)
+        t.eq(incompatible.code, "identity_mismatch")
+        t.eq(incompatible.path, "identity.input_version")
+        t.eq(incompatible.expected, input_frame.VERSION)
+        t.eq(incompatible.actual, 1)
+
         local tape, identity = short_match_tape.make()
         tape.version = 999
         local result, failure = replay.run(tape, identity)

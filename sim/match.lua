@@ -357,6 +357,9 @@ local SPRINT_ENGAGE = 0.25 -- min meter to start a sprint (hysteresis: no flicke
 ---@field jockey boolean  -- hold Space off the ball: slow shadow stance, bonus poke reach on release
 ---@field aerial_strike boolean?  -- abstract first-time strike intent
 ---@field aerial_acrobatic boolean?  -- abstract bicycle/acrobatic intent
+---@field equipment_held boolean  -- equipment control is physically held
+---@field equipment_pressed boolean  -- equipment press edge for this fixed tick
+---@field equipment_released boolean  -- equipment release edge for this fixed tick
 
 -- One-frame notifications of discrete actions, for the renderer's juice layer
 -- (flashes, trails). Produced by the sim, cleared at the top of every step, so

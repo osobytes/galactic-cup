@@ -162,6 +162,35 @@ t.describe("match screen rollback laboratory (tier 2)", function()
         end)
     end)
 
+    t.it("captures a complete equipment tap before the next render update", function()
+        with_keyboard(function()
+            local screen = Match.new({
+                rollback_lab = {
+                    local_slot = 1,
+                    profile_name = "clean",
+                },
+            })
+            screen:event({
+                kind = "action",
+                action = "equipment",
+                pressed = true,
+                source = "gamepad",
+            })
+            screen:event({
+                kind = "action",
+                action = "equipment",
+                pressed = false,
+                source = "gamepad",
+            })
+            screen:update(fixed_clock.TICK_SECONDS)
+
+            local sample = screen._rollback_outputs[1].input.slots[1].sample
+            t.is_true(input_frame.is_held(sample, "equipment") == false)
+            t.is_true(input_frame.has_edge(sample, "equipment_pressed") == true)
+            t.is_true(input_frame.has_edge(sample, "equipment_released") == true)
+        end)
+    end)
+
     t.it("uses one fixed clock and aggregates multi-tick edges, holds, and corrections", function()
         with_keyboard(function(down)
             local screen = Match.new({

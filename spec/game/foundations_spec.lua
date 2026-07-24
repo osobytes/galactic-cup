@@ -11,7 +11,27 @@ t.describe("input actions", function()
         t.eq(actions.from_gamepad("a").action, "confirm")
         t.eq(actions.from_key("escape").action, "back")
         t.eq(actions.from_gamepad("b").action, "back")
+        t.eq(actions.from_key("j").action, "equipment")
+        t.eq(actions.from_gamepad("b", true, true).action, "equipment")
+        t.eq(actions.from_gamepad("b", false, true).pressed, false)
         t.is_true(actions.from_key("unknown") == nil)
+    end)
+
+    t.it("forwards only equipment releases through normalized app input", function()
+        local transform = viewport.new(960, 540)
+        local equipment = assert(
+            controller.normalize(
+                { kind = "gamepad", button = "b", pressed = false },
+                transform,
+                true
+            )
+        )
+        t.eq(equipment.action, "equipment")
+        t.eq(equipment.pressed, false)
+        t.eq(
+            controller.normalize({ kind = "gamepad", button = "b", pressed = false }, transform),
+            nil
+        )
     end)
 
     t.it("converts pointer input through a letterboxed viewport", function()

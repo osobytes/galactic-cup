@@ -89,8 +89,12 @@ t.describe("OMP-2 rollback input history", function()
         local authoritative = sample(
             -64,
             90,
-            input_frame.HELD_BITS.shoot + input_frame.HELD_BITS.lob,
-            input_frame.EDGE_BITS.shoot + input_frame.EDGE_BITS.dash
+            input_frame.HELD_BITS.shoot
+                + input_frame.HELD_BITS.lob
+                + input_frame.HELD_BITS.equipment,
+            input_frame.EDGE_BITS.shoot
+                + input_frame.EDGE_BITS.dash
+                + input_frame.EDGE_BITS.equipment_pressed
         )
         assert(rollback_input_history.add_authoritative(history, 5, 1, authoritative))
 
@@ -107,6 +111,9 @@ t.describe("OMP-2 rollback input history", function()
         t.eq(predicted.slots[1].move_y, authoritative.move_y)
         t.eq(predicted.slots[1].held, authoritative.held)
         t.eq(predicted.slots[1].edges, 0, "edge bits never repeat")
+        t.is_true(input_frame.is_held(predicted.slots[1], "equipment") == true)
+        t.is_true(input_frame.has_edge(predicted.slots[1], "equipment_pressed") == false)
+        t.is_true(input_frame.has_edge(predicted.slots[1], "equipment_released") == false)
         t.eq(predicted_record.slots[1].status, "predicted")
     end)
 

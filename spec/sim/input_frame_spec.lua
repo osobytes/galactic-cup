@@ -92,6 +92,12 @@ t.describe("OMP-1 input frame", function()
         t.eq(ownership.slots[5].team, "away")
         t.eq(ownership.slots[8].player_id, "tox_vren")
 
+        local legacy = assert(input_frame.copy_ownership(ownership, by_id))
+        legacy.version = 1
+        local legacy_ok, _, legacy_code = input_frame.validate_ownership(legacy, by_id)
+        t.eq(legacy_ok, nil)
+        t.eq(legacy_code, "unsupported_version")
+
         local duplicate = assignments()
         duplicate[4].player_id = duplicate[1].player_id
         local value, _, code = input_frame.new_ownership(duplicate, rosters, by_id)
@@ -182,14 +188,20 @@ t.describe("OMP-1 input frame", function()
 
     t.it("keeps supplied holds and one-tick edges distinct", function()
         local sample = assert(input_frame.new_sample({
-            held = input_frame.HELD_BITS.shoot + input_frame.HELD_BITS.sprint,
-            edges = input_frame.EDGE_BITS.shoot + input_frame.EDGE_BITS.dash,
+            held = input_frame.HELD_BITS.shoot
+                + input_frame.HELD_BITS.sprint
+                + input_frame.HELD_BITS.equipment,
+            edges = input_frame.EDGE_BITS.shoot
+                + input_frame.EDGE_BITS.dash
+                + input_frame.EDGE_BITS.equipment_pressed,
         }))
         t.is_true(assert(input_frame.is_held(sample, "shoot")))
         t.is_true(assert(input_frame.is_held(sample, "sprint")))
+        t.is_true(assert(input_frame.is_held(sample, "equipment")))
         t.eq(input_frame.is_held(sample, "pass"), false)
         t.is_true(assert(input_frame.has_edge(sample, "shoot")))
         t.is_true(assert(input_frame.has_edge(sample, "dash")))
+        t.is_true(assert(input_frame.has_edge(sample, "equipment_pressed")))
         t.eq(input_frame.has_edge(sample, "pass"), false)
 
         local next_sample = assert(input_frame.new_sample({ held = sample.held, edges = 0 }))
@@ -208,14 +220,14 @@ t.describe("OMP-1 input frame", function()
         slots[8] = assert(input_frame.new_sample({
             move_x = 127,
             move_y = -64,
-            held = input_frame.HELD_BITS.aerial_strike,
-            edges = input_frame.EDGE_BITS.dodge,
+            held = input_frame.HELD_BITS.equipment,
+            edges = input_frame.EDGE_BITS.equipment_pressed,
         }))
         local frame = assert(input_frame.new(42, slots))
         local wire = assert(input_frame.encode(frame))
         t.eq(
             wire,
-            "1|42|-127,64,17,1|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|127,-64,32,16"
+            "2|42|-127,64,17,1|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|0,0,0,0|127,-64,128,32"
         )
 
         local decoded = assert(input_frame.decode(wire))
@@ -223,7 +235,7 @@ t.describe("OMP-1 input frame", function()
         t.eq(reencoded, wire)
         t.eq(decoded.tick, 42)
         t.eq(decoded.slots[1].move_x, -127)
-        t.eq(decoded.slots[8].edges, input_frame.EDGE_BITS.dodge)
+        t.eq(decoded.slots[8].edges, input_frame.EDGE_BITS.equipment_pressed)
     end)
 
     t.it("rejects malformed, noncanonical, and oversized frame data", function()
@@ -233,11 +245,38 @@ t.describe("OMP-1 input frame", function()
         t.eq(ok, nil)
         t.eq(code, "malformed")
 
-        local sample, _, sample_code = input_frame.new_sample({ held = 128 })
+        local sample, _, sample_code = input_frame.new_sample({ held = 256 })
+        t.eq(sample, nil)
+        t.eq(sample_code, "malformed")
+        sample, _, sample_code = input_frame.new_sample({ edges = 128 })
         t.eq(sample, nil)
         t.eq(sample_code, "malformed")
 
+        local invalid_combinations = {
+            {
+                held = 0,
+                edges = input_frame.EDGE_BITS.equipment_pressed,
+            },
+            {
+                held = input_frame.HELD_BITS.equipment,
+                edges = input_frame.EDGE_BITS.equipment_released,
+            },
+            {
+                held = input_frame.HELD_BITS.equipment,
+                edges = input_frame.EDGE_BITS.equipment_pressed
+                    + input_frame.EDGE_BITS.equipment_released,
+            },
+        }
+        for _, invalid in ipairs(invalid_combinations) do
+            local rejected, _, rejected_code = input_frame.new_sample(invalid)
+            t.eq(rejected, nil)
+            t.eq(rejected_code, "malformed")
+        end
+
         local wire = assert(input_frame.encode(assert(input_frame.neutral(0))))
+        local old, _, old_code = input_frame.decode("1" .. wire:sub(2))
+        t.eq(old, nil)
+        t.eq(old_code, "unsupported_version")
         local value, _, decode_code = input_frame.decode("01" .. wire:sub(2))
         t.eq(value, nil)
         t.eq(decode_code, "malformed")
@@ -254,7 +293,7 @@ t.describe("OMP-1 input frame", function()
                 move_x = -127,
                 move_y = -127,
                 held = 127,
-                edges = 31,
+                edges = 127,
             }))
         end
         local maximum_wire =

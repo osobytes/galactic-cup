@@ -19,7 +19,15 @@
 ---| "lob"
 ---| "aerial_strike"
 ---| "aerial_acrobatic"
----@alias InputEdgeAction "shoot"|"pass"|"switch"|"dash"|"dodge"
+---| "equipment"
+---@alias InputEdgeAction
+---| "shoot"
+---| "pass"
+---| "switch"
+---| "dash"
+---| "dodge"
+---| "equipment_pressed"
+---| "equipment_released"
 ---@alias InputFrameErrorCode "malformed"|"unsupported_version"|"wire_too_large"
 
 ---@class InputSlot
@@ -66,7 +74,7 @@
 ---@class InputFrameModule
 local input_frame = {}
 
-input_frame.VERSION = 1
+input_frame.VERSION = 2
 input_frame.HOME_SLOT_COUNT = 4
 input_frame.AWAY_SLOT_COUNT = 4
 input_frame.SLOT_COUNT = input_frame.HOME_SLOT_COUNT + input_frame.AWAY_SLOT_COUNT
@@ -74,7 +82,7 @@ input_frame.FIXTURE_TEAM_SIZE = input_frame.HOME_SLOT_COUNT + 1
 input_frame.MOVE_SCALE = 127
 input_frame.MAX_TICK = 2147483647
 input_frame.MAX_PLAYER_ID_BYTES = 64
-input_frame.MAX_WIRE_BYTES = 148
+input_frame.MAX_WIRE_BYTES = 156
 
 ---@type table<InputHeldAction, integer>
 input_frame.HELD_BITS = {
@@ -85,6 +93,7 @@ input_frame.HELD_BITS = {
     lob = 16,
     aerial_strike = 32,
     aerial_acrobatic = 64,
+    equipment = 128,
 }
 
 ---@type table<InputEdgeAction, integer>
@@ -94,10 +103,12 @@ input_frame.EDGE_BITS = {
     switch = 4,
     dash = 8,
     dodge = 16,
+    equipment_pressed = 32,
+    equipment_released = 64,
 }
 
-local MAX_HELD_MASK = 127
-local MAX_EDGE_MASK = 31
+local MAX_HELD_MASK = 255
+local MAX_EDGE_MASK = 127
 
 ---@type InputSlot[]
 local SLOT_ORDER = {
@@ -188,6 +199,13 @@ local function is_mask(value, maximum)
     return is_integer(value) and value >= 0 and value <= maximum
 end
 
+---@param mask integer
+---@param bit integer
+---@return boolean
+local function has_bit(mask, bit)
+    return math.floor(mask / bit) % 2 == 1
+end
+
 ---@param value any
 ---@return boolean
 local function is_canonical_array(value)
@@ -250,6 +268,15 @@ function input_frame.validate_sample(sample)
     end
     if not is_mask(sample.edges, MAX_EDGE_MASK) then
         return failure("malformed", "input sample edge mask is invalid")
+    end
+    local equipment_held = has_bit(sample.held, input_frame.HELD_BITS.equipment)
+    local equipment_pressed = has_bit(sample.edges, input_frame.EDGE_BITS.equipment_pressed)
+    local equipment_released = has_bit(sample.edges, input_frame.EDGE_BITS.equipment_released)
+    if
+        (equipment_pressed and not equipment_released and not equipment_held)
+        or (equipment_released and equipment_held)
+    then
+        return failure("malformed", "input sample equipment transition combination is invalid")
     end
     return true
 end
@@ -369,13 +396,6 @@ function input_frame.dequantize_move(sample)
         return nil, nil, err, code
     end
     return sample.move_x / input_frame.MOVE_SCALE, sample.move_y / input_frame.MOVE_SCALE
-end
-
----@param mask integer
----@param bit integer
----@return boolean
-local function has_bit(mask, bit)
-    return math.floor(mask / bit) % 2 == 1
 end
 
 ---@param sample InputSample

@@ -142,8 +142,8 @@ copies do not need a lifetime identity set and cannot inflate that counter.
 advance either clock.
 
 Delivered-sample bookkeeping is also bounded. Each sample is represented by a
-collision-free mixed-radix integer packing of the two 255-value axes, 128-value
-held mask, and 32-value edge mask. This is an exact identity, not a hash. A
+collision-free mixed-radix integer packing of the two 255-value axes, 256-value
+held mask, and 128-value edge mask. This is an exact identity, not a hash. A
 ledger row remains only while that tick is among the slot's seven retained
 authoritative records or is referenced by a pending envelope. This is enough
 to de-duplicate redundant and reordered history, detect an impossible

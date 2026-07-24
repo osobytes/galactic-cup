@@ -93,8 +93,8 @@ network_conditions.RETAINED_RECORDS = network_conditions.HISTORY_RECORDS + 1
 network_conditions.MAX_TRANSPORT_TICK = 2147483647
 
 local AXIS_CARDINALITY = input_frame.MOVE_SCALE * 2 + 1
-local HELD_CARDINALITY = 128
-local EDGE_CARDINALITY = 32
+local HELD_CARDINALITY = 256
+local EDGE_CARDINALITY = 128
 
 ---@param value any
 ---@return boolean
