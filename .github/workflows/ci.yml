@@ -19,11 +19,9 @@ jobs:
         name: OMP-2 rollback impact filter
         runs-on: ubuntu-24.04
         outputs:
-            cache_hit: ${{ steps.aggregate_cache.outputs.cache-hit }}
-            cache_context: ${{ steps.scope.outputs.cache_context }}
             fingerprint: ${{ steps.scope.outputs.fingerprint }}
             impact: ${{ steps.scope.outputs.run }}
-            reuse: ${{ steps.pointer.outputs.reuse }}
+            reuse: ${{ steps.discovery.outputs.reuse }}
             run: ${{ steps.decision.outputs.run }}
 
         steps:
@@ -36,64 +34,42 @@ jobs:
             - name: Detect rollback-impacting changes
               id: scope
               env:
-                  BASE_REF: ${{ github.base_ref }}
-                  BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
-                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
                   EVENT_NAME: ${{ github.event_name }}
                   EVENT_BEFORE: ${{ github.event.before }}
-                  HEAD_BRANCH: ${{ github.head_ref }}
-                  PLATFORM: ${{ runner.os }}-${{ runner.arch }}
                   PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-                  PR_NUMBER: ${{ github.event.pull_request.number }}
-                  REPOSITORY: ${{ github.repository }}
               run: |
                   python3 -B scripts/rollback_ci.py scope \
                       --event-name "$EVENT_NAME" \
                       --event-before "$EVENT_BEFORE" \
                       --pr-base-sha "$PR_BASE_SHA" \
-                      --repository "$REPOSITORY" \
-                      --pr-number "${PR_NUMBER:-0}" \
-                      --head-branch "$HEAD_BRANCH" \
-                      --base-repository "$BASE_REPOSITORY" \
-                      --base-ref "$BASE_REF" \
-                      --base-sha "$BASE_SHA" \
-                      --platform "$PLATFORM" \
-                      --gate-contract 4 \
                       --github-output "$GITHUB_OUTPUT"
 
-            - name: Restore exact aggregate success pointer
-              id: aggregate_cache
-              if: steps.scope.outputs.run == 'true' && steps.scope.outputs.reuse_allowed == 'true'
-              continue-on-error: true
-              uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
-              with:
-                  path: ${{ runner.temp }}/omp2-rollback-success/aggregate.json
-                  key: omp2-rollback-success-v2-${{ steps.scope.outputs.cache_context }}-contract-4-${{ steps.scope.outputs.fingerprint }}
-
-            - name: Validate aggregate success pointer
-              id: pointer
+            - name: Discover prior complete rollback evidence
+              id: discovery
               env:
                   API_URL: ${{ github.api_url }}
                   BASE_REF: ${{ github.base_ref }}
-                  BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+                  BASE_REPOSITORY_ID: ${{ github.event.pull_request.base.repo.id }}
                   BASE_SHA: ${{ github.event.pull_request.base.sha }}
                   CURRENT_RUN_ID: ${{ github.run_id }}
                   FINGERPRINT: ${{ steps.scope.outputs.fingerprint }}
                   GH_TOKEN: ${{ github.token }}
                   HEAD_BRANCH: ${{ github.head_ref }}
-                  PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+                  HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
+                  IMPACT: ${{ steps.scope.outputs.run }}
                   PR_NUMBER: ${{ github.event.pull_request.number }}
                   REPOSITORY: ${{ github.repository }}
+                  REPOSITORY_ID: ${{ github.repository_id }}
               run: |
-                  python3 -B scripts/rollback_ci.py pointer-check \
-                      --path "$RUNNER_TEMP/omp2-rollback-success/aggregate.json" \
+                  python3 -B scripts/rollback_ci.py discover \
+                      --impact "$IMPACT" \
                       --fingerprint "$FINGERPRINT" \
-                      --platform "$PLATFORM" \
-                      --gate-contract 4 \
                       --repository "$REPOSITORY" \
+                      --repository-id "${REPOSITORY_ID:-0}" \
                       --pr-number "${PR_NUMBER:-0}" \
                       --head-branch "$HEAD_BRANCH" \
-                      --base-repository "$BASE_REPOSITORY" \
+                      --head-repository-id "${HEAD_REPOSITORY_ID:-0}" \
+                      --base-repository-id "${BASE_REPOSITORY_ID:-0}" \
                       --base-ref "$BASE_REF" \
                       --base-sha "$BASE_SHA" \
                       --current-run-id "$CURRENT_RUN_ID" \
@@ -105,7 +81,7 @@ jobs:
               id: decision
               env:
                   IMPACT: ${{ steps.scope.outputs.run }}
-                  REUSE: ${{ steps.pointer.outputs.reuse }}
+                  REUSE: ${{ steps.discovery.outputs.reuse }}
               run: |
                   run="$IMPACT"
                   if [ "$REUSE" = "true" ]; then
@@ -436,43 +412,3 @@ jobs:
                       exit 1
                   fi
                   echo "Native plus Chrome/Firefox matrix and soak evidence passed."
-
-            - name: Prepare aggregate success pointer
-              id: seed
-              if: success() && github.event_name == 'pull_request' && github.run_attempt == 1 && needs.rollback_scope.outputs.impact == 'true' && needs.rollback_scope.outputs.reuse != 'true'
-              env:
-                  API_URL: ${{ github.api_url }}
-                  BASE_REF: ${{ github.base_ref }}
-                  BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
-                  BASE_SHA: ${{ github.event.pull_request.base.sha }}
-                  FINGERPRINT: ${{ needs.rollback_scope.outputs.fingerprint }}
-                  GH_TOKEN: ${{ github.token }}
-                  HEAD_BRANCH: ${{ github.head_ref }}
-                  PLATFORM: ${{ runner.os }}-${{ runner.arch }}
-                  PR_NUMBER: ${{ github.event.pull_request.number }}
-                  REPOSITORY: ${{ github.repository }}
-                  SOURCE_REVISION: ${{ github.event.pull_request.head.sha }}
-              run: |
-                  python3 -B scripts/rollback_ci.py pointer-write \
-                      --path "$RUNNER_TEMP/omp2-rollback-success/aggregate.json" \
-                      --fingerprint "$FINGERPRINT" \
-                      --platform "$PLATFORM" \
-                      --gate-contract 4 \
-                      --repository "$REPOSITORY" \
-                      --pr-number "$PR_NUMBER" \
-                      --head-branch "$HEAD_BRANCH" \
-                      --base-repository "$BASE_REPOSITORY" \
-                      --base-ref "$BASE_REF" \
-                      --base-sha "$BASE_SHA" \
-                      --producer-run-id "${{ github.run_id }}" \
-                      --producer-revision "$SOURCE_REVISION" \
-                      --token "$GH_TOKEN" \
-                      --api-url "$API_URL" \
-                      --github-output "$GITHUB_OUTPUT"
-
-            - name: Save exact aggregate success pointer
-              if: success() && steps.seed.outputs.save == 'true' && needs.rollback_scope.outputs.cache_hit != 'true'
-              uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
-              with:
-                  path: ${{ runner.temp }}/omp2-rollback-success/aggregate.json
-                  key: omp2-rollback-success-v2-${{ needs.rollback_scope.outputs.cache_context }}-contract-4-${{ needs.rollback_scope.outputs.fingerprint }}
