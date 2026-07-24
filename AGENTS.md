@@ -130,29 +130,33 @@ We treat LuaLS as a compiler. Untyped public code is a bug.
 ---@alias Position "keeper"|"defender"|"midfielder"|"forward"
 
 ---@class StatBlock
----@field speed integer
----@field power integer
+---@field pace integer
+---@field strength integer
 ---@field technique integer
----@field defense integer
 ---@field stamina integer
+---@field mental integer
 
 ---@class PlayerData
 ---@field id string
 ---@field name string
----@field planet string
+---@field number integer
 ---@field position Position
 ---@field stats StatBlock
----@field trait string
+---@field presentation_id string
+---@field cosmetic_variant_id string?
+---@field loadout_id string?
 
 ---@type PlayerData[]
 return {
     {
         id = "zyro_vex",
         name = "Zyro Vex",
-        planet = "Kairon-9",
+        number = 9,
         position = "forward",
-        stats = { speed = 8, power = 6, technique = 7, defense = 2, stamina = 5 },
-        trait = "comet_first_touch",
+        stats = { pace = 8, strength = 6, technique = 7, stamina = 5, mental = 2 },
+        presentation_id = "medieval_bramble_quickstep",
+        cosmetic_variant_id = "bramble_berry",
+        loadout_id = "loadout_spring_gloves",
     },
 }
 ```

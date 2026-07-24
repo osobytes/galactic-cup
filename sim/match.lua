@@ -470,10 +470,20 @@ end
 ---@param field { w: number, h: number }
 ---@param by_id table<string, PlayerData>
 ---@param species_by_id table<string, SpeciesData>
+---@param showcase_by_id table<string, ShowcasePlayerCompatibilityData>
 ---@param formation_id string?  -- override team.formation
 ---@param line_shift number  -- tactic depth bias (fraction of pitch, toward attack)
 ---@return MatchPlayer[]
-local function build_team(team, side, field, by_id, species_by_id, formation_id, line_shift)
+local function build_team(
+    team,
+    side,
+    field,
+    by_id,
+    species_by_id,
+    showcase_by_id,
+    formation_id,
+    line_shift
+)
     local formation = formations[formation_id or team.formation]
     assert(formation, "unknown formation: " .. tostring(formation_id or team.formation))
     local anchors = placement.anchors(formation, side, field)
@@ -500,8 +510,10 @@ local function build_team(team, side, field, by_id, species_by_id, formation_id,
     local list = {}
     for i, id in ipairs(ordered) do
         local pd = by_id[id]
-        local species_data = species_by_id[pd.species]
-        assert(species_data, "unknown species: " .. tostring(pd.species))
+        local showcase = showcase_by_id[pd.id]
+        local species_id = showcase and showcase.species or "neutral"
+        local species_data = species_by_id[species_id]
+        assert(species_data, "unknown species: " .. tostring(species_id))
         local effective_stats = species.apply(pd.stats, species_data)
         local base = anchors[i]
         -- Outfield anchors shift with the tactic; the keeper (i == 1) stays home.
@@ -751,12 +763,14 @@ local function marking_of(tactic)
         or { scheme = "hybrid", man_marks = 1, standoff = 32, compactness = 0.5, support = 0.5 }
 end
 
----@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, human_controlled: boolean?, input_ownership: InputOwnership? }
+---@param opts { home: TeamData, away: TeamData, field: { w: number, h: number }, home_formation: string?, tactic: TacticData?, away_tactic: TacticData?, duration: number?, max_goals: integer?, seed: number?, players_by_id: table<string, PlayerData>?, species_by_id: table<string, SpeciesData>?, showcase_players_by_id: table<string, ShowcasePlayerCompatibilityData>?, human_controlled: boolean?, input_ownership: InputOwnership? }
 ---@return MatchState
 function match.new(opts)
     local field = opts.field
     local by_id = opts.players_by_id or pool_by_id()
     local species_by_id = opts.species_by_id or species_pool
+    local showcase_by_id = opts.showcase_players_by_id
+        or require("data.showcase_player_compatibility")
     local home_tactic = opts.tactic or tactics.balanced
     local away_tactic = opts.away_tactic or tactics.balanced
 
@@ -773,11 +787,20 @@ function match.new(opts)
         field,
         by_id,
         species_by_id,
+        showcase_by_id,
         opts.home_formation,
         home_tactic.line_shift
     )
-    local away =
-        build_team(opts.away, "away", field, by_id, species_by_id, nil, away_tactic.line_shift)
+    local away = build_team(
+        opts.away,
+        "away",
+        field,
+        by_id,
+        species_by_id,
+        showcase_by_id,
+        nil,
+        away_tactic.line_shift
+    )
     local players = {}
     for _, p in ipairs(home) do
         players[#players + 1] = p

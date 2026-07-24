@@ -1,6 +1,6 @@
 local focus = require("game.ui.focus")
+local identity = require("game.presentation.identity")
 local player_pool = require("data.players")
-local species_pool = require("data.species")
 local teams = require("data.teams")
 
 ---@class SquadScreenContext
@@ -100,8 +100,8 @@ function squad.layout(state)
     }
 
     for i, player in ipairs(state.roster) do
-        local species_id = player.presentation_species or player.species
-        local species = species_pool[species_id]
+        local presentation =
+            assert(identity.for_player(player.id), "missing showcase identity: " .. player.id)
         local col = (i - 1) % 2
         local row = math.floor((i - 1) / 2)
         local id = "player_" .. player.id
@@ -110,21 +110,21 @@ function squad.layout(state)
             kind = "card",
             text = ("%s  •  %s %s\nPAC %d  STR %d  TEC %d  STA %d  MEN %d\n%s"):format(
                 player.name,
-                species.name,
+                presentation.species_name,
                 player.position:upper(),
                 player.stats.pace,
                 player.stats.strength,
                 player.stats.technique,
                 player.stats.stamina,
                 player.stats.mental,
-                species.tagline
+                presentation.tagline
             ),
             selected = contains(state.selected_ids, player.id),
             focused = state.focus == id,
             rect = { x = 62 + col * 424, y = 96 + row * 86, w = 390, h = 74 },
             data = {
-                accent = species.palette,
-                species_shape = species.shape,
+                accent = presentation.palette,
+                species_shape = presentation.shape,
                 locked = player.position == "keeper",
             },
         }
