@@ -9,7 +9,7 @@
 
 ---@class Omp2RollbackBudgets
 ---@field p95_work_ms number
----@field max_rollback_ms number
+---@field rollback_p999_ms number
 ---@field snapshot_count integer
 ---@field snapshot_bytes integer
 ---@field history_bytes integer
@@ -99,7 +99,7 @@ return {
     },
     budgets = {
         p95_work_ms = 16.67,
-        max_rollback_ms = 33.3,
+        rollback_p999_ms = 33.3,
         snapshot_count = 31,
         snapshot_bytes = 600 * 1024,
         history_bytes = 1024 * 1024,

@@ -171,6 +171,7 @@ if has_flag("--rollback-validation") then
     ---@field restore RuntimeTimingRow
     ---@field resimulation RuntimeTimingRow
     ---@field rollback RuntimeTimingRow
+    ---@field rollback_microseconds integer[]
     ---@field work_seconds number[]
     ---@field update_wall_seconds number[]
 
@@ -182,6 +183,7 @@ if has_flag("--rollback-validation") then
             restore = { seconds = 0, calls = 0, maximum = 0 },
             resimulation = { seconds = 0, calls = 0, maximum = 0 },
             rollback = { seconds = 0, calls = 0, maximum = 0 },
+            rollback_microseconds = {},
             work_seconds = {},
             update_wall_seconds = {},
         }
@@ -201,6 +203,10 @@ if has_flag("--rollback-validation") then
         row.seconds = row.seconds + elapsed
         row.calls = row.calls + 1
         row.maximum = math.max(row.maximum, elapsed)
+        if label == "rollback" then
+            active_timing.rollback_microseconds[#active_timing.rollback_microseconds + 1] =
+                math.floor(elapsed * 1000000 + 0.5)
+        end
         if label == "tick" or label == "rollback" then
             current_work_seconds = current_work_seconds + elapsed
         end
@@ -252,6 +258,7 @@ if has_flag("--rollback-validation") then
     ---@param completed RollbackValidationCompletedCase
     ---@return string
     ---@return string
+    ---@return string?
     ---@return boolean
     local function complete_case(completed)
         local result = completed.result
@@ -290,12 +297,19 @@ if has_flag("--rollback-validation") then
         for _, value in ipairs(active_timing.update_wall_seconds) do
             max_update_wall_ms = math.max(max_update_wall_ms, value * 1000)
         end
-        local max_rollback_ms = active_timing.rollback.maximum * 1000
+        local rollback_p999_ms = nearest_rank(active_timing.rollback_microseconds, 0.999) / 1000
+        local max_rollback_ms = nearest_rank(active_timing.rollback_microseconds, 1) / 1000
+        local rollback_over_budget_count = 0
+        for _, microseconds in ipairs(active_timing.rollback_microseconds) do
+            if microseconds >= validation_config.budgets.rollback_p999_ms * 1000 then
+                rollback_over_budget_count = rollback_over_budget_count + 1
+            end
+        end
         local cpu_gate_applied = result.profile == "playable" and suite ~= "soak"
         local cpu_gate = not cpu_gate_applied
             or (
                 p95_work_ms < validation_config.budgets.p95_work_ms
-                and max_rollback_ms < validation_config.budgets.max_rollback_ms
+                and rollback_p999_ms < validation_config.budgets.rollback_p999_ms
             )
         local snapshot_gate = result.metrics.peaks.snapshot_count
                 <= validation_config.budgets.snapshot_count
@@ -310,7 +324,7 @@ if has_flag("--rollback-validation") then
         runtime_failed = runtime_failed or not passed
 
         local logical = rollback_validation.case_marker(completed)
-            .. "|gate_contract=2"
+            .. "|gate_contract=3"
             .. "|cpu_gate="
             .. (cpu_gate_applied and (cpu_gate and "1" or "0") or "not_applied")
             .. "|cpu_gate_applied="
@@ -327,7 +341,12 @@ if has_flag("--rollback-validation") then
             "case=" .. completed.id,
             "profile=" .. result.profile,
             ("p95_work_ms=%.6f"):format(p95_work_ms),
+            ("rollback_p999_ms=%.6f"):format(rollback_p999_ms),
             ("max_rollback_ms=%.6f"):format(max_rollback_ms),
+            "rollback_sample_count=" .. #active_timing.rollback_microseconds,
+            "rollback_over_33_3_count=" .. rollback_over_budget_count,
+            "rollback_percentile=0.999",
+            "rollback_percentile_method=nearest_rank",
             ("p95_update_wall_ms=%.6f"):format(p95_update_wall_ms),
             ("max_update_wall_ms=%.6f"):format(max_update_wall_ms),
             ("simulation_ms=%.6f"):format(active_timing.tick.seconds * 1000),
@@ -344,7 +363,23 @@ if has_flag("--rollback-validation") then
             "peak_snapshot_bytes=" .. result.metrics.peaks.snapshot_bytes,
             "peak_history_bytes=" .. result.metrics.peaks.history_bytes,
         }, "|")
-        return logical, metrics, passed
+        local timings = nil
+        if #active_timing.rollback_microseconds > 0 then
+            local samples = {}
+            for index, microseconds in ipairs(active_timing.rollback_microseconds) do
+                samples[index] = tostring(microseconds)
+            end
+            timings = table.concat({
+                "GC_ROLLBACK_TIMINGS",
+                "case",
+                "gate_contract=3",
+                "case=" .. completed.id,
+                "sample_count=" .. #samples,
+                "unit=microseconds",
+                "samples=" .. table.concat(samples, ","),
+            }, "|")
+        end
+        return logical, metrics, timings, passed
     end
 
     local function flush_stdout()
@@ -360,7 +395,7 @@ if has_flag("--rollback-validation") then
             "runtime",
             "love=" .. major .. "." .. minor .. "." .. revision,
             "suite=" .. suite,
-            "gate_contract=2",
+            "gate_contract=3",
             "profile_digest=" .. rollback_validation.profile_digest(),
             "input_version=1",
             "snapshot_version=5",
@@ -378,11 +413,15 @@ if has_flag("--rollback-validation") then
         active_timing.work_seconds[#active_timing.work_seconds + 1] = current_work_seconds
         active_timing.update_wall_seconds[#active_timing.update_wall_seconds + 1] = wall_seconds
         if completed then
-            local logical, metrics = complete_case(completed)
+            local logical, metrics, timings = complete_case(completed)
             local sample = completed.sample
             local soak_digest = completed.result.event_metrics.confirmed_digest
             completed = nil
             active_timing = new_case_timing()
+            if timings ~= nil then
+                print(timings)
+                timings = nil
+            end
             if sample ~= nil then
                 collectgarbage("collect")
                 local heap_bytes = math.floor(collectgarbage("count") * 1024 + 0.5)

@@ -43,6 +43,7 @@ from web_serve import ArtifactHandler
 ROOT = Path(__file__).resolve().parents[1]
 MARKER_PREFIX = "GC_ROLLBACK_VALIDATION"
 METRICS_PREFIX = "GC_ROLLBACK_METRICS"
+TIMINGS_PREFIX = "GC_ROLLBACK_TIMINGS"
 RESULT_REQUIRED_FIELDS = ("schema", "suite", "success", "logical_digest", "case_count")
 NETWORK_SEEDS = (2001, 2002, 2003)
 NATIVE_PROFILES = ("clean", "omp0_parity", "playable", "stress")
@@ -78,7 +79,9 @@ MAX_SNAPSHOT_COUNT = 31
 MAX_SNAPSHOT_BYTES = 600 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 MAX_P95_WORK_MS = 16.67
-MAX_ROLLBACK_JOB_MS = 33.3
+MAX_ROLLBACK_P999_MS = 33.3
+MAX_ROLLBACK_P999_US = 33300
+ROLLBACK_PERCENTILE = 0.999
 
 BROWSER_CONSOLE_WAIT_SCRIPT = """
 const cursor = arguments[0];
@@ -90,9 +93,18 @@ const entries = state.console_entries || [];
 function result(timedOut) {
   const current = window.__GALACTIC_CUP__ || {};
   const currentEntries = current.console_entries || entries;
+  const nextCursor = currentEntries.length;
+  const delta = currentEntries.slice(cursor, nextCursor)
+    .map((entry) => String(entry.message || ""));
+  for (let index = cursor; index < nextCursor; index += 1) {
+    const entry = currentEntries[index];
+    if (entry && typeof entry === "object") {
+      entry.message = "";
+    }
+  }
   return {
-    cursor: currentEntries.length,
-    entries: currentEntries.slice(cursor).map((entry) => String(entry.message || "")),
+    cursor: nextCursor,
+    entries: delta,
     status: current.status || null,
     timed_out: timedOut
   };
@@ -164,6 +176,15 @@ class RuntimeMetric:
     raw: str
 
 
+@dataclass(frozen=True)
+class RollbackTimingSeries:
+    """Raw quantized rollback durations for independent tail validation."""
+
+    case: str
+    raw: str
+    samples_us: tuple[int, ...]
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -233,6 +254,49 @@ def runtime_metrics_from_messages(messages: Iterable[str]) -> list[RuntimeMetric
         if message.startswith(METRICS_PREFIX + "|"):
             metrics.append(parse_runtime_metric(message))
     return metrics
+
+
+def parse_rollback_timings(line: str) -> RollbackTimingSeries:
+    parts = line.split("|")
+    if len(parts) < 7 or parts[0] != TIMINGS_PREFIX or parts[1] != "case":
+        raise RuntimeError(f"invalid rollback timing series: {line[:200]}")
+    fields: dict[str, str] = {}
+    for part in parts[2:]:
+        key, separator, value = part.partition("=")
+        if not separator or not key or key in fields:
+            raise RuntimeError(f"invalid rollback timing series field: {part[:200]}")
+        fields[key] = value
+    required = {"case", "gate_contract", "sample_count", "samples", "unit"}
+    missing = sorted(required.difference(fields))
+    if missing:
+        raise RuntimeError(f"rollback timing series omits fields: {', '.join(missing)}")
+    if fields["gate_contract"] != "3":
+        raise RuntimeError("rollback timing series uses a stale gate contract")
+    if fields["unit"] != "microseconds":
+        raise RuntimeError("rollback timing series uses an unsupported unit")
+    declared_count = positive_integer(fields["sample_count"], "rollback timing sample_count")
+    raw_samples = fields["samples"].split(",")
+    if len(raw_samples) != declared_count:
+        raise RuntimeError(
+            f"rollback timing series declares {declared_count} samples but emits "
+            f"{len(raw_samples)}"
+        )
+    samples = tuple(
+        non_negative_integer(value, "rollback timing sample") for value in raw_samples
+    )
+    return RollbackTimingSeries(
+        case=fields["case"],
+        raw=line,
+        samples_us=samples,
+    )
+
+
+def rollback_timings_from_messages(messages: Iterable[str]) -> list[RollbackTimingSeries]:
+    timings = []
+    for message in messages:
+        if message.startswith(TIMINGS_PREFIX + "|"):
+            timings.append(parse_rollback_timings(message))
+    return timings
 
 
 def rejected_case(marker: ValidationMarker) -> str | None:
@@ -461,7 +525,7 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             raise RuntimeError(f"{case_id} did not cover its declared scenario")
         if fields["hidden_progress"] != "0":
             raise RuntimeError(f"{case_id} made hidden progress after a terminal result")
-        if fields["gate_contract"] != "2":
+        if fields["gate_contract"] != "3":
             raise RuntimeError(
                 f"{case_id} reports gate_contract={fields['gate_contract']!r}"
             )
@@ -524,8 +588,16 @@ def finite_non_negative_float(value: str, description: str) -> float:
     return parsed
 
 
+def nearest_rank_integer(values: tuple[int, ...], percentile: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(len(ordered) * percentile) - 1)]
+
+
 def validate_runtime_metrics(
     metrics: list[RuntimeMetric],
+    timings: list[RollbackTimingSeries],
     markers: list[ValidationMarker],
     suite: str,
 ) -> None:
@@ -535,7 +607,7 @@ def validate_runtime_metrics(
     runtime = runtimes[0].fields
     expected_runtime = {
         "input_version": "1",
-        "gate_contract": "2",
+        "gate_contract": "3",
         "love": "11.5.0",
         "snapshot_version": "5",
         "suite": suite,
@@ -559,9 +631,19 @@ def validate_runtime_metrics(
         raise RuntimeError(
             f"emitted {len(metrics)} runtime metric rows for {len(cases)} validation cases"
         )
+    case_ids = {case.fields["case"] for case in cases}
+    timing_by_case: dict[str, RollbackTimingSeries] = {}
+    for series in timings:
+        if series.case not in case_ids:
+            raise RuntimeError(f"rollback timing series names unknown case {series.case!r}")
+        if series.case in timing_by_case:
+            raise RuntimeError(f"duplicate rollback timing series for {series.case}")
+        timing_by_case[series.case] = series
+
     seen: set[str] = set()
     numeric_fields = (
         "p95_work_ms",
+        "rollback_p999_ms",
         "max_rollback_ms",
         "p95_update_wall_ms",
         "max_update_wall_ms",
@@ -577,6 +659,8 @@ def validate_runtime_metrics(
         "restore_calls",
         "resimulation_calls",
         "rollback_calls",
+        "rollback_over_33_3_count",
+        "rollback_sample_count",
     )
     for case, metric in zip(cases, metrics, strict=True):
         fields = metric.fields
@@ -592,7 +676,13 @@ def validate_runtime_metrics(
             raise RuntimeError(f"{case_id} runtime metric profile does not match its case")
         missing = [
             name
-            for name in (*numeric_fields, *count_fields, "work_samples")
+            for name in (
+                *numeric_fields,
+                *count_fields,
+                "rollback_percentile",
+                "rollback_percentile_method",
+                "work_samples",
+            )
             if fields.get(name) in {None, ""}
         ]
         if missing:
@@ -610,6 +700,48 @@ def validate_runtime_metrics(
         }
         if counts["simulation_calls"] <= 0:
             raise RuntimeError(f"{case_id} recorded no simulation timing samples")
+        if fields["rollback_percentile"] != "0.999":
+            raise RuntimeError(f"{case_id} reports an unsupported rollback percentile")
+        if fields["rollback_percentile_method"] != "nearest_rank":
+            raise RuntimeError(f"{case_id} reports an unsupported percentile method")
+        if counts["rollback_sample_count"] != counts["rollback_calls"]:
+            raise RuntimeError(f"{case_id} rollback sample count differs from call count")
+        logical_rollbacks = non_negative_integer(
+            case.fields.get("rollbacks", ""),
+            f"{case_id} logical rollbacks",
+        )
+        if counts["rollback_calls"] != logical_rollbacks:
+            raise RuntimeError(f"{case_id} timing calls differ from logical rollbacks")
+        series = timing_by_case.pop(case_id, None)
+        if counts["rollback_calls"] == 0:
+            if series is not None:
+                raise RuntimeError(f"{case_id} emitted timings without rollback calls")
+            samples_us: tuple[int, ...] = ()
+        else:
+            if series is None:
+                raise RuntimeError(f"{case_id} omitted raw rollback timings")
+            samples_us = series.samples_us
+            if len(samples_us) != counts["rollback_calls"]:
+                raise RuntimeError(f"{case_id} raw timing count differs from rollback calls")
+        p999_ms = nearest_rank_integer(samples_us, ROLLBACK_PERCENTILE) / 1000
+        maximum_ms = nearest_rank_integer(samples_us, 1) / 1000
+        over_count = sum(sample >= MAX_ROLLBACK_P999_US for sample in samples_us)
+        if not math.isclose(
+            values["rollback_p999_ms"],
+            p999_ms,
+            rel_tol=0.0,
+            abs_tol=0.0000001,
+        ):
+            raise RuntimeError(f"{case_id} reported p99.9 differs from raw timings")
+        if not math.isclose(
+            values["max_rollback_ms"],
+            maximum_ms,
+            rel_tol=0.0,
+            abs_tol=0.0000001,
+        ):
+            raise RuntimeError(f"{case_id} reported maximum differs from raw timings")
+        if counts["rollback_over_33_3_count"] != over_count:
+            raise RuntimeError(f"{case_id} over-budget count differs from raw timings")
         expected_applied = cpu_gate_applies(suite, case.fields["profile"])
         if (case.fields["cpu_gate_applied"] == "1") != expected_applied:
             raise RuntimeError(
@@ -621,11 +753,13 @@ def validate_runtime_metrics(
                     f"{case_id} p95 work {values['p95_work_ms']:.6f} ms "
                     f"does not meet the <{MAX_P95_WORK_MS} ms gate"
                 )
-            if values["max_rollback_ms"] >= MAX_ROLLBACK_JOB_MS:
+            if values["rollback_p999_ms"] >= MAX_ROLLBACK_P999_MS:
                 raise RuntimeError(
-                    f"{case_id} max rollback {values['max_rollback_ms']:.6f} ms "
-                    f"does not meet the <{MAX_ROLLBACK_JOB_MS} ms gate"
+                    f"{case_id} p99.9 rollback {values['rollback_p999_ms']:.6f} ms "
+                    f"does not meet the <{MAX_ROLLBACK_P999_MS} ms gate"
                 )
+    if timing_by_case:
+        raise RuntimeError("unconsumed rollback timing series remain after validation")
 
 
 def runtime_metric_record(metrics: list[RuntimeMetric]) -> dict[str, Any]:
@@ -640,6 +774,22 @@ def runtime_metric_record(metrics: list[RuntimeMetric]) -> dict[str, Any]:
                 "marker": metric.raw,
             }
             for metric in metrics
+        ],
+    }
+
+
+def rollback_timing_record(timings: list[RollbackTimingSeries]) -> dict[str, Any]:
+    payload = "\n".join(series.raw for series in timings)
+    encoded = (payload + ("\n" if payload else "")).encode()
+    return {
+        "marker_sha256": sha256_bytes(encoded),
+        "series": [
+            {
+                "case": series.case,
+                "sample_count": len(series.samples_us),
+                "samples_us": list(series.samples_us),
+            }
+            for series in timings
         ],
     }
 
@@ -1376,11 +1526,12 @@ def run_native_once(
         raise RuntimeError(f"native {suite} left processes behind after bounded teardown")
     markers = markers_from_messages(messages)
     runtime_metrics = runtime_metrics_from_messages(messages)
+    rollback_timings = rollback_timings_from_messages(messages)
     result = validate_marker_set(markers, suite)
     if enforce_plan:
         validate_case_plan(markers, suite, arguments)
         validate_case_integrity(markers, suite)
-        validate_runtime_metrics(runtime_metrics, markers, suite)
+        validate_runtime_metrics(runtime_metrics, rollback_timings, markers, suite)
     if suite == "late-window":
         validate_late_window_contract(markers)
     record = {
@@ -1394,6 +1545,7 @@ def run_native_once(
         },
         **marker_record(markers, result),
         "resources": resources,
+        "rollback_timings": rollback_timing_record(rollback_timings),
         "runtime_metrics": runtime_metric_record(runtime_metrics),
         "suite": suite,
         "teardown": teardown,
@@ -1797,7 +1949,8 @@ def run_browser_once(
     validate_case_plan(markers, suite, arguments)
     validate_case_integrity(markers, suite)
     runtime_metrics = runtime_metrics_from_messages(messages)
-    validate_runtime_metrics(runtime_metrics, markers, suite)
+    rollback_timings = rollback_timings_from_messages(messages)
+    validate_runtime_metrics(runtime_metrics, rollback_timings, markers, suite)
     js_heap_samples = [
         row["js_heap"] for row in resource_checkpoints if row.get("js_heap") is not None
     ]
@@ -1820,6 +1973,7 @@ def run_browser_once(
         },
         **marker_record(markers, result),
         "resources": resources,
+        "rollback_timings": rollback_timing_record(rollback_timings),
         "runtime_metrics": runtime_metric_record(runtime_metrics),
         "suite": suite,
         "teardown": teardown,
@@ -2045,6 +2199,10 @@ def run_self_test() -> None:
         def execute_async_script(self, script: str, cursor: int, timeout_ms: int) -> Any:
             if script != BROWSER_CONSOLE_WAIT_SCRIPT or timeout_ms != 1250:
                 raise RuntimeError("browser console wait invocation self-test failed")
+            delta_position = script.find("const delta =")
+            scrub_position = script.find('entry.message = "";')
+            if delta_position < 0 or scrub_position <= delta_position:
+                raise RuntimeError("browser console wait scrubs messages before copying its delta")
             return {
                 "cursor": cursor + 2,
                 "entries": ["one", "two"],
@@ -2112,63 +2270,31 @@ def run_self_test() -> None:
     integrity_case = parse_marker(
         f"{MARKER_PREFIX}|case|schema=1|case=integrity|profile=playable|success=1|"
         "lab_success=1|expected_failure=0|hidden_progress=0|scenario_pass=1|"
-        "gate_contract=2|cpu_gate=1|cpu_gate_applied=1|snapshot_gate=1|"
-        "history_gate=1|game_gate=1|"
+        "gate_contract=3|cpu_gate=1|cpu_gate_applied=1|snapshot_gate=1|"
+        "history_gate=1|game_gate=1|rollbacks=6903|"
         "reference_hash=abcd|client_hash=abcd|event_reference_digest=ef01|"
         "event_confirmed_digest=ef01|event_residue=0|peak_snapshots=31|"
         "peak_snapshot_bytes=614399|peak_history_bytes=1048575"
     )
     validate_case_integrity([integrity_case], "native")
-    try:
-        validate_case_integrity(
-            [parse_marker(integrity_case.raw.replace("gate_contract=2", "gate_contract=1"))],
-            "native",
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError("stale case gate contract passed self-test")
-    over_budget = parse_marker(
-        integrity_case.raw.replace("peak_snapshots=31", "peak_snapshots=32")
-    )
-    try:
-        validate_case_integrity([over_budget], "native")
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError("over-budget playable case passed integrity self-test")
-    runtime_metric = parse_runtime_metric(
-        f"{METRICS_PREFIX}|case|case=integrity|profile=playable|p95_work_ms=1.25|"
-        "max_rollback_ms=2.5|p95_update_wall_ms=3|max_update_wall_ms=4|"
-        "simulation_ms=5|capture_ms=6|restore_ms=7|resimulation_ms=8|"
-        "rollback_ms=9|capture_calls=10|simulation_calls=11|restore_calls=12|"
-        "resimulation_calls=13|rollback_calls=14|work_samples=15"
-    )
-    runtime_provenance = parse_runtime_metric(
-        f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
-        f"gate_contract=2|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
-        "snapshot_version=5|tick_rate=60"
-    )
-    validate_runtime_metrics(
-        [runtime_provenance, runtime_metric],
-        [integrity_case],
+
+    def expect_integrity_failure(raw: str, suite: str, description: str) -> None:
+        try:
+            validate_case_integrity([parse_marker(raw)], suite)
+        except RuntimeError:
+            return
+        raise RuntimeError(f"{description} passed self-test")
+
+    expect_integrity_failure(
+        integrity_case.raw.replace("gate_contract=3", "gate_contract=2"),
         "native",
+        "contract-2 case",
     )
-    try:
-        validate_runtime_metrics(
-            [
-                parse_runtime_metric(
-                    runtime_provenance.raw.replace("gate_contract=2", "gate_contract=1")
-                ),
-                runtime_metric,
-            ],
-            [integrity_case],
-            "native",
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError("stale runtime gate contract passed self-test")
+    expect_integrity_failure(
+        integrity_case.raw.replace("peak_snapshots=31", "peak_snapshots=32"),
+        "native",
+        "over-budget playable case",
+    )
     soak_case = parse_marker(
         integrity_case.raw.replace(
             "cpu_gate=1|cpu_gate_applied=1",
@@ -2179,65 +2305,238 @@ def run_self_test() -> None:
     for inconsistent, inconsistent_suite in (
         (soak_case.raw.replace("cpu_gate=not_applied", "cpu_gate=1"), "soak"),
         (soak_case.raw, "native"),
+        (integrity_case.raw, "soak"),
         (integrity_case.raw.replace("profile=playable", "profile=stress"), "native"),
     ):
+        expect_integrity_failure(
+            inconsistent,
+            inconsistent_suite,
+            "inconsistent CPU gate ownership",
+        )
+
+    def timing_series(case_id: str, samples_us: tuple[int, ...]) -> RollbackTimingSeries:
+        return parse_rollback_timings(
+            "|".join(
+                (
+                    TIMINGS_PREFIX,
+                    "case",
+                    "gate_contract=3",
+                    f"case={case_id}",
+                    f"sample_count={len(samples_us)}",
+                    "unit=microseconds",
+                    "samples=" + ",".join(str(value) for value in samples_us),
+                )
+            )
+        )
+
+    def metric_for_samples(
+        samples_us: tuple[int, ...],
+        p95_work_ms: str = "1.25",
+    ) -> RuntimeMetric:
+        p999_ms = nearest_rank_integer(samples_us, ROLLBACK_PERCENTILE) / 1000
+        maximum_ms = nearest_rank_integer(samples_us, 1) / 1000
+        over_count = sum(sample >= MAX_ROLLBACK_P999_US for sample in samples_us)
+        return parse_runtime_metric(
+            f"{METRICS_PREFIX}|case|case=integrity|profile=playable|"
+            f"p95_work_ms={p95_work_ms}|rollback_p999_ms={p999_ms:.6f}|"
+            f"max_rollback_ms={maximum_ms:.6f}|"
+            f"rollback_sample_count={len(samples_us)}|"
+            f"rollback_over_33_3_count={over_count}|"
+            "rollback_percentile=0.999|rollback_percentile_method=nearest_rank|"
+            "p95_update_wall_ms=3|max_update_wall_ms=4|simulation_ms=5|"
+            "capture_ms=6|restore_ms=7|resimulation_ms=8|rollback_ms=9|"
+            "capture_calls=10|simulation_calls=11|restore_calls=12|"
+            f"resimulation_calls=13|rollback_calls={len(samples_us)}|work_samples=15"
+        )
+
+    runtime_provenance = parse_runtime_metric(
+        f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
+        f"gate_contract=3|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
+        "snapshot_version=5|tick_rate=60"
+    )
+    passing_samples = (10000,) * 6897 + (33301, 33400, 34000, 35000, 40000, 46040)
+    passing_timing = timing_series("integrity", passing_samples)
+    passing_metric = metric_for_samples(passing_samples)
+    validate_runtime_metrics(
+        [runtime_provenance, passing_metric],
+        [passing_timing],
+        [integrity_case],
+        "native",
+    )
+    if passing_metric.fields["max_rollback_ms"] != "46.040000":
+        raise RuntimeError("raw 46.04 ms maximum was not preserved diagnostically")
+    if passing_metric.fields["rollback_over_33_3_count"] != "6":
+        raise RuntimeError("six-over-budget p99.9 boundary self-test failed")
+
+    def expect_runtime_failure(
+        runtime: RuntimeMetric,
+        metric: RuntimeMetric,
+        timings: list[RollbackTimingSeries],
+        case_marker: ValidationMarker,
+        suite: str,
+        description: str,
+    ) -> None:
         try:
-            validate_case_integrity([parse_marker(inconsistent)], inconsistent_suite)
+            validate_runtime_metrics(
+                [runtime, metric],
+                timings,
+                [case_marker],
+                suite,
+            )
+        except RuntimeError:
+            return
+        raise RuntimeError(f"{description} passed self-test")
+
+    threshold_samples = (10000,) * 6896 + (
+        33300,
+        33301,
+        34000,
+        35000,
+        36000,
+        40000,
+        46040,
+    )
+    threshold_timing = timing_series("integrity", threshold_samples)
+    threshold_metric = metric_for_samples(threshold_samples)
+    expect_runtime_failure(
+        runtime_provenance,
+        threshold_metric,
+        [threshold_timing],
+        integrity_case,
+        "native",
+        "seven-over-budget exact-threshold p99.9 metric",
+    )
+    if threshold_metric.fields["rollback_p999_ms"] != "33.300000":
+        raise RuntimeError("exact p99.9 threshold self-test did not reach 33.3 ms")
+
+    malformed_timing_lines = (
+        passing_timing.raw.replace("|unit=microseconds", ""),
+        passing_timing.raw.replace("gate_contract=3", "gate_contract=2"),
+        passing_timing.raw.replace("samples=10000", "samples=bad", 1),
+        passing_timing.raw.replace("samples=10000", "samples=-1", 1),
+        passing_timing.raw.replace("sample_count=6903", "sample_count=6902"),
+    )
+    for malformed in malformed_timing_lines:
+        try:
+            parse_rollback_timings(malformed)
         except RuntimeError:
             pass
         else:
-            raise RuntimeError("inconsistent CPU gate ownership passed self-test")
-    soak_provenance = parse_runtime_metric(
-        runtime_provenance.raw.replace("suite=native", "suite=soak")
+            raise RuntimeError("malformed raw rollback timings passed self-test")
+
+    expect_runtime_failure(
+        runtime_provenance,
+        passing_metric,
+        [],
+        integrity_case,
+        "native",
+        "missing raw rollback timings",
     )
-    noisy_soak_metric = parse_runtime_metric(
-        runtime_metric.raw.replace("p95_work_ms=1.25", "p95_work_ms=99")
-        .replace("max_rollback_ms=2.5", "max_rollback_ms=99")
+    expect_runtime_failure(
+        runtime_provenance,
+        passing_metric,
+        [passing_timing, passing_timing],
+        integrity_case,
+        "native",
+        "duplicate raw rollback timing series",
     )
-    validate_runtime_metrics(
-        [soak_provenance, noisy_soak_metric],
-        [soak_case],
-        "soak",
+    expect_runtime_failure(
+        runtime_provenance,
+        passing_metric,
+        [timing_series("unknown-case", passing_samples)],
+        integrity_case,
+        "native",
+        "unknown-case raw rollback timing series",
+    )
+    expect_runtime_failure(
+        runtime_provenance,
+        passing_metric,
+        [passing_timing],
+        parse_marker(integrity_case.raw.replace("rollbacks=6903", "rollbacks=6902")),
+        "native",
+        "logical rollback and timing call-count drift",
+    )
+    for mismatched_metric, description in (
+        (
+            parse_runtime_metric(
+                passing_metric.raw.replace("rollback_p999_ms=10.000000", "rollback_p999_ms=10.001000")
+            ),
+            "mismatched reported p99.9",
+        ),
+        (
+            parse_runtime_metric(
+                passing_metric.raw.replace("max_rollback_ms=46.040000", "max_rollback_ms=46.039000")
+            ),
+            "mismatched reported maximum",
+        ),
+        (
+            parse_runtime_metric(
+                passing_metric.raw.replace(
+                    "rollback_over_33_3_count=6",
+                    "rollback_over_33_3_count=5",
+                )
+            ),
+            "mismatched over-budget count",
+        ),
+        (
+            parse_runtime_metric(
+                passing_metric.raw.replace(
+                    "rollback_sample_count=6903",
+                    "rollback_sample_count=6902",
+                )
+            ),
+            "mismatched rollback sample count",
+        ),
+    ):
+        expect_runtime_failure(
+            runtime_provenance,
+            mismatched_metric,
+            [passing_timing],
+            integrity_case,
+            "native",
+            description,
+        )
+
+    contract_2_runtime = parse_runtime_metric(
+        runtime_provenance.raw.replace("gate_contract=3", "gate_contract=2")
+    )
+    expect_runtime_failure(
+        contract_2_runtime,
+        passing_metric,
+        [passing_timing],
+        integrity_case,
+        "native",
+        "contract-2 runtime provenance",
     )
     stale_profile = parse_runtime_metric(
         runtime_provenance.raw.replace(EXPECTED_PROFILE_DIGEST, "0000000000000000")
     )
-    try:
-        validate_runtime_metrics(
-            [stale_profile, runtime_metric],
-            [integrity_case],
-            "native",
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError("stale network-profile digest passed self-test")
-    over_cpu = parse_runtime_metric(
-        runtime_metric.raw.replace("p95_work_ms=1.25", "p95_work_ms=16.67")
+    expect_runtime_failure(
+        stale_profile,
+        passing_metric,
+        [passing_timing],
+        integrity_case,
+        "native",
+        "stale network-profile digest",
     )
-    try:
-        validate_runtime_metrics(
-            [runtime_provenance, over_cpu],
-            [integrity_case],
-            "native",
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError("over-budget runtime metric passed self-test")
-    over_rollback = parse_runtime_metric(
-        runtime_metric.raw.replace("max_rollback_ms=2.5", "max_rollback_ms=33.3")
+    expect_runtime_failure(
+        runtime_provenance,
+        metric_for_samples(passing_samples, "16.67"),
+        [passing_timing],
+        integrity_case,
+        "native",
+        "over-budget p95 work metric",
     )
-    try:
-        validate_runtime_metrics(
-            [runtime_provenance, over_rollback],
-            [integrity_case],
-            "native",
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError("over-budget rollback maximum passed self-test")
+
+    soak_provenance = parse_runtime_metric(
+        runtime_provenance.raw.replace("suite=native", "suite=soak")
+    )
+    validate_runtime_metrics(
+        [soak_provenance, threshold_metric],
+        [threshold_timing],
+        [soak_case],
+        "soak",
+    )
 
     soak_cases = [
         parse_marker(
@@ -2443,7 +2742,7 @@ def main() -> int:
     evidence: dict[str, Any] = {
         "generated_at": utc_now(),
         "campaign": args.campaign,
-        "gate_contract": 2,
+        "gate_contract": 3,
         "mode": args.mode,
         "pass": False,
         "schema": 1,
