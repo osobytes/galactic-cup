@@ -1,6 +1,7 @@
 local Vec2 = require("core.vec2")
 local combat = require("sim.combat")
 local combat_identity = require("sim.combat_identity")
+local determinism_evidence = require("sim.determinism_evidence")
 local fixed_clock = require("sim.fixed_clock")
 local input_frame = require("sim.input_frame")
 local input_tape = require("sim.input_tape")
@@ -201,6 +202,10 @@ local function early_finish_tape()
 end
 
 t.describe("OMP-2 authoritative-reference rollback laboratory", function()
+    t.it("pins the live soccer tape digest without a synthetic combat segment", function()
+        t.eq(rollback_lab.tape_digest(determinism_evidence.fixture_tape()), "d89f7fc53d660ab7")
+    end)
+
     t.it("converges combat state and confirmed events through delayed authority", function()
         local tape = combat_tape()
         local result = rollback_lab.run(tape, {

@@ -374,6 +374,13 @@ local function tape_digest(tape)
     return fnv1a64.hex(state)
 end
 
+---@param tape InputTape
+---@return string
+function rollback_lab.tape_digest(tape)
+    assert(input_tape.validate_structure(tape))
+    return tape_digest(tape)
+end
+
 ---@param measure RollbackSessionMeasure?
 ---@param operation fun(): any
 ---@return any

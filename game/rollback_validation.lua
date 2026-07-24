@@ -29,6 +29,7 @@ local rollback_events = require("sim.rollback_events")
 ---@class RollbackValidationFinishOptions
 ---@field home_team_id string
 ---@field away_team_id string
+---@field initial_combat_state CombatMatchState?
 ---@field reference_final_state MatchState?
 ---@field impaired_final_state MatchState?
 ---@field reference_final_score { home: integer, away: integer }?
@@ -262,8 +263,9 @@ local function owner_team(state)
 end
 
 ---@param initial_state MatchState
+---@param initial_combat_state CombatMatchState?
 ---@return RollbackValidationAudit
-function rollback_validation.new(initial_state)
+function rollback_validation.new(initial_state, initial_combat_state)
     audio.reset()
     effects.reset()
     replay.reset()
@@ -276,7 +278,9 @@ function rollback_validation.new(initial_state)
     return {
         reference_observer = match_observer.new(initial_state),
         impaired_observer = match_observer.new(initial_state),
-        reference_timeline = rollback_events.new(match_snapshot.capture(initial_state)),
+        reference_timeline = rollback_events.new(
+            match_snapshot.capture(initial_state, initial_combat_state)
+        ),
         reference_ids = {},
         reference_events = {},
         impaired_ids = {},
@@ -313,7 +317,9 @@ function rollback_validation.new(initial_state)
         impaired_observer_steps = 0,
         replay_record_count = 0,
         replay_truncate_count = 0,
-        replay_state = match_snapshot.restore(match_snapshot.capture(initial_state)),
+        replay_state = match_snapshot.restore(
+            match_snapshot.capture(initial_state, initial_combat_state)
+        ),
     }
 end
 
@@ -737,7 +743,7 @@ end
 ---@param finish_options RollbackValidationFinishOptions
 ---@return RollbackValidationReport
 function rollback_validation.run(initial_state, trace, finish_options)
-    local audit = rollback_validation.new(initial_state)
+    local audit = rollback_validation.new(initial_state, finish_options.initial_combat_state)
     for _, row in ipairs(trace) do
         if row.kind == "reference_step" then
             observe_raw_reference_step(audit, row.step --[[@as RollbackEventStepInput]])

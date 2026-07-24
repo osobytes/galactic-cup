@@ -150,14 +150,35 @@ t.describe("rollback session", function()
         local combat_state = combat.new_state(state)
         local source_player = nil
         for index, runtime in ipairs(combat_state.players) do
-            if runtime.family_id == "ranged" then
+            if runtime.family_id == "light_melee" then
                 source_player = index
                 break
             end
         end
-        source_player = assert(source_player, "fixture requires one ranged player")
+        source_player = assert(source_player, "fixture requires one melee player")
+        local target_player = nil
+        for index, player in ipairs(state.players) do
+            if player.team ~= state.players[source_player].team and not player.is_keeper then
+                target_player = index
+                break
+            end
+        end
+        target_player = assert(target_player, "fixture requires an opposing target")
+        for index, player in ipairs(state.players) do
+            player.pos = Vec2.new(700 + index, 400 + index)
+            player.vel = Vec2.new(0, 0)
+            player.run_vel = Vec2.new(0, 0)
+        end
+        state.players[source_player].pos = Vec2.new(300, 270)
+        state.players[source_player].facing = Vec2.new(1, 0)
+        state.players[target_player].pos = Vec2.new(335, 270)
+        state.players[target_player].facing = Vec2.new(-1, 0)
+        state.owner = target_player
+        state.ball = state.players[target_player].pos
+        state.ball_vel = Vec2.new(0, 0)
+        state.pickup_cd = 1
         local source_slot =
-            assert(state.slot_for_player[source_player], "ranged player requires an input slot")
+            assert(state.slot_for_player[source_player], "melee player requires an input slot")
         local initial = match_snapshot.capture(state, combat_state)
         local predicted = rollback_session.new(initial, sources())
         local predicted_output = assert(rollback_session.step(predicted))
@@ -197,12 +218,27 @@ t.describe("rollback session", function()
             )
         end
         assert(rollback_session.step(expected))
+        local saw_contact = false
+        local saw_spill = false
+        for tick = 1, 15 do
+            add_neutral_tick(predicted, tick)
+            add_neutral_tick(expected, tick)
+            local output = assert(rollback_session.step(predicted))
+            assert(rollback_session.step(expected))
+            for _, event in ipairs(output.combat_events or {}) do
+                saw_contact = saw_contact or event.kind == "contact"
+                saw_spill = saw_spill or event.kind == "ball_spill"
+            end
+        end
+        t.is_true(saw_contact)
+        t.is_true(saw_spill)
         local comparison =
             rollback_session.compare(predicted, rollback_session.current_snapshot(expected), 0)
         t.is_true(comparison.matched)
         local final = rollback_session.current_snapshot(predicted)
-        t.eq(assert(final.combat).players[source_player].phase, "windup")
+        t.is_true(assert(final.combat).players[target_player].forced_ticks > 0)
         t.eq(final.combat.next_source_sequence, 2)
+        t.eq(final.state.owner, nil)
     end)
 
     t.it("keeps measured operations under session ownership", function()

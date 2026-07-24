@@ -132,6 +132,9 @@ local function assert_array(value, path, expected)
             path .. " is not a canonical array"
         )
     end
+    for index = 1, count do
+        assert(value[index] ~= nil, path .. " has a hole")
+    end
 end
 
 ---@param value any

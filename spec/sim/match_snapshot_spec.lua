@@ -149,6 +149,55 @@ t.describe("canonical match snapshots", function()
         t.is_true(not pcall(match_snapshot.capture, restored))
     end)
 
+    t.it("rejects holes in authoritative combat projectile and event arrays", function()
+        local state = new_state()
+        state.kickoff_hold = 0
+        local combat_state = combat.new_state(state)
+        local source_index = nil
+        for index, runtime in ipairs(combat_state.players) do
+            if runtime.family_id == "ranged" then
+                source_index = index
+                break
+            end
+        end
+        source_index = assert(source_index, "fixture requires one ranged loadout")
+        combat_state.projectiles[1] = {
+            family_id = "ranged",
+            source_index = source_index,
+            source_sequence = 1,
+            pos = Vec2.new(111, 222),
+            dir = Vec2.new(1, 0),
+            remaining_ticks = 12,
+        }
+        combat_state.events[1] = {
+            kind = "projectile_spawn",
+            tick = 0,
+            family_id = "ranged",
+            source_index = source_index,
+            target_index = nil,
+            source_sequence = 1,
+            result = nil,
+            x = 111,
+            y = 222,
+            interruption_ticks = nil,
+            displacement_px = nil,
+        }
+        combat_state.next_source_sequence = 2
+        state.input_tick = 1
+        combat_state.tick = 1
+
+        for _, field in ipairs({ "projectiles", "events" }) do
+            local malformed = match_snapshot.capture(state, combat_state)
+            local values = assert(malformed.combat)[field]
+            values[2] = values[1]
+            values[3] = values[1]
+            values[4] = values[1]
+            values[2] = nil
+            t.eq(#values, 4, "hole fixture must retain its authoritative tail")
+            t.is_true(not pcall(match_snapshot.restore, malformed), field .. " hole was accepted")
+        end
+    end)
+
     t.it("replays combat phase boundaries exactly after restore", function()
         ---@type { name: string, configure: fun(combat_state: CombatMatchState, family: table<string, integer>, state: MatchState) }[]
         local cases = {

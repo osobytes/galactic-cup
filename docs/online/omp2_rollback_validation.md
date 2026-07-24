@@ -129,7 +129,17 @@ The 31-boundary limit and exact 1-MiB total-history gate are unchanged. Direct
 phase-boundary restore/replay tests cover wind-up, active contact, guard,
 projectile flight/expiry, stagger, knockback, and immunity; a dense delayed
 authority campaign additionally proves composite convergence and confirmed
-combat-event equality without duplicating the hour-long cross-browser matrix.
+combat-event equality. A pinned 80-tick combat fixture now joins every native
+profile/common-seed pair, every browser full/stress case, and each soak seed,
+so MatchSnapshot v6/InputTape v2 crosses clean, fixed delay/loss, playable
+jitter/loss/duplication/burst/reordering, and stress paths in fresh processes.
+The clean 2001 baseline records 14 confirmed combat events, a 688,660-byte
+31-snapshot peak, and 743,170 bytes of retained history; both remain below the
+revised gates. The playable 2001 case performs eight rollbacks and 20
+resimulated ticks, peaks at 688,660 snapshot bytes and 742,367 history bytes,
+and records 1.998037 ms p95 work plus 2.614 ms p99.9/max rollback time. Each
+case emits its exact snapshot/history/resimulation values and the validator
+rejects a combat impaired-network case that performs no resimulation.
 Browser evidence waits inside the page for newly appended console entries and returns only the
 delta at each marker. It does not poll and reserialize the cumulative console array through
 WebDriver every frame interval, because those protocol allocations would contaminate Chrome's

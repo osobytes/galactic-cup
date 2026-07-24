@@ -274,19 +274,40 @@ function Match:consume_rollback_event_diff(diff)
     return true
 end
 
+-- Publish one stable rollback step to presentation consumers. Match and combat
+-- action records share the same confirmation ledger; lifecycle records retain
+-- their screen-owned transitions on top.
+---@param step RollbackEventStep
+---@return integer consumed_count
+function Match:consume_confirmed_step(step)
+    local consumed_count = 0
+    for _, event in ipairs(step.match_events) do
+        effects.confirm_event(event.id)
+        if audio.consume_confirmed(event) then
+            consumed_count = consumed_count + 1
+        end
+    end
+    for _, event in ipairs(step.combat_events or {}) do
+        effects.confirm_event(event.id)
+        if audio.consume_confirmed(event) then
+            consumed_count = consumed_count + 1
+        end
+    end
+    for _, event in ipairs(step.lifecycle_events) do
+        if self:consume_confirmed_lifecycle(event) then
+            consumed_count = consumed_count + 1
+        end
+    end
+    return consumed_count
+end
+
 ---@param self MatchScreen
 local function consume_rollback_presentation(self)
     for _, diff in ipairs(self._rollback_event_diffs) do
         self:consume_rollback_event_diff(diff)
     end
     for _, step in ipairs(self._rollback_confirmed_steps) do
-        for _, event in ipairs(step.match_events) do
-            effects.confirm_event(event.id)
-            audio.consume_confirmed(event)
-        end
-        for _, event in ipairs(step.lifecycle_events) do
-            self:consume_confirmed_lifecycle(event)
-        end
+        self:consume_confirmed_step(step)
     end
     if self._pending_confirmed_kickoff and not replay.active() then
         self._kickoff_banner = 1.15
