@@ -417,7 +417,6 @@ def validate_run_linkage(run: dict[str, Any], context: DiscoveryContext) -> str:
     head = require_object(pull_request.get("head"), "pull-request head")
     head_repo = require_object(head.get("repo"), "pull-request head repository")
     require_exact(head.get("ref"), context.head_branch, "pull-request head ref")
-    require_exact(head.get("sha"), revision, "pull-request head revision")
     require_exact(
         head_repo.get("id"),
         context.head_repository_id,
@@ -736,7 +735,7 @@ def run_self_test() -> None:
         assert relevant.run and HEX_DIGEST.fullmatch(relevant.fingerprint)
 
         write_fixture(repo, "docs/readme.md", "follow-up\n")
-        commit_fixture(repo, "docs follow-up")
+        follow_up_revision = commit_fixture(repo, "docs follow-up")
         follow_up = decide_scope(repo, "pull_request", pr_base_sha=base)
         assert follow_up.run and follow_up.fingerprint == relevant.fingerprint
 
@@ -751,6 +750,9 @@ def run_self_test() -> None:
         context = fixture_context(relevant.fingerprint, base)
         fresh_run = fixture_run(context, 100, producer_revision)
         validate_run_linkage(fresh_run, context)
+        mutable_linkage = json.loads(json.dumps(fresh_run))
+        mutable_linkage["pull_requests"][0]["head"]["sha"] = follow_up_revision
+        assert validate_run_linkage(mutable_linkage, context) == producer_revision
         jobs = fixture_jobs()
         validate_jobs(jobs)
         validate_artifacts(fixture_artifacts())
