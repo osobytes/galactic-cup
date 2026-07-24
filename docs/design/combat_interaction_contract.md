@@ -45,6 +45,28 @@ catch-up update emits an edge on its first fixed tick only. Missing-input
 prediction repeats axes and held intent but clears both equipment edges. It
 never invents a release or repeats an attack.
 
+The producer collapses button chatter between fixed ticks to at most one
+canonical transition sequence:
+
+| Previous sampled state | Final physical state | Canonical sample |
+| --- | --- | --- |
+| Up, no transition | Up | neither edge; held false |
+| Up, one or more transitions ending down | Down | press only; held true |
+| Up, a completed tap ending up | Up | press **then** release; both edges; held false |
+| Down, no transition | Down | neither edge; held true |
+| Down, one or more transitions ending up | Up | release only; held false |
+| Down, release/re-press chatter ending down | Down | press only; held true |
+
+This deliberately permits only one action commit per zero-tick interval.
+`pressed + released + held` is invalid; when both edges are set, their order is
+always press then release and held must be false. Family handling is:
+
+- unarmed/light melee commit once from the press; the release has no effect;
+- guard completes its raise and immediately enters lower/recovery without an
+  active held interval;
+- ranged latches the release, completes its minimum aim, fires once, and
+  enters recovery.
+
 Issue #109 will assign versioned bit values. It must bump the input contract
 rather than reinterpret version-1 bits. The frame contains intent only:
 presentation ids, family ids, target ids, legal-target results, contacts, and
@@ -118,6 +140,11 @@ other soccer rule.
 - Friendly players never receive combat contacts.
 - There is no carrier-only rule, active-challenger flag, nearest-target snap,
   or target lock.
+- One action or projectile resolves at most one combat contact. If several
+  opponents qualify on the same tick, choose the nearest along the facing or
+  travel direction, breaking an exact tie by stable match-player index. A
+  projectile expires on that first contact even when guard or immunity
+  prevents its outcome.
 - Off-ball contacts are legal. Wind-up, recovery, cooldown, lost formation,
   and AI utility scoring make purposeless harassment costly.
 - Goalkeepers cannot equip or initiate combat and are ignored by combat
@@ -138,7 +165,7 @@ READY --attack press--> WIND_UP --> ACTIVE --> RECOVERY --> READY
   |
   +--ranged press--> AIM_WIND_UP --> AIM --release--> PROJECTILE + RECOVERY
 
-STAGGER or KNOCKBACK --> RECOVERY_IMMUNITY --> READY
+STAGGER or KNOCKBACK --> READY + RECOVERY_IMMUNITY_TIMER
 ```
 
 Rules shared by committed equipment states:
@@ -167,13 +194,19 @@ win. An ignored edge is not queued for later.
 | Juke / dodge | No | Juke wins and supplies combat immunity |
 | Equipment wind-up, active, aim, guard, or recovery | Already committed | Ignore new soccer/equipment edges |
 | Aerial reception, strike, or recovery | No | Finish aerial state |
-| Stagger, knockback, or recovery immunity transition | No while forced | Finish forced state |
+| Stagger or knockback | No | Finish forced state |
+| Recovery immunity timer only | Yes | Player acts normally; incoming combat outcomes are suppressed |
 | Kickoff hold | No | Enable equipment only after play becomes live |
 | Goalkeeper | Never | Keeper has no combat loadout |
 
 Holding guard or ranged input through an ineligible state does not synthesize a
 press edge. The source must release and press again. This prevents local,
 recorded, and predicted input from disagreeing about when an action began.
+
+Ordinary sprinting does not block an equipment press. Once equipment commits,
+the family movement multiplier replaces the sprint boost and sprint stamina
+does not drain; a still-held sprint resumes only after recovery. A simultaneous
+slide/tackle edge still wins arbitration.
 
 ## Dodge and anti-chain protection
 
@@ -219,13 +252,14 @@ does not silently accept a repeated-family lineup.
 | Carrier is hit unguarded | Spill plus the family interruption/displacement |
 | Carrier guards from the front | Combat spill/stagger prevented; soccer tackle remains legal |
 | Active challenger is in arc | Same geometry rules as every other outfielder; no privileged target flag |
-| Loose ball | Combat may move/interupt outfielders but cannot spill an unowned ball |
+| Loose ball | Combat may move/interrupt outfielders but cannot spill an unowned ball |
 | Keeper possession | Keeper remains immune; existing stand-off/distribution rules remain |
 | Outfielder in penalty area | Normal combat target; the area is not a safe zone |
 | Aerial contest | Equipment input ignored until aerial state and recovery finish |
 | Kickoff hold | Equipment disabled until the ball is live |
 | Off-ball opponent | Legal geometric target; full commitment/cooldown applies |
 | Missing predicted input | Held aim/guard may persist; press/release edges are always cleared |
+| Fast equipment tap between ticks | Both edges mean press then release: one strike, guard raise/lower, or one ranged shot after minimum aim |
 | Repeated hit attempt | Immunity prevents added disable/spill while every attacker pays commitment |
 
 ## Downstream implementation obligations
