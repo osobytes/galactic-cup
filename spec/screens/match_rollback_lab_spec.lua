@@ -114,6 +114,20 @@ local function start_actual_goal_replay(screen)
 end
 
 t.describe("match screen rollback laboratory (tier 2)", function()
+    t.it("constructs the combat companion for an explicit rollback playtest", function()
+        local screen = Match.new({
+            combat_enabled = true,
+            rollback_lab = {
+                local_slot = 2,
+                profile_name = "clean",
+            },
+        })
+        t.is_true(screen._combat_state ~= nil)
+        local snapshot = rollback_playable_lab.current_snapshot(assert(screen._rollback_lab))
+        t.is_true(snapshot.combat ~= nil)
+        t.eq(assert(snapshot.combat).player_ids[2], screen.state.players[2].id)
+    end)
+
     t.it("is an explicit development-only slot-mode option", function()
         local ok = pcall(function()
             Match.new({
@@ -342,7 +356,7 @@ t.describe("match screen rollback laboratory (tier 2)", function()
             screen._last_home = 4
             screen._last_scoring_team = "home"
             screen._kickoff_banner = 0
-            screen._replay_state = screen.state
+            screen._replay_state = screen.state --[[@as ReplayFrame]]
             screen:event({ kind = "key", key = "k" })
 
             screen:event({ kind = "key", key = "r" })
