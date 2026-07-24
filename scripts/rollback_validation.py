@@ -82,6 +82,14 @@ MAX_P95_WORK_MS = 16.67
 MAX_ROLLBACK_P999_MS = 33.3
 MAX_ROLLBACK_P999_US = 33300
 ROLLBACK_PERCENTILE = 0.999
+GATE_CONTRACT = "5"
+MAX_BROWSER_P95_WORK_RATIO = 6.7
+MAX_BROWSER_ROLLBACK_P999_RATIO = 11.7
+BROWSER_CPU_CALIBRATION_RUNS = ("30060058593", "30065880550")
+BROWSER_CPU_DIAGNOSTIC_RUN = "30075505461"
+BROWSER_CPU_CALIBRATION_MARGIN = 0.15
+BROWSER_CPU_CALIBRATION_MAX_P95_WORK_RATIO = 13.975 / 2.410
+BROWSER_CPU_CALIBRATION_MAX_ROLLBACK_P999_RATIO = 24.800 / 2.440
 
 BROWSER_CONSOLE_WAIT_SCRIPT = """
 const cursor = arguments[0];
@@ -276,7 +284,7 @@ def parse_rollback_timings(line: str) -> RollbackTimingSeries:
     missing = sorted(required.difference(fields))
     if missing:
         raise RuntimeError(f"rollback timing series omits fields: {', '.join(missing)}")
-    if fields["gate_contract"] != "4":
+    if fields["gate_contract"] != GATE_CONTRACT:
         raise RuntimeError("rollback timing series uses a stale gate contract")
     if fields["unit"] != "microseconds":
         raise RuntimeError("rollback timing series uses an unsupported unit")
@@ -488,13 +496,25 @@ def validate_case_plan(
             )
 
 
-def cpu_gate_applies(suite: str, profile: str) -> bool:
-    """Derive CPU-gate ownership from the pinned campaign contract."""
+def cpu_gate_mode(suite: str, profile: str, browser_runtime: bool) -> str:
+    """Derive per-case CPU ownership from the pinned campaign contract."""
 
-    return profile == "playable" and suite != "soak"
+    if profile != "playable" or suite == "soak":
+        return "diagnostic"
+    if browser_runtime:
+        if suite != "browser-full":
+            raise RuntimeError(
+                f"{suite} cannot defer playable CPU acceptance to the browser aggregate"
+            )
+        return "normalized_deferred"
+    return "absolute"
 
 
-def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None:
+def validate_case_integrity(
+    markers: list[ValidationMarker],
+    suite: str,
+    browser_runtime: bool = False,
+) -> None:
     for marker in (row for row in markers if row.kind == "case"):
         fields = marker.fields
         case_id = fields.get("case", "<unknown>")
@@ -502,6 +522,7 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             "client_hash",
             "cpu_gate",
             "cpu_gate_applied",
+            "cpu_gate_mode",
             "event_confirmed_digest",
             "event_reference_digest",
             "event_residue",
@@ -531,7 +552,7 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             raise RuntimeError(f"{case_id} did not cover its declared scenario")
         if fields["hidden_progress"] != "0":
             raise RuntimeError(f"{case_id} made hidden progress after a terminal result")
-        if fields["gate_contract"] != "4":
+        if fields["gate_contract"] != GATE_CONTRACT:
             raise RuntimeError(
                 f"{case_id} reports gate_contract={fields['gate_contract']!r}"
             )
@@ -539,16 +560,27 @@ def validate_case_integrity(markers: list[ValidationMarker], suite: str) -> None
             raise RuntimeError(
                 f"{case_id} reports cpu_gate_applied={fields['cpu_gate_applied']!r}"
             )
-        expected_applied = cpu_gate_applies(suite, fields["profile"])
+        expected_mode = cpu_gate_mode(suite, fields["profile"], browser_runtime)
+        if fields["cpu_gate_mode"] != expected_mode:
+            raise RuntimeError(
+                f"{case_id} reports cpu_gate_mode={fields['cpu_gate_mode']!r}, "
+                f"expected {expected_mode!r}"
+            )
+        expected_applied = expected_mode == "absolute"
         if (fields["cpu_gate_applied"] == "1") != expected_applied:
             raise RuntimeError(
                 f"{case_id} CPU gate ownership differs from the {suite} contract"
             )
-        expected_cpu_gate = "1" if expected_applied else "not_applied"
-        if fields["cpu_gate"] != expected_cpu_gate:
+        if expected_mode == "absolute":
+            expected_cpu_gates = {"1"}
+        elif expected_mode == "normalized_deferred":
+            expected_cpu_gates = {"deferred"}
+        else:
+            expected_cpu_gates = {"not_applied"}
+        if fields["cpu_gate"] not in expected_cpu_gates:
             raise RuntimeError(
                 f"{case_id} reports cpu_gate={fields['cpu_gate']!r} "
-                f"with cpu_gate_applied={fields['cpu_gate_applied']!r}"
+                f"for cpu_gate_mode={fields['cpu_gate_mode']!r}"
             )
         for gate in ("snapshot_gate", "history_gate", "game_gate"):
             if fields[gate] != "1":
@@ -606,6 +638,7 @@ def validate_runtime_metrics(
     timings: list[RollbackTimingSeries],
     markers: list[ValidationMarker],
     suite: str,
+    browser_runtime: bool = False,
 ) -> None:
     runtimes = [metric for metric in metrics if metric.kind == "runtime"]
     if len(runtimes) != 1:
@@ -613,7 +646,7 @@ def validate_runtime_metrics(
     runtime = runtimes[0].fields
     expected_runtime = {
         "input_version": "1",
-        "gate_contract": "4",
+        "gate_contract": GATE_CONTRACT,
         "love": "11.5.0",
         "snapshot_version": "5",
         "suite": suite,
@@ -798,7 +831,8 @@ def validate_runtime_metrics(
                 raise RuntimeError(f"{case_id} reported maximum differs from raw timings")
             if counts["rollback_over_33_3_count"] != recomputed_over_count:
                 raise RuntimeError(f"{case_id} over-budget count differs from raw timings")
-        expected_applied = cpu_gate_applies(suite, case.fields["profile"])
+        expected_mode = cpu_gate_mode(suite, case.fields["profile"], browser_runtime)
+        expected_applied = expected_mode == "absolute"
         if (case.fields["cpu_gate_applied"] == "1") != expected_applied:
             raise RuntimeError(
                 f"{case_id} CPU metric ownership differs from the {suite} contract"
@@ -2010,10 +2044,16 @@ def run_browser_once(
     if result is None:
         raise RuntimeError(f"{browser_name} {suite} produced no validated result")
     validate_case_plan(markers, suite, arguments)
-    validate_case_integrity(markers, suite)
+    validate_case_integrity(markers, suite, browser_runtime=True)
     runtime_metrics = runtime_metrics_from_messages(messages)
     rollback_timings = rollback_timings_from_messages(messages)
-    validate_runtime_metrics(runtime_metrics, rollback_timings, markers, suite)
+    validate_runtime_metrics(
+        runtime_metrics,
+        rollback_timings,
+        markers,
+        suite,
+        browser_runtime=True,
+    )
     js_heap_samples = [
         row["js_heap"] for row in resource_checkpoints if row.get("js_heap") is not None
     ]
@@ -2092,6 +2132,263 @@ def browser_suite_timeout_seconds(suite: str, timeout_seconds: int) -> int:
     return timeout_seconds
 
 
+def browser_cpu_case(
+    run: dict[str, Any],
+    browser_name: str,
+    run_index: int,
+) -> tuple[tuple[str, str] | None, dict[str, Any] | None, list[str]]:
+    """Extract one exact clean/playable control row without trusting its plan position."""
+
+    label = f"{browser_name} browser-full run {run_index}"
+    reasons: list[str] = []
+    if run.get("browser") != browser_name:
+        reasons.append(
+            f"{label} reports browser={run.get('browser')!r}, expected {browser_name!r}"
+        )
+    arguments = run.get("arguments")
+    if not isinstance(arguments, list) or len(arguments) != 2:
+        reasons.append(f"{label} has malformed arguments")
+        return None, None, reasons
+    profile, seed = arguments
+    if profile not in BROWSER_FULL_PROFILES:
+        reasons.append(f"{label} has unexpected profile {profile!r}")
+        return None, None, reasons
+    if seed not in {str(value) for value in NETWORK_SEEDS}:
+        reasons.append(f"{label} has unexpected network seed {seed!r}")
+        return None, None, reasons
+    key = (profile, seed)
+    expected_case = f"full-{profile}-{seed}"
+
+    raw_markers = run.get("markers")
+    if not isinstance(raw_markers, list):
+        reasons.append(f"{label} omits validation markers")
+        return key, None, reasons
+    try:
+        markers = [parse_marker(raw) for raw in raw_markers if isinstance(raw, str)]
+    except RuntimeError as error:
+        reasons.append(f"{label} has malformed validation markers: {error}")
+        return key, None, reasons
+    case_markers = [marker for marker in markers if marker.kind == "case"]
+    if len(case_markers) != 1:
+        reasons.append(
+            f"{label} has {len(case_markers)} case markers, expected exactly one"
+        )
+        return key, None, reasons
+    marker = case_markers[0]
+    expected_marker = {
+        "case": expected_case,
+        "network_seed": seed,
+        "profile": profile,
+    }
+    marker_mismatches = [
+        f"{name}={marker.fields.get(name)!r}"
+        for name, value in expected_marker.items()
+        if marker.fields.get(name) != value
+    ]
+    if marker_mismatches:
+        reasons.append(f"{label} marker mismatch: {', '.join(marker_mismatches)}")
+        return key, None, reasons
+
+    runtime_metrics = run.get("runtime_metrics")
+    rows = runtime_metrics.get("rows") if isinstance(runtime_metrics, dict) else None
+    if not isinstance(rows, list):
+        reasons.append(f"{label} omits runtime metric rows")
+        return key, None, reasons
+    case_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("kind") == "case"
+    ]
+    if len(case_rows) != 1:
+        reasons.append(
+            f"{label} has {len(case_rows)} case metrics, expected exactly one"
+        )
+        return key, None, reasons
+    fields = case_rows[0].get("fields")
+    if not isinstance(fields, dict):
+        reasons.append(f"{label} case metric fields are malformed")
+        return key, None, reasons
+    if fields.get("case") != expected_case or fields.get("profile") != profile:
+        reasons.append(
+            f"{label} metric identifies case={fields.get('case')!r}, "
+            f"profile={fields.get('profile')!r}; expected {expected_case!r}, {profile!r}"
+        )
+        return key, None, reasons
+
+    numeric_names = (
+        "max_rollback_ms",
+        "p95_work_ms",
+        "rollback_p999_ms",
+    )
+    numeric: dict[str, float] = {}
+    for name in numeric_names:
+        value = fields.get(name)
+        if not isinstance(value, str):
+            reasons.append(f"{label} omits {name}")
+            continue
+        try:
+            numeric[name] = finite_non_negative_float(value, f"{label} {name}")
+        except RuntimeError as error:
+            reasons.append(str(error))
+    over_count = fields.get("rollback_over_33_3_count")
+    try:
+        parsed_over_count = (
+            non_negative_integer(over_count, f"{label} rollback_over_33_3_count")
+            if isinstance(over_count, str)
+            else None
+        )
+    except RuntimeError as error:
+        reasons.append(str(error))
+        parsed_over_count = None
+    if parsed_over_count is None:
+        reasons.append(f"{label} omits a valid rollback_over_33_3_count")
+    if reasons:
+        return key, None, reasons
+    return (
+        key,
+        {
+            "case": expected_case,
+            "max_rollback_ms": numeric["max_rollback_ms"],
+            "p95_work_ms": numeric["p95_work_ms"],
+            "rollback_over_33_3_count": parsed_over_count,
+            "rollback_p999_ms": numeric["rollback_p999_ms"],
+        },
+        [],
+    )
+
+
+def browser_cpu_acceptance(
+    runs: list[dict[str, Any]],
+    browser_name: str,
+) -> dict[str, Any]:
+    """Apply the strict same-run, same-runtime, seed-paired browser CPU contract."""
+
+    reasons: list[str] = []
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    browser_versions: set[str] = set()
+    for run_index, run in enumerate(runs, start=1):
+        if run.get("suite") != "browser-full":
+            continue
+        browser_version = run.get("browser_version")
+        if isinstance(browser_version, str) and browser_version:
+            browser_versions.add(browser_version)
+        else:
+            reasons.append(
+                f"{browser_name} browser-full run {run_index} omits browser_version"
+            )
+        key, row, row_reasons = browser_cpu_case(run, browser_name, run_index)
+        reasons.extend(row_reasons)
+        if key is None or row is None:
+            continue
+        if key in rows:
+            reasons.append(
+                f"{browser_name} has duplicate {key[0]} control for seed {key[1]}"
+            )
+            continue
+        rows[key] = row
+    if len(browser_versions) != 1:
+        reasons.append(
+            f"{browser_name} controls report {len(browser_versions)} browser versions, "
+            "expected exactly one"
+        )
+
+    pairs: list[dict[str, Any]] = []
+    for seed_value in NETWORK_SEEDS:
+        seed = str(seed_value)
+        clean = rows.get(("clean", seed))
+        playable = rows.get(("playable", seed))
+        if clean is None:
+            reasons.append(f"{browser_name} is missing the clean control for seed {seed}")
+        if playable is None:
+            reasons.append(f"{browser_name} is missing the playable case for seed {seed}")
+        if clean is None or playable is None:
+            continue
+        clean_p95 = clean["p95_work_ms"]
+        if not math.isfinite(clean_p95) or clean_p95 <= 0:
+            reasons.append(
+                f"{browser_name} seed {seed} clean p95 denominator must be finite and >0"
+            )
+            continue
+        p95_ratio = playable["p95_work_ms"] / clean_p95
+        rollback_ratio = playable["rollback_p999_ms"] / clean_p95
+        pair_reasons = []
+        if p95_ratio >= MAX_BROWSER_P95_WORK_RATIO:
+            pair_reasons.append(
+                f"{browser_name} seed {seed} p95_work_ratio={p95_ratio:.9f} "
+                f"does not meet <{MAX_BROWSER_P95_WORK_RATIO:.1f}"
+            )
+        if rollback_ratio >= MAX_BROWSER_ROLLBACK_P999_RATIO:
+            pair_reasons.append(
+                f"{browser_name} seed {seed} rollback_p999_ratio={rollback_ratio:.9f} "
+                f"does not meet <{MAX_BROWSER_ROLLBACK_P999_RATIO:.1f}"
+            )
+        reasons.extend(pair_reasons)
+        pairs.append(
+            {
+                "absolute_diagnostics": {
+                    "clean_p95_work_ms": clean_p95,
+                    "playable_max_rollback_ms": playable["max_rollback_ms"],
+                    "playable_p95_work_ms": playable["p95_work_ms"],
+                    "playable_rollback_over_33_3_count": playable[
+                        "rollback_over_33_3_count"
+                    ],
+                    "playable_rollback_p999_ms": playable["rollback_p999_ms"],
+                },
+                "pass": not pair_reasons,
+                "ratios": {
+                    "p95_work_over_clean_p95": round(p95_ratio, 9),
+                    "rollback_p999_over_clean_p95": round(rollback_ratio, 9),
+                },
+                "reasons": pair_reasons,
+                "seed": seed_value,
+            }
+        )
+    expected_keys = {
+        (profile, str(seed))
+        for profile in BROWSER_FULL_PROFILES
+        for seed in NETWORK_SEEDS
+    }
+    unexpected_keys = sorted(set(rows).difference(expected_keys))
+    for profile, seed in unexpected_keys:
+        reasons.append(
+            f"{browser_name} has unexpected {profile} control for seed {seed}"
+        )
+    if len(rows) != len(expected_keys):
+        reasons.append(
+            f"{browser_name} collected {len(rows)} unique clean/playable rows, "
+            f"expected {len(expected_keys)}"
+        )
+    return {
+        "browser": browser_name,
+        "browser_version": (
+            next(iter(browser_versions)) if len(browser_versions) == 1 else None
+        ),
+        "calibration": {
+            "accepted_run_ids": list(BROWSER_CPU_CALIBRATION_RUNS),
+            "diagnostic_failed_run_id": BROWSER_CPU_DIAGNOSTIC_RUN,
+            "margin_over_accepted_maximum": BROWSER_CPU_CALIBRATION_MARGIN,
+            "max_accepted_p95_work_ratio": round(
+                BROWSER_CPU_CALIBRATION_MAX_P95_WORK_RATIO,
+                9,
+            ),
+            "max_accepted_rollback_p999_ratio": round(
+                BROWSER_CPU_CALIBRATION_MAX_ROLLBACK_P999_RATIO,
+                9,
+            ),
+        },
+        "gate_contract": int(GATE_CONTRACT),
+        "method": "same_run_same_runtime_seed_paired",
+        "pairs": pairs,
+        "pass": not reasons and len(pairs) == len(NETWORK_SEEDS),
+        "reasons": reasons,
+        "thresholds": {
+            "comparison": "strict_less_than",
+            "max_p95_work_over_clean_p95": MAX_BROWSER_P95_WORK_RATIO,
+            "max_rollback_p999_over_clean_p95": MAX_BROWSER_ROLLBACK_P999_RATIO,
+        },
+    }
+
+
 def browser_matrix(
     evidence: dict[str, Any],
     artifact: Path,
@@ -2163,6 +2460,17 @@ def browser_matrix(
                     raise RuntimeError(
                         f"{browser_name} soak exceeded the 10% terminal "
                         "forced-GC growth gate"
+                    )
+            if campaign in {"all", "matrix"}:
+                cpu_acceptance = browser_cpu_acceptance(
+                    runtime["runs"],
+                    browser_name,
+                )
+                runtime["cpu_acceptance"] = cpu_acceptance
+                if not cpu_acceptance["pass"]:
+                    reason = "; ".join(cpu_acceptance["reasons"])
+                    raise RuntimeError(
+                        f"{browser_name} aggregate browser CPU acceptance failed: {reason}"
                     )
     finally:
         server.shutdown()
@@ -2368,6 +2676,177 @@ def run_self_test() -> None:
         != native_campaign_plan()
     ):
         raise RuntimeError("split native campaigns do not reconstruct the full plan")
+
+    calibrated_p95 = (
+        math.ceil(
+            BROWSER_CPU_CALIBRATION_MAX_P95_WORK_RATIO
+            * (1 + BROWSER_CPU_CALIBRATION_MARGIN)
+            * 10
+        )
+        / 10
+    )
+    calibrated_rollback = (
+        math.ceil(
+            BROWSER_CPU_CALIBRATION_MAX_ROLLBACK_P999_RATIO
+            * (1 + BROWSER_CPU_CALIBRATION_MARGIN)
+            * 10
+        )
+        / 10
+    )
+    if (
+        calibrated_p95 != MAX_BROWSER_P95_WORK_RATIO
+        or calibrated_rollback != MAX_BROWSER_ROLLBACK_P999_RATIO
+    ):
+        raise RuntimeError("browser CPU calibration margin self-test failed")
+
+    def synthetic_browser_cpu_run(
+        profile: str,
+        seed: int,
+        p95_work_ms: float,
+        rollback_p999_ms: float,
+        *,
+        browser_name: str = "firefox",
+        browser_version: str = "self-test",
+        marker_seed: int | None = None,
+    ) -> dict[str, Any]:
+        emitted_seed = marker_seed or seed
+        case_id = f"full-{profile}-{emitted_seed}"
+        return {
+            "arguments": [profile, str(seed)],
+            "browser": browser_name,
+            "browser_version": browser_version,
+            "markers": [
+                f"{MARKER_PREFIX}|case|case={case_id}|profile={profile}|"
+                f"network_seed={emitted_seed}"
+            ],
+            "runtime_metrics": {
+                "rows": [
+                    {
+                        "fields": {
+                            "case": f"full-{profile}-{seed}",
+                            "max_rollback_ms": f"{rollback_p999_ms + 1:.6f}",
+                            "p95_work_ms": f"{p95_work_ms:.6f}",
+                            "profile": profile,
+                            "rollback_over_33_3_count": "0",
+                            "rollback_p999_ms": f"{rollback_p999_ms:.6f}",
+                        },
+                        "kind": "case",
+                    }
+                ]
+            },
+            "suite": "browser-full",
+        }
+
+    def synthetic_browser_cpu_matrix(
+        scale: float,
+        rollback_regression_seeds: tuple[int, ...] = (),
+    ) -> list[dict[str, Any]]:
+        runs = []
+        for profile in BROWSER_FULL_PROFILES:
+            for index, seed in enumerate(NETWORK_SEEDS):
+                clean_p95 = (2.0 + index * 0.25) * scale
+                if profile == "clean":
+                    p95_work = clean_p95
+                    rollback_p999 = 0.0
+                else:
+                    p95_work = clean_p95 * 5.5
+                    rollback_ratio = 9.5
+                    if seed in rollback_regression_seeds:
+                        rollback_ratio = MAX_BROWSER_ROLLBACK_P999_RATIO + 0.1
+                    rollback_p999 = clean_p95 * rollback_ratio
+                runs.append(
+                    synthetic_browser_cpu_run(
+                        profile,
+                        seed,
+                        p95_work,
+                        rollback_p999,
+                    )
+                )
+        return runs
+
+    proportional_slowdown = browser_cpu_acceptance(
+        synthetic_browser_cpu_matrix(1.8),
+        "firefox",
+    )
+    if not proportional_slowdown["pass"] or len(proportional_slowdown["pairs"]) != 3:
+        raise RuntimeError("proportional browser slowdown did not pass normalization")
+    rollback_regression = browser_cpu_acceptance(
+        synthetic_browser_cpu_matrix(1.0, rollback_regression_seeds=(2001, 2002)),
+        "firefox",
+    )
+    if rollback_regression["pass"] or not all(
+        any(
+            f"seed {seed} rollback_p999_ratio" in reason
+            for reason in rollback_regression["reasons"]
+        )
+        for seed in (2001, 2002)
+    ):
+        raise RuntimeError("aggregate browser CPU failure omitted a regressing pair")
+    complete_controls = synthetic_browser_cpu_matrix(1.0)
+    missing_control = browser_cpu_acceptance(complete_controls[:-1], "firefox")
+    if missing_control["pass"] or not any(
+        "missing the playable case for seed 2003" in reason
+        for reason in missing_control["reasons"]
+    ):
+        raise RuntimeError("missing browser CPU control passed normalization")
+    duplicate_control = browser_cpu_acceptance(
+        [*complete_controls, complete_controls[0]],
+        "firefox",
+    )
+    if duplicate_control["pass"] or not any(
+        "duplicate clean control for seed 2001" in reason
+        for reason in duplicate_control["reasons"]
+    ):
+        raise RuntimeError("duplicate browser CPU control passed normalization")
+    mismatched_controls = [
+        synthetic_browser_cpu_run(
+            "clean",
+            2001,
+            2.0,
+            0.0,
+            marker_seed=2002,
+        ),
+        *complete_controls[1:],
+    ]
+    mismatched_control = browser_cpu_acceptance(mismatched_controls, "firefox")
+    if mismatched_control["pass"] or not any(
+        "marker mismatch" in reason for reason in mismatched_control["reasons"]
+    ):
+        raise RuntimeError("mismatched browser CPU control passed normalization")
+    wrong_browser_controls = [
+        synthetic_browser_cpu_run("clean", 2001, 2.0, 0.0, browser_name="chrome"),
+        *complete_controls[1:],
+    ]
+    wrong_browser = browser_cpu_acceptance(wrong_browser_controls, "firefox")
+    if wrong_browser["pass"] or not any(
+        "reports browser='chrome'" in reason for reason in wrong_browser["reasons"]
+    ):
+        raise RuntimeError("cross-browser CPU control passed normalization")
+    mixed_versions = [
+        synthetic_browser_cpu_run(
+            "clean",
+            2001,
+            2.0,
+            0.0,
+            browser_version="different",
+        ),
+        *complete_controls[1:],
+    ]
+    mixed_version = browser_cpu_acceptance(mixed_versions, "firefox")
+    if mixed_version["pass"] or not any(
+        "report 2 browser versions" in reason for reason in mixed_version["reasons"]
+    ):
+        raise RuntimeError("mixed browser-version controls passed normalization")
+    zero_denominator_controls = [
+        synthetic_browser_cpu_run("clean", 2001, 0.0, 0.0),
+        *complete_controls[1:],
+    ]
+    zero_denominator = browser_cpu_acceptance(zero_denominator_controls, "firefox")
+    if zero_denominator["pass"] or not any(
+        "denominator must be finite and >0" in reason
+        for reason in zero_denominator["reasons"]
+    ):
+        raise RuntimeError("zero browser CPU control denominator passed normalization")
     try:
         raise_on_interruption(signal.SIGTERM, None)
     except InterruptedError as error:
@@ -2379,7 +2858,8 @@ def run_self_test() -> None:
     integrity_case = parse_marker(
         f"{MARKER_PREFIX}|case|schema=1|case=integrity|profile=playable|success=1|"
         "lab_success=1|expected_failure=0|hidden_progress=0|scenario_pass=1|"
-        "gate_contract=4|cpu_gate=1|cpu_gate_applied=1|snapshot_gate=1|"
+        "gate_contract=5|cpu_gate=1|cpu_gate_applied=1|cpu_gate_mode=absolute|"
+        "snapshot_gate=1|"
         "history_gate=1|game_gate=1|rollbacks=6903|"
         "reference_hash=abcd|client_hash=abcd|event_reference_digest=ef01|"
         "event_confirmed_digest=ef01|event_residue=0|peak_snapshots=31|"
@@ -2395,9 +2875,9 @@ def run_self_test() -> None:
         raise RuntimeError(f"{description} passed self-test")
 
     expect_integrity_failure(
-        integrity_case.raw.replace("gate_contract=4", "gate_contract=3"),
+        integrity_case.raw.replace("gate_contract=5", "gate_contract=4"),
         "native",
-        "contract-3 case",
+        "contract-4 case",
     )
     expect_integrity_failure(
         integrity_case.raw.replace("peak_snapshots=31", "peak_snapshots=32"),
@@ -2406,11 +2886,22 @@ def run_self_test() -> None:
     )
     soak_case = parse_marker(
         integrity_case.raw.replace(
-            "cpu_gate=1|cpu_gate_applied=1",
-            "cpu_gate=not_applied|cpu_gate_applied=0",
+            "cpu_gate=1|cpu_gate_applied=1|cpu_gate_mode=absolute",
+            "cpu_gate=not_applied|cpu_gate_applied=0|cpu_gate_mode=diagnostic",
         )
     )
     validate_case_integrity([soak_case], "soak")
+    deferred_browser_case = parse_marker(
+        integrity_case.raw.replace(
+            "cpu_gate=1|cpu_gate_applied=1|cpu_gate_mode=absolute",
+            "cpu_gate=deferred|cpu_gate_applied=0|cpu_gate_mode=normalized_deferred",
+        )
+    )
+    validate_case_integrity(
+        [deferred_browser_case],
+        "browser-full",
+        browser_runtime=True,
+    )
     for inconsistent, inconsistent_suite in (
         (soak_case.raw.replace("cpu_gate=not_applied", "cpu_gate=1"), "soak"),
         (soak_case.raw, "native"),
@@ -2422,6 +2913,16 @@ def run_self_test() -> None:
             inconsistent_suite,
             "inconsistent CPU gate ownership",
         )
+    try:
+        validate_case_integrity(
+            [integrity_case],
+            "browser-full",
+            browser_runtime=True,
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("absolute browser CPU ownership passed self-test")
 
     def timing_series(case_id: str, samples_us: tuple[int, ...]) -> RollbackTimingSeries:
         return parse_rollback_timings(
@@ -2429,7 +2930,7 @@ def run_self_test() -> None:
                 (
                     TIMINGS_PREFIX,
                     "case",
-                    "gate_contract=4",
+                    "gate_contract=5",
                     f"case={case_id}",
                     f"sample_count={len(samples_us)}",
                     "unit=microseconds",
@@ -2462,7 +2963,7 @@ def run_self_test() -> None:
 
     runtime_provenance = parse_runtime_metric(
         f"{METRICS_PREFIX}|runtime|love=11.5.0|suite=native|"
-        f"gate_contract=4|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
+        f"gate_contract=5|profile_digest={EXPECTED_PROFILE_DIGEST}|input_version=1|"
         "snapshot_version=5|tick_rate=60"
     )
     passing_samples = (10000,) * 6897 + (33301, 33400, 34000, 35000, 40000, 46040)
@@ -2522,7 +3023,7 @@ def run_self_test() -> None:
 
     malformed_timing_lines = (
         passing_timing.raw.replace("|unit=microseconds", ""),
-        passing_timing.raw.replace("gate_contract=4", "gate_contract=3"),
+        passing_timing.raw.replace("gate_contract=5", "gate_contract=4"),
         passing_timing.raw.replace("samples=10000", "samples=bad", 1),
         passing_timing.raw.replace("samples=10000", "samples=-1", 1),
         passing_timing.raw.replace("sample_count=6903", "sample_count=6902"),
@@ -2608,16 +3109,16 @@ def run_self_test() -> None:
             description,
         )
 
-    contract_3_runtime = parse_runtime_metric(
-        runtime_provenance.raw.replace("gate_contract=4", "gate_contract=3")
+    contract_4_runtime = parse_runtime_metric(
+        runtime_provenance.raw.replace("gate_contract=5", "gate_contract=4")
     )
     expect_runtime_failure(
-        contract_3_runtime,
+        contract_4_runtime,
         passing_metric,
         [passing_timing],
         integrity_case,
         "native",
-        "contract-3 runtime provenance",
+        "contract-4 runtime provenance",
     )
     stale_profile = parse_runtime_metric(
         runtime_provenance.raw.replace(EXPECTED_PROFILE_DIGEST, "0000000000000000")
@@ -2637,6 +3138,20 @@ def run_self_test() -> None:
         integrity_case,
         "native",
         "over-budget p95 work metric",
+    )
+    browser_provenance = parse_runtime_metric(
+        runtime_provenance.raw.replace("suite=native", "suite=browser-full")
+    )
+    deferred_threshold_metric = metric_for_samples(
+        threshold_samples,
+        p95_work_ms="16.67",
+    )
+    validate_runtime_metrics(
+        [browser_provenance, deferred_threshold_metric],
+        [threshold_timing],
+        [deferred_browser_case],
+        "browser-full",
+        browser_runtime=True,
     )
 
     soak_provenance = parse_runtime_metric(
@@ -2910,7 +3425,7 @@ def main() -> int:
     evidence: dict[str, Any] = {
         "generated_at": utc_now(),
         "campaign": args.campaign,
-        "gate_contract": 4,
+        "gate_contract": int(GATE_CONTRACT),
         "mode": args.mode,
         "pass": False,
         "schema": 1,
