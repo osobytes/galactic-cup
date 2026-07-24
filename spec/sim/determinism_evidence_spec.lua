@@ -1,5 +1,6 @@
 local determinism_evidence = require("sim.determinism_evidence")
 local fixture = require("data.omp1_determinism")
+local input_frame = require("sim.input_frame")
 local input_tape = require("sim.input_tape")
 local match_snapshot = require("sim.match_snapshot")
 local placement = require("sim.placement")
@@ -71,6 +72,21 @@ t.describe("OMP-1 determinism evidence", function()
             t.eq(migrated.ownership.slots[index].team, assignment.team)
             t.eq(migrated.ownership.slots[index].player_id, assignment.player_id)
         end
+    end)
+
+    t.it("migrates only wires that were canonical within the v1 bounds", function()
+        local current = assert(input_frame.encode(assert(input_frame.neutral(0))))
+        local legacy = "1" .. current:sub(2)
+        t.eq(determinism_evidence.migrate_legacy_fixture_wire(legacy), current)
+
+        local v2_only_held = legacy:gsub("0,0,0,0", "0,0,128,0", 1)
+        t.is_true(not pcall(determinism_evidence.migrate_legacy_fixture_wire, v2_only_held))
+
+        local v2_only_edge = legacy:gsub("0,0,0,0", "0,0,0,64", 1)
+        t.is_true(not pcall(determinism_evidence.migrate_legacy_fixture_wire, v2_only_edge))
+
+        local oversized = legacy .. string.rep("0", 149)
+        t.is_true(not pcall(determinism_evidence.migrate_legacy_fixture_wire, oversized))
     end)
 
     t.it("pins the full fixed-input match on the explicit evidence command", function()

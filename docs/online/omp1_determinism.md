@@ -83,11 +83,12 @@ The input-v2 migration is deliberately fixture-specific. It changes the frozen
 fixture and ownership identity from v1 to v2 and rewrites only each canonical
 wire's leading version field. All movement axes and existing held/edge masks
 remain unchanged. General runtime decode, replay, and ownership validation
-reject v1 with `unsupported_version`; this evidence seam is not a compatibility
-decoder. Snapshot-only refreshes continue to change only `snapshot_version`.
-In either case, refresh consumes every migrated frozen frame in order to
-regenerate snapshot hashes. Bot materialization is not part of the refresh
-path.
+reject v1: frame and ownership decoding return `unsupported_version`, while
+replay rejects a v1 tape as `identity_mismatch` at `identity.input_version`.
+This evidence seam is not a compatibility decoder. Snapshot-only refreshes
+continue to change only `snapshot_version`. In either case, refresh consumes
+every migrated frozen frame in order to regenerate snapshot hashes. Bot
+materialization is not part of the refresh path.
 
 The input-v2 migration retained all 7,201 effective input rows from the
 snapshot-v5/input-v1 fixture; only wire version headers and input/ownership

@@ -60,6 +60,9 @@ local determinism_evidence = {}
 
 local LEGACY_FIXTURE_ID = "omp1-nebula-orion-eight-streams-v1"
 local MIGRATED_FIXTURE_ID = "omp1-nebula-orion-eight-streams-v2"
+local LEGACY_MAX_WIRE_BYTES = 148
+local LEGACY_MAX_HELD_MASK = 127
+local LEGACY_MAX_EDGE_MASK = 31
 
 local REQUIRED_EVENT_KINDS = {
     tackle = "tackle",
@@ -102,6 +105,36 @@ function determinism_evidence.migration_identity(source)
     return migrated
 end
 
+-- This is deliberately narrower than a runtime v1 decoder. It accepts only a
+-- canonical frozen-fixture wire whose masks and byte size were legal under v1,
+-- then changes the version header so the current decoder can validate it.
+---@param wire string
+---@return string
+function determinism_evidence.migrate_legacy_fixture_wire(wire)
+    assert(type(wire) == "string", "legacy fixture frame must be a string")
+    assert(#wire <= LEGACY_MAX_WIRE_BYTES, "legacy fixture frame exceeds the v1 wire bound")
+
+    local fields = {}
+    for field in (wire .. "|"):gmatch("([^|]*)|") do
+        fields[#fields + 1] = field
+    end
+    assert(#fields == input_frame.SLOT_COUNT + 2, "legacy fixture frame has invalid fields")
+    assert(fields[1] == "1", "legacy fixture frame has an invalid version")
+    for index = 3, #fields do
+        local _, _, held, edges = fields[index]:match("^(%-?%d+),(%-?%d+),(%d+),(%d+)$")
+        assert(held and edges, "legacy fixture sample has invalid fields")
+        local held_mask = assert(tonumber(held))
+        local edge_mask = assert(tonumber(edges))
+        assert(held_mask <= LEGACY_MAX_HELD_MASK, "legacy fixture held mask exceeds v1")
+        assert(edge_mask <= LEGACY_MAX_EDGE_MASK, "legacy fixture edge mask exceeds v1")
+    end
+
+    local canonical_wire = tostring(input_frame.VERSION) .. wire:sub(2)
+    local decoded, err = input_frame.decode(canonical_wire)
+    assert(decoded, "legacy fixture frame is not canonical: " .. tostring(err))
+    return canonical_wire
+end
+
 ---@param identity InputTapeIdentity?
 ---@return MatchState
 local function new_state(identity)
@@ -136,8 +169,7 @@ local function fixture_frames()
     for index, wire in ipairs(wires) do
         local canonical_wire = wire
         if fixture.identity.input_version == 1 then
-            assert(wire:sub(1, 2) == "1|", "legacy fixture frame has an invalid version prefix")
-            canonical_wire = tostring(input_frame.VERSION) .. wire:sub(2)
+            canonical_wire = determinism_evidence.migrate_legacy_fixture_wire(wire)
         end
         local decoded, err = input_frame.decode(canonical_wire)
         assert(decoded, ("fixture frame %d is malformed: %s"):format(index - 1, tostring(err)))
