@@ -153,6 +153,26 @@ other soccer rule.
 - Existing keeper-possession protection and soccer distribution rules remain
   unchanged.
 
+## Fixed-tick contact phase
+
+Combat contacts use snapshot-then-resolve semantics. After authoritative
+movement for a fixed tick, collect every active melee and projectile candidate
+from the same pre-contact player/action snapshot. Select each source's single
+target by the rule above before applying any combat outcome. A contact selected
+for this phase is not retroactively canceled by an interruption produced in the
+same phase, so two active opponents may trade.
+
+Evaluate guard and recovery immunity from that same snapshot. When multiple
+sources select one target, the target accepts at most one displacement,
+interruption, ball spill, or guard recoil in the phase. Choose the dominant
+contact by longest interruption, then greatest displacement, then lowest
+attacker match-player index, then lowest authoritative source sequence.
+Guard or immunity suppresses all selected outcomes for that target; guard may
+apply the dominant contact's single bounded recoil. Every source still pays its
+commitment and produces a stable contact result, and every contacting projectile
+expires. Apply the chosen target outcomes in match-player-index order. This
+ordering is authoritative simulation behavior, not presentation timing.
+
 ## State transitions
 
 ```text
@@ -192,7 +212,7 @@ win. An ignored edge is not queued for later.
 | Shoot, pass, punt, or throw commit/release | No | Soccer action wins |
 | Standing tackle, jockey, or slide | No | Existing challenge wins |
 | Juke / dodge | No | Juke wins and supplies combat immunity |
-| Equipment wind-up, active, aim, guard, or recovery | Already committed | Ignore new soccer/equipment edges |
+| Equipment wind-up, active, aim, guard, or recovery | Already committed | Consume/latch the matching guard or ranged release; ignore new press and soccer edges |
 | Aerial reception, strike, or recovery | No | Finish aerial state |
 | Stagger or knockback | No | Finish forced state |
 | Recovery immunity timer only | Yes | Player acts normally; incoming combat outcomes are suppressed |
@@ -202,6 +222,13 @@ win. An ignored edge is not queued for later.
 Holding guard or ranged input through an ineligible state does not synthesize a
 press edge. The source must release and press again. This prevents local,
 recorded, and predicted input from disagreeing about when an action began.
+
+An eligible carrier's held shoot or pass control is an existing soccer
+commitment: it starts or continues charge and blocks a same-tick equipment
+press. A shoot/pass release also wins that tick. Once equipment commits, shot
+and pass charge values reset to zero, remain zero, and do not accumulate until
+equipment recovery ends. This prevents a hidden soccer action from charging
+under guard or ranged aim.
 
 Ordinary sprinting does not block an equipment press. Once equipment commits,
 the family movement multiplier replaces the sprint boost and sprint stamina
@@ -216,7 +243,19 @@ equipment commitment, and an equipment action cannot cancel it.
 
 Combat-caused continuous loss of control is capped at 30 ticks (`0.5s`).
 After stagger or knockback ends, the player receives at least 45 ticks
-(`0.75s`) of interruption immunity:
+(`0.75s`) of interruption immunity.
+
+Before immunity begins:
+
+- the first interruption records a control-loss chain start and a hard expiry
+  30 ticks later;
+- a combat hit during that forced state may extend the current forced-state
+  expiry to the later of its existing expiry or the new family's interruption,
+  but never beyond the chain's hard expiry;
+- that extending hit does not add displacement or spill the ball again, and it
+  never shortens or replaces the current forced state;
+
+Once immunity begins:
 
 - new combat contacts cannot add stagger, knockback, or ball spill;
 - the attacker still pays active, recovery, and cooldown costs;
@@ -260,6 +299,9 @@ does not silently accept a repeated-family lineup.
 | Off-ball opponent | Legal geometric target; full commitment/cooldown applies |
 | Missing predicted input | Held aim/guard may persist; press/release edges are always cleared |
 | Fast equipment tap between ticks | Both edges mean press then release: one strike, guard raise/lower, or one ranged shot after minimum aim |
+| Repeated hit before immunity | Extend the forced-state expiry without another displacement/spill, never past 30 ticks from the first hit |
+| Simultaneous trade | Both pre-contact-snapshot contacts resolve; neither same-phase interruption retroactively cancels the other |
+| Multiple attackers, one target | Stable dominant contact supplies the sole target outcome; all sources pay commitment |
 | Repeated hit attempt | Immunity prevents added disable/spill while every attacker pays commitment |
 
 ## Downstream implementation obligations
