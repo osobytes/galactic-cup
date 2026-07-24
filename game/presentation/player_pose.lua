@@ -52,32 +52,57 @@ end
 ---@param combat CombatPlayerPresentation?
 ---@return PlayerPoseSelection
 function player_pose.select(player, combat)
-    if player.is_keeper and player.dive_timer > 0 then
-        return selection("keeper_dive", "soccer")
-    elseif player.aerial_timer > 0 and player.aerial_style == "bicycle" then
-        return selection("aerial_bicycle", "soccer")
-    elseif player.aerial_timer > 0 and player.aerial_style ~= nil then
-        return selection("aerial_action", "soccer")
-    elseif combat and combat.forced_state == "knockback" and combat.forced_ticks > 0 then
-        return selection("combat_knockback", "combat")
-    elseif combat and combat.forced_state == "stagger" and combat.forced_ticks > 0 then
-        return selection("combat_stagger", "combat")
-    elseif combat and combat.phase == "guard" then
-        return selection("combat_guard", "combat")
-    elseif combat and combat.phase == "active" then
-        return selection("combat_active", "combat")
-    elseif combat and combat.phase == "windup" then
-        return selection("combat_windup", "combat")
-    elseif combat and combat.phase == "aim" then
-        return selection("combat_aim", "combat")
-    elseif combat and combat.phase == "recovery" then
-        return selection("combat_recovery", "combat")
-    elseif player.windup_timer > 0 then
-        return selection("soccer_windup", "soccer")
-    elseif player.slide_timer > 0 then
-        return selection("slide", "soccer")
+    ---@type PlayerPoseSelection[]
+    local candidates = {}
+    local function add(id, source)
+        candidates[#candidates + 1] = selection(id, source)
     end
-    return selection("locomotion", "locomotion")
+
+    if player.is_keeper and player.dive_timer > 0 then
+        add("keeper_dive", "soccer")
+    end
+    if player.aerial_timer > 0 and player.aerial_style == "bicycle" then
+        add("aerial_bicycle", "soccer")
+    elseif player.aerial_timer > 0 and player.aerial_style ~= nil then
+        add("aerial_action", "soccer")
+    end
+    if combat and combat.forced_state == "knockback" and combat.forced_ticks > 0 then
+        add("combat_knockback", "combat")
+    elseif combat and combat.forced_state == "stagger" and combat.forced_ticks > 0 then
+        add("combat_stagger", "combat")
+    end
+    if combat and combat.phase == "guard" then
+        add("combat_guard", "combat")
+    elseif combat and combat.phase == "active" then
+        add("combat_active", "combat")
+    elseif combat and combat.phase == "windup" then
+        add("combat_windup", "combat")
+    elseif combat and combat.phase == "aim" then
+        add("combat_aim", "combat")
+    elseif combat and combat.phase == "recovery" then
+        add("combat_recovery", "combat")
+    end
+    if player.windup_timer > 0 then
+        add("soccer_windup", "soccer")
+    end
+    if player.slide_timer > 0 then
+        add("slide", "soccer")
+    end
+    add("locomotion", "locomotion")
+
+    local best = candidates[1]
+    for index = 2, #candidates do
+        local candidate = candidates[index]
+        -- Equal priorities use pose id order so selection never depends on
+        -- candidate discovery or condition ordering.
+        if
+            candidate.priority > best.priority
+            or (candidate.priority == best.priority and candidate.id < best.id)
+        then
+            best = candidate
+        end
+    end
+    return best
 end
 
 return player_pose

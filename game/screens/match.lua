@@ -371,8 +371,9 @@ function Match:restart()
         end
     end
     assert(
-        not self._opts.combat_enabled or initial_combat ~= nil,
-        "combat-enabled matches require a CombatMatchState companion"
+        (initial_combat ~= nil) == (self._opts.combat_enabled == true),
+        initial_combat ~= nil and "combat-bearing rollback snapshots require combat_enabled = true"
+            or "combat-enabled matches require a CombatMatchState companion"
     )
     if rollback_options then
         self._rollback_lab =

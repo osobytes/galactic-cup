@@ -141,4 +141,30 @@ t.describe("shared player pose priority", function()
             "the extensible priority contract is explicit"
         )
     end)
+
+    t.it("chooses overlapping poses from declared priority with a stable tie rule", function()
+        local state = fixture()
+        local player = state.players[2]
+        player.windup_timer = 0.2
+        player.slide_timer = 0.2
+
+        local original_slide = player_pose.PRIORITY.slide
+        local ok, result = pcall(function()
+            local selected = {
+                default = player_pose.select(player, nil).id,
+            }
+            player_pose.PRIORITY.slide = player_pose.PRIORITY.soccer_windup + 1
+            selected.raised = player_pose.select(player, nil).id
+            player_pose.PRIORITY.slide = player_pose.PRIORITY.soccer_windup
+            selected.tied = player_pose.select(player, nil).id
+            return selected
+        end)
+        player_pose.PRIORITY.slide = original_slide
+        assert(ok, result)
+        ---@cast result table<string, PlayerPoseId>
+
+        t.eq(result.default, "soccer_windup")
+        t.eq(result.raised, "slide")
+        t.eq(result.tied, "slide", "equal priorities choose the lexically smaller pose id")
+    end)
 end)

@@ -88,6 +88,32 @@ t.describe("goal replay buffer", function()
         t.eq(assert(frame._combat_state).player_ids[2], frame.players[2].id)
     end)
 
+    t.it("retains the corrected combat companion when replacing a rollback tail", function()
+        tuning.reset()
+        replay.reset()
+        local state =
+            match.new({ home = teams.nebula, away = teams.orion, field = { w = 960, h = 540 } })
+        local combat_state = combat.new_state(state)
+        for boundary = 0, 39 do
+            replay.record_boundary(boundary, state, combat_state)
+        end
+
+        replay.truncate_from(20)
+        combat_state.players[2].phase = "recovery"
+        combat_state.players[2].phase_ticks = 9
+        combat_state.players[2].cooldown_ticks = 47
+        for boundary = 20, 39 do
+            replay.record_boundary(boundary, state, combat_state)
+        end
+
+        t.is_true(replay.start_at("home", 39))
+        local frame = assert(replay.step(1 / 60))
+        local corrected = assert(frame._combat_state)
+        t.eq(corrected.players[2].phase, "recovery")
+        t.eq(corrected.players[2].phase_ticks, 9)
+        t.eq(corrected.players[2].cooldown_ticks, 47)
+    end)
+
     t.it("celebrates before cutting to the slow-motion replay", function()
         tuning.reset()
         replay.reset()
