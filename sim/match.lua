@@ -3668,6 +3668,13 @@ local function update_ball(s, dt, inputs, combat_state)
 
     -- Descending high-ball reception and first-time strikes. Geometry,
     -- difficulty, and seeded quality live in sim.aerial.
+    local aerial_ineligible
+    if combat_state then
+        aerial_ineligible = {}
+        for player_index, runtime in ipairs(combat_state.players) do
+            aerial_ineligible[player_index] = runtime.forced_ticks > 0
+        end
+    end
     local aerial_redirected = aerial.resolve_play(s, inputs, {
         ground_grab_height = GROUND_GRAB_HEIGHT,
         stick_ahead = STICK_AHEAD,
@@ -3675,7 +3682,7 @@ local function update_ball(s, dt, inputs, combat_state)
         release_cd = RELEASE_CD,
         clear_header_speed = CLEAR_HEADER_SPEED,
         volley_speed = VOLLEY_SPEED,
-    })
+    }, aerial_ineligible)
     if aerial_redirected then
         -- A successful first touch or strike owns a new presentation trajectory.
         -- Clear style and the one-shot guard even when x direction is unchanged,
@@ -3698,6 +3705,7 @@ local function update_ball(s, dt, inputs, combat_state)
         for i, p in ipairs(s.players) do
             if
                 p.is_keeper
+                and (not combat_state or assert(combat_state.players[i]).forced_ticks == 0)
                 and not p.save_pending -- a committed save resolves on contact instead
                 and p.receive_timer <= 0 -- a teammate's pass is taken with the FEET below
                 and in_claim_zone(s, p)
@@ -3719,6 +3727,7 @@ local function update_ball(s, dt, inputs, combat_state)
                 -- first touch is theirs); everyone else needs it slowed down.
                 local eligible = (p.is_keeper or p.receive_timer > 0 or speed < POSSESS_MAX_SPEED)
                     and s.ball_z <= GROUND_GRAB_HEIGHT
+                    and (not combat_state or assert(combat_state.players[i]).forced_ticks == 0)
                 local d = p.pos:dist(s.ball)
                 if eligible and d <= reach and (not best_dist or d < best_dist) then
                     best_dist = d
@@ -3979,6 +3988,7 @@ function match.step(s, dt, input, combat_state)
     end
     update_ball(s, dt, inputs, combat_state)
     if combat_state then
+        assert(combat_module).sanitize_forced_players(s, combat_state)
         assert(combat_module).finish_tick(combat_state)
     end
 
@@ -4049,7 +4059,7 @@ function match.step(s, dt, input, combat_state)
     local scorer = check_goal(s, prev_ball_x)
     if scorer then
         if combat_state then
-            assert(combat_module).reset(combat_state)
+            assert(combat_module).reset_for_kickoff(combat_state)
         end
         for _, player in ipairs(s.players) do
             player.keeper_set = 0

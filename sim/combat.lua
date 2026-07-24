@@ -1,5 +1,6 @@
 local Vec2 = require("core.vec2")
 local fixed_clock = require("sim.fixed_clock")
+local match_snapshot = require("sim.match_snapshot")
 local action_families = require("data.action_families")
 local loadouts = require("data.loadouts")
 local player_pool = require("data.players")
@@ -134,6 +135,10 @@ end
 ---@param players_by_id table<string, PlayerData>|PlayerData[]?
 ---@return CombatMatchState
 function combat.new_state(state, players_by_id)
+    match_snapshot.mark_unsupported(
+        state,
+        "combat-active match snapshots are unsupported until issue #111"
+    )
     local by_id = normalize_players_by_id(players_by_id)
     local runtimes = {}
     local player_ids = {}
@@ -225,6 +230,7 @@ local function player_has_soccer_commitment(player)
         or player.aerial_timer > 0
         or player.aerial_recovery > 0
         or player.windup_timer > 0
+        or player.windup_shot ~= nil
 end
 
 ---@param state CombatMatchState
@@ -282,6 +288,7 @@ function combat.prepare_inputs(state, combat_state, inputs, equipment_ineligible
             "combat player identity does not match fixture"
         )
     end
+    combat.sanitize_forced_players(state, combat_state)
     combat.clear_events(combat_state)
 
     local prepared = {}
@@ -750,6 +757,7 @@ local function cancel_soccer_commitments(player)
     player.aerial_style = nil
     player.aerial_outcome = nil
     player.aerial_jump = 0
+    player.receive_timer = 0
     player.windup_timer = 0
     player.windup_shot = nil
     player.charge = 0
@@ -757,6 +765,16 @@ local function cancel_soccer_commitments(player)
     player.pass_target = nil
     player.sprinting = false
     player.run_vel = Vec2.new(0, 0)
+end
+
+---@param state MatchState
+---@param combat_state CombatMatchState
+function combat.sanitize_forced_players(state, combat_state)
+    for player_index, runtime in ipairs(combat_state.players) do
+        if runtime.forced_ticks > 0 then
+            cancel_soccer_commitments(state.players[player_index])
+        end
+    end
 end
 
 ---@param state MatchState
@@ -978,6 +996,14 @@ function combat.reset(combat_state)
     combat_state.projectiles = {}
     combat_state.events = {}
     combat_state.next_source_sequence = 1
+end
+
+---@param combat_state CombatMatchState
+function combat.reset_for_kickoff(combat_state)
+    for index, runtime in ipairs(combat_state.players) do
+        combat_state.players[index] = new_player_state(runtime.family_id)
+    end
+    combat_state.projectiles = {}
 end
 
 ---@param combat_state CombatMatchState

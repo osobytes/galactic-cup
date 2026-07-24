@@ -76,7 +76,18 @@ Presentation, cosmetic, theme, and equipment-appearance ids never enter the
 companion. `data/action_families.lua` remains the sole tuning authority.
 Combat-active snapshot/hash/rollback integration deliberately returns an
 unsupported error until issue #111 versions every new authoritative field and
-event together; capturing only the base soccer state would be incomplete.
+event together. Creating the companion marks the paired match state so both
+public and rollback-owned snapshot capture fail loudly instead of accepting
+only the base soccer half.
+
+Kickoff resets clear action, forced-state, and projectile runtime, but preserve
+the scoring tick's event batch and the match-lifetime action sequence. The next
+tick's normal event clear still bounds presentation events to one simulation
+tick without reusing confirmation identity.
+
+Forced players are ineligible for loose-ball collection and aerial candidate
+selection. Their pending soccer commitments are cleared on impact and sanitized
+again after ball actions, so a same-tick pass cannot re-arm a staggered receiver.
 
 Phase counters use inclusive fixed-tick windows: a six-tick wind-up committed
 on tick 0 is active first on tick 6. Melee reach is measured from the source
